@@ -333,6 +333,25 @@ jobs:
           curl -fL --retry 3 -o artifacts/ffmpeg-source-46d899d7a0.tar.gz             https://github.com/FFmpeg/FFmpeg/archive/46d899d7a0.tar.gz
           curl -fL --retry 3 -o artifacts/FFmpeg-LGPLv3.txt             https://raw.githubusercontent.com/FFmpeg/FFmpeg/46d899d7a0/COPYING.LGPLv3
 
+      - name: Generate SBOM
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > "artifacts/uvnvr-${VERSION}-sbom.spdx.json" <<EOF
+          {
+            "spdxVersion": "SPDX-2.3",
+            "dataLicense": "CC0-1.0",
+            "name": "UvNVR ${VERSION}",
+            "documentNamespace": "https://github.com/Antruly/uvnvr/releases/${GITHUB_REF_NAME}",
+            "packages": [
+              {"name": "UvNVR", "SPDXID": "SPDXRef-Package-UvNVR", "licenseConcluded": "MIT"},
+              {"name": "libuvcpp", "SPDXID": "SPDXRef-Package-libuvcpp", "licenseConcluded": "MIT"},
+              {"name": "FFmpeg", "SPDXID": "SPDXRef-Package-FFmpeg", "licenseConcluded": "LGPL-3.0-or-later"},
+              {"name": "OpenSSL", "SPDXID": "SPDXRef-Package-OpenSSL", "licenseConcluded": "Apache-2.0"},
+              {"name": "SQLite", "SPDXID": "SPDXRef-Package-SQLite", "licenseConcluded": "CC0-1.0"}
+            ]
+          }
+          EOF
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -342,4 +361,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "UvNVR ${GITHUB_REF_NAME}" \
             --generate-notes \
-            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name 'FFmpeg-LGPLv3.txt' \) -print)
+            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name 'FFmpeg-LGPLv3.txt' -o -name '*sbom*' \) -print)
