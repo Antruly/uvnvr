@@ -36,6 +36,16 @@ All notable changes to UvNVR are documented here. The format follows
 - 0.1.0 is a release candidate. WebRTC, cloud access, face/plate recognition and advanced
   analytics are outside this release. See `docs/development-plan.md` for details.
 
-## [0.1.0] - Not released
+## [0.1.0] - 2026-10-21
 
-Planned first release. See `docs/development-plan.md`.
+First release candidate with the complete core NVR loop:
+
+- ONVIF discovery/probe and RTSP/Hikvision/Dahua channel onboarding.
+- Live preview, layouts, recording plans, MPEG-TS segments, SQLite index
+  and loop/alert storage policies.
+- Playback over WebSocket with read-ahead and segment download.
+- RTSP output, snapshots, alerts, SMTP email, users/roles, audit and help.
+- Linux x64/arm64, Windows x64/arm64 and macOS x64/arm64 packaging matrix.
+
+Known limitations are listed in `README.md`. WebRTC, cloud access and advanced
+analytics are outside 0.1.0.
