@@ -4803,6 +4803,28 @@ void App::MonitorRun() {
                      "Channel " + channel.name + " is back online", "");
         }
       }
+      if (previous == last_channel_state_.end() || previous->second != state) {
+        uvcpp::uvcpp_db_params update;
+        update.add(state);
+        update.add(status.error);
+        update.add(state == "online" ? now : 0);
+        update.add(now);
+        update.add((state == "offline" || state == "error") ? now : 0);
+        update.add(now);
+        update.add(channel.id);
+        std::string state_error;
+        Exec("UPDATE channels SET last_status=?, last_error=?, "
+             "last_online_at=CASE WHEN ? > 0 THEN ? ELSE last_online_at END, "
+             "last_offline_at=CASE WHEN ? > 0 THEN ? ELSE last_offline_at END WHERE id=?",
+             update, nullptr, &state_error);
+        uvcpp::uvcpp_db_params event;
+        event.add(channel.id);
+        event.add(state);
+        event.add(status.error);
+        event.add(now);
+        Exec("INSERT INTO channel_events(channel_id, state, reason, at) VALUES(?, ?, ?, ?)", event,
+             nullptr, &state_error);
+      }
       last_channel_state_[channel.id] = state;
 
       if (state != "online" || motion_channels >= 4)
