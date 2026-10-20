@@ -4,8 +4,11 @@
 !ifndef VERSION
   !define VERSION "0.1.0"
 !endif
+!ifndef ARCH
+  !define ARCH "x64"
+!endif
 !ifndef SOURCE
-  !define SOURCE "..\dist-packages\uvnvr-${VERSION}-windows-x64"
+  !define SOURCE "..\dist-packages\uvnvr-${VERSION}-windows-${ARCH}"
 !endif
 !ifndef ROOT
   !define ROOT ".."
@@ -15,7 +18,7 @@ Name "UvNVR ${VERSION}"
 !ifndef OUTDIR
   !define OUTDIR "..\dist-packages"
 !endif
-OutFile "${OUTDIR}\uvnvr-${VERSION}-windows-x64-setup.exe"
+OutFile "${OUTDIR}\uvnvr-${VERSION}-windows-${ARCH}-setup.exe"
 InstallDir "$PROGRAMFILES64\UvNVR"
 InstallDirRegKey HKLM "Software\UvNVR" "InstallDir"
 RequestExecutionLevel admin

@@ -19,28 +19,43 @@ set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
 # reproducible developer setup use. Without it, find_package() is tried first.
 find_package(PkgConfig QUIET)
 find_package(OpenSSL REQUIRED)
-# libuvcpp release archives embed libuv but do not export its C symbols; the
-# service calls a few standalone libuv helpers (memory, CPU, hostname).
-pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
 
 if(UVNVR_LIBUVCPP_ROOT)
   if(NOT EXISTS "${UVNVR_LIBUVCPP_ROOT}/lib/pkgconfig/uvcpp.pc")
-    message(FATAL_ERROR
-      "UVNVR_LIBUVCPP_ROOT=${UVNVR_LIBUVCPP_ROOT} does not contain lib/pkgconfig/uvcpp.pc")
+    if(MSVC)
+      find_path(UVNVR_UVCPP_INCLUDE_DIR uvcpp.h
+                PATHS "${UVNVR_LIBUVCPP_ROOT}/include" NO_DEFAULT_PATH)
+      find_library(UVNVR_UVCPP_LIBRARY NAMES uvcpp
+                   PATHS "${UVNVR_LIBUVCPP_ROOT}/lib" NO_DEFAULT_PATH)
+      if(NOT UVNVR_UVCPP_INCLUDE_DIR OR NOT UVNVR_UVCPP_LIBRARY)
+        message(FATAL_ERROR "cannot find uvcpp headers/library under ${UVNVR_LIBUVCPP_ROOT}")
+      endif()
+      add_library(uvcpp_archive INTERFACE)
+      target_include_directories(uvcpp_archive INTERFACE "${UVNVR_UVCPP_INCLUDE_DIR}")
+      target_link_libraries(uvcpp_archive INTERFACE "${UVNVR_UVCPP_LIBRARY}")
+      set(UVP_UVCPP_TARGET uvcpp_archive)
+      set(UVP_UVCPP_ROUTE "MSVC archive (${UVNVR_LIBUVCPP_ROOT})")
+      set(UVNVR_UVCPP_ARCHIVE_ROUTE TRUE)
+    else()
+      message(FATAL_ERROR
+        "UVNVR_LIBUVCPP_ROOT=${UVNVR_LIBUVCPP_ROOT} does not contain lib/pkgconfig/uvcpp.pc")
+    endif()
   endif()
-  if(WIN32)
-    set(_uvnvr_pkg_sep ";")
-  else()
-    set(_uvnvr_pkg_sep ":")
+  if(NOT UVNVR_UVCPP_ARCHIVE_ROUTE)
+    if(WIN32)
+      set(_uvnvr_pkg_sep ";")
+    else()
+      set(_uvnvr_pkg_sep ":")
+    endif()
+    set(ENV{PKG_CONFIG_PATH}
+        "${UVNVR_LIBUVCPP_ROOT}/lib/pkgconfig${_uvnvr_pkg_sep}$ENV{PKG_CONFIG_PATH}")
+    if(NOT PkgConfig_FOUND)
+      message(FATAL_ERROR "pkg-config is required for the libuvcpp release-archive route")
+    endif()
+    pkg_check_modules(UVCPP REQUIRED IMPORTED_TARGET "uvcpp>=1.8.1")
+    set(UVP_UVCPP_TARGET PkgConfig::UVCPP)
+    set(UVP_UVCPP_ROUTE "pkg-config (${UVCPP_VERSION})")
   endif()
-  set(ENV{PKG_CONFIG_PATH}
-      "${UVNVR_LIBUVCPP_ROOT}/lib/pkgconfig${_uvnvr_pkg_sep}$ENV{PKG_CONFIG_PATH}")
-  if(NOT PkgConfig_FOUND)
-    message(FATAL_ERROR "pkg-config is required for the libuvcpp release-archive route")
-  endif()
-  pkg_check_modules(UVCPP REQUIRED IMPORTED_TARGET "uvcpp>=1.8.1")
-  set(UVP_UVCPP_TARGET PkgConfig::UVCPP)
-  set(UVP_UVCPP_ROUTE "pkg-config (${UVCPP_VERSION})")
 else()
   find_package(uvcpp 1.8.1 CONFIG QUIET)
   if(uvcpp_FOUND)
@@ -86,6 +101,7 @@ add_executable(uvnvr
   src/playback.cpp
   src/rtsp.cpp
   src/ntp.cpp
+  src/platform.cpp
 )
 
 target_include_directories(uvnvr PRIVATE
@@ -103,7 +119,7 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 
-target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL PkgConfig::LIBUV)
+target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
 
 # The release archive is a shared library outside the normal loader path.
 if(UVNVR_LIBUVCPP_ROOT)

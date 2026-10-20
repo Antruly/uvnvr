@@ -1,5 +1,7 @@
 #include "media.h"
 
+#include "platform.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -67,11 +69,9 @@ std::string ResolveFfmpeg() {
   if (const char* env = std::getenv("UVNVR_FFMPEG"); env != nullptr && env[0] != '\0') {
     return env;
   }
-  char exe[4096] = {0};
-  size_t exe_len = sizeof(exe);
-  if (uv_exepath(exe, &exe_len) == 0) {
-    const std::filesystem::path dir =
-        std::filesystem::path(std::string(exe, exe_len)).parent_path();
+  const std::string exe_path = platform::ExecutablePath();
+  if (!exe_path.empty()) {
+    const std::filesystem::path dir = std::filesystem::path(exe_path).parent_path();
 #ifdef _WIN32
     const std::vector<std::string> names = {"ffmpeg.exe", "ffmpeg"};
 #else

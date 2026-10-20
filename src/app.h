@@ -18,7 +18,6 @@
 #include <req/uvcpp_work.h>
 #include <string>
 #include <unordered_map>
-#include <uv.h>
 #include <vector>
 #include <webapp/uvcpp_web_app.h>
 
@@ -139,8 +138,6 @@ private:
   bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                             int64_t start_ms, int64_t end_ms, std::string* token,
                             int64_t* expires_at, std::string* error);
-  static void OnSignal(uv_signal_t* handle, int signum);
-  void Shutdown();
   void RegisterMiddleware();
   void RegisterPublicRoutes();
   void RegisterCoreRoutes();
@@ -221,7 +218,6 @@ private:
   std::map<int64_t, std::vector<uint8_t>> last_motion_frame_;
   std::map<int64_t, int64_t> motion_cooldown_;
   int64_t last_storage_alert_ms_ = 0;
-  std::array<uv_signal_t*, 2> signal_handles_{nullptr, nullptr};
   std::vector<unsigned char> secret_key_;
   std::mutex tickets_mutex_;
   std::unordered_map<std::string, StreamTicket> tickets_;

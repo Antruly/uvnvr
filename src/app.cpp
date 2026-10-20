@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "onvif.h"
+#include "platform.h"
 
 #include <algorithm>
 #include <array>
@@ -1305,54 +1306,19 @@ AuthResult App::Authenticate(const std::string& cookie_token, const std::string&
 
 json App::BuildSummary() {
   json result;
-
-  char hostname[256] = {0};
-  size_t hostname_len = sizeof(hostname);
-  if (uv_os_gethostname(hostname, &hostname_len) != 0)
-    hostname[0] = '\0';
-
-  uv_utsname_t uname{};
-  std::string os_name = "unknown";
-  if (uv_os_uname(&uname) == 0) {
-    os_name = std::string(uname.sysname) + " " + uname.release;
-  }
-
-  double uptime = 0;
-  uv_uptime(&uptime);
-
-  const uint64_t total_memory = uv_get_total_memory();
-  const uint64_t free_memory = uv_get_free_memory();
+  const std::string hostname = platform::HostName();
+  const std::string os_name = platform::OsDescription();
+  const double uptime = platform::UptimeSeconds();
+  const uint64_t total_memory = platform::TotalMemoryBytes();
+  const uint64_t free_memory = platform::FreeMemoryBytes();
   const uint64_t used_memory = total_memory > free_memory ? total_memory - free_memory : 0;
   const double memory_percent =
       total_memory == 0 ? 0.0 : (100.0 * static_cast<double>(used_memory) / total_memory);
-
-  uv_cpu_info_t* cpu_info = nullptr;
-  int cpu_count = 0;
-  uint64_t total_ticks = 0;
-  uint64_t idle_ticks = 0;
-  if (uv_cpu_info(&cpu_info, &cpu_count) == 0) {
-    for (int i = 0; i < cpu_count; ++i) {
-      const auto& times = cpu_info[i].cpu_times;
-      total_ticks += times.user + times.nice + times.sys + times.idle + times.irq;
-      idle_ticks += times.idle;
-    }
-    uv_free_cpu_info(cpu_info, cpu_count);
-  }
-
+  const int cpu_count = platform::CpuCount();
   double cpu_percent = 0.0;
   {
     std::lock_guard<std::mutex> lock(metrics_mutex_);
-    if (last_cpu_total_ == 0 && total_ticks > 0) {
-      // First sample: report the average since boot rather than a misleading 0%.
-      cpu_percent = 100.0 * (1.0 - static_cast<double>(idle_ticks) / total_ticks);
-    } else if (last_cpu_total_ != 0 && total_ticks > last_cpu_total_) {
-      const uint64_t delta_total = total_ticks - last_cpu_total_;
-      const uint64_t delta_idle = idle_ticks >= last_cpu_idle_ ? idle_ticks - last_cpu_idle_ : 0;
-      cpu_percent = 100.0 * (1.0 - static_cast<double>(delta_idle) / delta_total);
-    }
-    cpu_percent = std::clamp(cpu_percent, 0.0, 100.0);
-    last_cpu_total_ = total_ticks;
-    last_cpu_idle_ = idle_ticks;
+    cpu_percent = platform::CpuUsagePercent(&last_cpu_total_, &last_cpu_idle_);
   }
 
   uint64_t disk_total = 0;
@@ -1479,11 +1445,9 @@ void App::RegisterMiddleware() {
 
 void App::RegisterStatic() {
   std::string web_root = "./frontend/dist";
-  char exe[4096] = {0};
-  size_t exe_len = sizeof(exe);
-  if (uv_exepath(exe, &exe_len) == 0) {
-    const std::filesystem::path dir =
-        std::filesystem::path(std::string(exe, exe_len)).parent_path();
+  const std::string exe_path = platform::ExecutablePath();
+  if (!exe_path.empty()) {
+    const std::filesystem::path dir = std::filesystem::path(exe_path).parent_path();
     const std::vector<std::filesystem::path> candidates = {
         dir / ".." / "share" / "uvnvr" / "frontend" / "dist",
         dir / ".." / "share" / "uvnvr" / "web",
@@ -3456,27 +3420,6 @@ bool App::ValidateStreamTicket(const std::string& token, StreamTicket* ticket) {
   *ticket = it->second;
   tickets_.erase(it);
   return true;
-}
-
-void App::OnSignal(uv_signal_t* handle, int signum) {
-  (void)signum;
-  App* app = static_cast<App*>(handle->data);
-  if (app != nullptr)
-    app->Shutdown();
-}
-
-void App::Shutdown() {
-  if (media_)
-    media_->Stop();
-  for (auto*& handle : signal_handles_) {
-    if (handle != nullptr) {
-      uv_signal_stop(handle);
-      uv_close(reinterpret_cast<uv_handle_t*>(handle),
-               [](uv_handle_t* h) { delete reinterpret_cast<uv_signal_t*>(h); });
-      handle = nullptr;
-    }
-  }
-  web_.stop();
 }
 
 void App::RegisterChannelRoutes() {
