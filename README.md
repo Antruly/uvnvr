@@ -113,6 +113,10 @@ cmake --build build -j
 
 Open <http://127.0.0.1:8080>. Health check: <http://127.0.0.1:8080/healthz>.
 
+For a local HTTPS listener with a generated certificate, run
+`./build/uvnvr --port 8080 --tls-self-signed`. Production deployments should provide
+`UVNVR_TLS_CERT` and `UVNVR_TLS_KEY` instead of using the development certificate.
+
 For frontend development, run `npm run dev` in `frontend/` (Vite proxies `/api`, `/healthz`
 and `/ws` to `127.0.0.1:8080`).
 

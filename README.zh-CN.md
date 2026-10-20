@@ -108,6 +108,9 @@ cmake --build build -j
 
 浏览器打开 <http://127.0.0.1:8080>；健康检查 <http://127.0.0.1:8080/healthz>。
 
+本地 HTTPS 调试可运行 `./build/uvnvr --port 8080 --tls-self-signed`，使用自动生成的本机证书。
+生产环境应通过 `UVNVR_TLS_CERT` 与 `UVNVR_TLS_KEY` 提供正式证书，不要使用开发证书。
+
 前端开发时在 `frontend/` 执行 `npm run dev`，Vite 会把 `/api`、`/healthz`、`/ws` 代理到
 `127.0.0.1:8080`。
 

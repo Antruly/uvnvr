@@ -18,6 +18,7 @@ struct Options {
   int port = 8080;
   bool help = false;
   bool version = false;
+  bool tls_self_signed = false;
 };
 
 void PrintUsage(const char* argv0) {
@@ -25,6 +26,7 @@ void PrintUsage(const char* argv0) {
             << "Usage: " << argv0 << " [options]\n\n"
             << "Options:\n"
             << "  --port <port>   HTTP/HTTPS listen port (default: 8080)\n"
+            << "  --tls-self-signed  Serve HTTPS with a generated localhost certificate (development)\n"
             << "  --version       Print version and exit\n"
             << "  --help          Print this help and exit\n\n"
             << "Environment:\n"
@@ -51,6 +53,8 @@ Options ParseOptions(int argc, char** argv) {
       options.help = true;
     } else if (arg == "--version" || arg == "-v") {
       options.version = true;
+    } else if (arg == "--tls-self-signed") {
+      options.tls_self_signed = true;
     } else if (arg == "--port") {
       if (i + 1 >= argc) {
         std::cerr << "--port requires a value\n";
@@ -102,13 +106,23 @@ int main(int argc, char** argv) {
     std::cerr << "UVNVR_TLS_CERT and UVNVR_TLS_KEY must be set together\n";
     return 1;
   }
+  bool tls_enabled = false;
   if (has_cert && has_key) {
     app.enable_ssl(cert_file, key_file);
     if (!app.ssl_error().empty()) {
       std::cerr << "cannot enable TLS: " << app.ssl_error() << "\n";
       return 1;
     }
+    tls_enabled = true;
     std::cout << "TLS enabled with " << cert_file << "\n";
+  } else if (options.tls_self_signed) {
+    app.enable_self_signed("localhost");
+    if (!app.ssl_error().empty()) {
+      std::cerr << "cannot enable the generated certificate: " << app.ssl_error() << "\n";
+      return 1;
+    }
+    tls_enabled = true;
+    std::cout << "TLS enabled with a generated localhost certificate\n";
   }
 
   app.get("/healthz", [](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
@@ -148,8 +162,8 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "UvNVR " << UVNVR_VERSION << " listening on "
-            << (has_cert ? "https" : "http") << "://127.0.0.1:" << app.bound_port() << "\n";
-  std::cout << "health: " << (has_cert ? "https" : "http") << "://127.0.0.1:"
+            << (tls_enabled ? "https" : "http") << "://127.0.0.1:" << app.bound_port() << "\n";
+  std::cout << "health: " << (tls_enabled ? "https" : "http") << "://127.0.0.1:"
             << app.bound_port() << "/healthz\n"
             << std::flush;
 
