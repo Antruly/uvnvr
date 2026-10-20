@@ -10,8 +10,8 @@ updates:
         patterns:
           - '*'
     ignore:
-      # vue-tsc 3.x does not support the TypeScript 6/7 exports layout yet.
-      - dependency-name: typescript
+      # Major upgrades are evaluated manually against the Vue/Node toolchain.
+      - dependency-name: '*'
         update-types:
           - version-update:semver-major
 
