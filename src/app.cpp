@@ -4941,8 +4941,7 @@ void App::MonitorRun() {
       last_storage_alert_ms_ = now;
     }
 
-    if (GetSettingInt("system.ntp_enabled", 0) != 0 &&
-        NowSeconds() - last_ntp_sync > 6 * 3600) {
+    if (GetSettingInt("system.ntp_enabled", 0) != 0 && NowSeconds() - last_ntp_sync > 6 * 3600) {
       const std::string server = GetSetting("system.ntp_server", "pool.ntp.org");
       int64_t offset = 0;
       std::string ntp_error;
@@ -4950,7 +4949,8 @@ void App::MonitorRun() {
         std::string db_error;
         SetSetting("system.ntp_last_offset_ms", std::to_string(offset), &db_error);
         SetSetting("system.ntp_last_sync", std::to_string(NowSeconds()), &db_error);
-        if (std::llabs(offset) >= 500) ApplyTimeOffset(offset, &ntp_error);
+        if (std::llabs(offset) >= 500)
+          ApplyTimeOffset(offset, &ntp_error);
       } else {
         std::fprintf(stderr, "NTP sync failed: %s\n", ntp_error.c_str());
       }

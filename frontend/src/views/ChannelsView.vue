@@ -24,6 +24,8 @@ interface Channel {
   lastError: string
   mainState: string
   mainError: string
+  lastOnlineAt: number
+  lastOfflineAt: number
   subState: string
   subError: string
 }
@@ -104,6 +106,16 @@ function stateLabel(channel: Channel) {
   }
   if (channel.mainState === 'error') return t('common.error')
   return t('preview.offline')
+}
+
+function formatTime(value: number) {
+  if (!value) return '—'
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value * 1000))
 }
 
 function stateClass(channel: Channel) {
@@ -359,6 +371,10 @@ onMounted(load)
           <td>
             <span class="status-pill" :class="stateClass(channel)">{{ stateLabel(channel) }}</span>
             <small v-if="channel.mainError" class="block error-text">{{ channel.mainError }}</small>
+            <small class="block muted">
+              {{ t('channels.lastOnline') }} {{ formatTime(channel.lastOnlineAt) }}
+              · {{ t('channels.lastOffline') }} {{ formatTime(channel.lastOfflineAt) }}
+            </small>
           </td>
           <td>
             <span class="status-pill" :class="channel.enabled ? 'ok' : 'muted'">
