@@ -246,7 +246,7 @@ jobs:
           curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg.tar.xz"             https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/ffmpeg.tar.xz"
           cd "$RUNNER_TEMP/ffmpeg-7.1.1"
-          ./configure --prefix="$RUNNER_TEMP/ffmpeg" --disable-debug --disable-doc             --disable-gpl --disable-nonfree --disable-shared --enable-static             --enable-videotoolbox --enable-audiotoolbox             --enable-protocol=file,pipe,rtsp,tcp,udp,http,https             --enable-demuxer=rtsp,mpegts,h264,hevc,mjpeg,rawvideo,mov             --enable-muxer=mpegts,mp4,mjpeg,rawvideo             --enable-decoder=h264,hevc,mjpeg,rawvideo,aac             --enable-encoder=mjpeg,rawvideo,aac             --enable-parser=h264,hevc,mjpeg             --enable-filter=scale,format,fps --enable-indev=lavfi             --disable-ffplay --disable-ffprobe
+          ./configure --prefix="$RUNNER_TEMP/ffmpeg" --disable-debug --disable-doc --disable-gpl --disable-nonfree --disable-shared --enable-static --disable-everything --disable-autodetect --disable-programs --enable-ffmpeg --disable-ffplay --disable-ffprobe --enable-videotoolbox --enable-audiotoolbox --enable-protocol=file,pipe,rtsp,tcp,udp --enable-demuxer=rtsp,mpegts,h264,hevc,mjpeg,rawvideo --enable-muxer=mpegts,mp4,mjpeg,rawvideo --enable-decoder=h264,hevc,mjpeg,rawvideo,aac --enable-encoder=mjpeg,rawvideo,aac --enable-parser=h264,hevc,mjpeg --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc --enable-filter=scale,format,fps,aresample --enable-swscale
           make -j"$(sysctl -n hw.ncpu)"
           make install
 
