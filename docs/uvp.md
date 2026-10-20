@@ -70,6 +70,18 @@ assertions_failed: 0
 
 生产环境仍使用 `UVNVR_TLS_CERT` / `UVNVR_TLS_KEY`。
 
+### M1 验证
+
+M1 完成后再次运行 `uvp_verify`，结果仍为 `verified`：
+
+```text
+GET /healthz             200   (3 assertions)
+GET /api/v1/system/info  200   (2 assertions)
+```
+
+M1 的登录、CSRF、用户/角色、审计、API Token、API 锁定和重启持久化由
+`tests/integration/m1_auth.sh` 覆盖，CI 在冒烟测试之后执行该脚本。
+
 ## 复现方式
 
 ```bash
