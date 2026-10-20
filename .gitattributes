@@ -1,0 +1,21 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.svg text
+*.zip binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.so binary
+*.deb binary
+*.rpm binary
+*.pkg binary
+*.dmg binary
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

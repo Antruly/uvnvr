@@ -1,0 +1,5 @@
+#pragma once
+
+#define UVNVR_VERSION "@PROJECT_VERSION@"
+#define UVNVR_GIT_SHA "@UVNVR_GIT_SHA@"
+#define UVNVR_PRODUCT_NAME "UvNVR"

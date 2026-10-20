@@ -1,0 +1,42 @@
+# Build output
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+compile_commands.json
+CMakeFiles/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Runtime data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+logs/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secret.key
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test/coverage output
+/coverage/
+/test-results/
+/playwright-report/

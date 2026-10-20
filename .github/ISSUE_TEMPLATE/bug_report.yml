@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible problem in UvNVR
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include camera passwords, RTSP URLs with credentials, recordings, or other
+        sensitive deployment data. Report security issues privately via the Security tab.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the exact error text and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: UvNVR version / commit
+      placeholder: 0.1.0 or git SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x64
+        - Linux arm64
+        - Windows x64
+        - Windows arm64
+        - macOS x64
+        - macOS arm64
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera / protocol
+      description: Brand and model if relevant. Never paste credentials.
+      placeholder: Hikvision DS-2CD..., ONVIF Profile S, generic RTSP
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact credentials, IP addresses and recording paths if needed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed credentials and private data from this report.
+          required: true

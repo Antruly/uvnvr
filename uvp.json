@@ -1,0 +1,20 @@
+{
+  "uvp": 1,
+  "name": "uvnvr",
+  "template": "rest-api",
+  "binary": "uvnvr",
+  "port": 8080,
+  "features": [
+    "tls",
+    "http2",
+    "websocket",
+    "soap",
+    "db"
+  ],
+  "frontends": [
+    "vue3"
+  ],
+  "requirements": {
+    "libuvcpp": ">=1.8.1"
+  }
+}

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">UvNVR</title>
+  <desc id="desc">A camera lens with a recording indicator, the UvNVR mark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.55" stop-color="#111c34"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="120" y1="120" x2="392" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.55" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="0" cy="0" r="1" gradientTransform="translate(232 228) rotate(48) scale(150)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a5f3fc"/>
+      <stop offset="0.45" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#0e7490"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
+  <rect x="17.5" y="17.5" width="477" height="477" rx="114.5" fill="none" stroke="#1e3a5f" stroke-width="3"/>
+
+  <circle cx="256" cy="256" r="146" fill="none" stroke="url(#ring)" stroke-width="24" opacity="0.95"/>
+  <circle cx="256" cy="256" r="112" fill="#07111f" stroke="#164e63" stroke-width="4"/>
+
+  <g opacity="0.95">
+    <path d="M256 144 L332 188 L332 324 L256 368 L180 324 L180 188 Z" fill="none" stroke="#0e7490" stroke-width="8" opacity="0.6"/>
+    <path d="M256 212 L308 242 L308 302 L256 332 L204 302 L204 242 Z" fill="url(#lens)"/>
+    <circle cx="256" cy="272" r="28" fill="#07111f"/>
+    <circle cx="256" cy="272" r="12" fill="#67e8f9" opacity="0.9"/>
+    <circle cx="238" cy="254" r="10" fill="#e0f2fe" opacity="0.75"/>
+  </g>
+
+  <circle cx="392" cy="120" r="34" fill="#ef4444" filter="url(#glow)"/>
+  <circle cx="392" cy="120" r="14" fill="#fecaca" opacity="0.9"/>
+</svg>
