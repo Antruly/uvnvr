@@ -1,4 +1,7 @@
 <script setup lang="ts">
+
+defineOptions({ name: 'AboutView' })
+
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { useAppStore } from '@/stores/app'

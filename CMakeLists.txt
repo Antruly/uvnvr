@@ -18,6 +18,10 @@ set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
 # UVNVR_LIBUVCPP_ROOT pins the first route, which is what CI and the
 # reproducible developer setup use. Without it, find_package() is tried first.
 find_package(PkgConfig QUIET)
+find_package(OpenSSL REQUIRED)
+# libuvcpp release archives embed libuv but do not export its C symbols; the
+# service calls a few standalone libuv helpers (memory, CPU, hostname).
+pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
 
 if(UVNVR_LIBUVCPP_ROOT)
   if(NOT EXISTS "${UVNVR_LIBUVCPP_ROOT}/lib/pkgconfig/uvcpp.pc")
@@ -75,6 +79,7 @@ configure_file(cmake/version.h.in
 
 add_executable(uvnvr
   src/main.cpp
+  src/app.cpp
 )
 
 target_include_directories(uvnvr PRIVATE
@@ -92,7 +97,7 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 
-target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET})
+target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto PkgConfig::LIBUV)
 
 # The release archive is a shared library outside the normal loader path.
 if(UVNVR_LIBUVCPP_ROOT)

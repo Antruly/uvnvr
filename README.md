@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-M0%20scaffolding-fbbf24)](#status)
+[![Status](https://img.shields.io/badge/status-M1%20foundation-38bdf8)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,9 +22,10 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**M0 — engineering foundation.** The repository, license/patent policy, libuvcpp service,
-Vue 3 shell, brand icon and Linux CI smoke test are in place. Camera, recording and playback
-features are not implemented yet. Track the milestones in
+**M1 — authentication, roles, audit and persistence.** The recorder now has first-run
+setup, session authentication, CSRF protection, users/roles/permissions, API tokens, audit
+logging, SQLite migrations and a live dashboard. Camera, recording and playback features
+arrive in M2/M3. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -33,6 +34,17 @@ UvNVR is a software NVR for small and medium camera deployments. A single servic
 ONVIF cameras, pulls their RTSP streams once, fans them out to many browser clients, records
 keyframe-aligned MPEG-TS segments with a SQLite index, and serves seamless playback and RTSP
 output.
+
+### Implemented in M1
+
+- First-run setup and the default `admin` account; scrypt password hashing.
+- Session cookies (HttpOnly/SameSite), CSRF protection and API bearer tokens.
+- Users, roles and granular Web/API permissions; built-in admin/operator/viewer roles.
+- Web and API failure lockouts with configurable thresholds.
+- Audit log with categories, filters, pagination and 180-day retention cleanup.
+- SQLite schema migrations, system metadata, serial number and system metrics.
+- Dashboard with CPU, memory, disk, users, sessions and audit counters.
+- Chinese/English UI, cached workspace tabs and a responsive admin shell.
 
 ### Planned 0.1.0 scope
 
@@ -79,10 +91,11 @@ RTSP ingest, demuxing, snapshots, optional compatibility transcoding and MP4 exp
 - CMake 3.24+, a C++20 compiler, `pkg-config`, `ninja` or `make`
 - **libuvcpp 1.8.1** (release archive or an installed CMake package)
 - Node.js 22.19+, 24.11+, or 26+ and npm (frontend only)
-- Linux: `libssl-dev`, `libsqlite3-dev`, `zlib1g-dev` (the release archive bundles its own
-  dependencies; these are needed if you build libuvcpp from source)
+- Linux: `libssl-dev`, `libuv1-dev`, `libsqlite3-dev`, `zlib1g-dev` (the libuvcpp release
+  archive bundles most dependencies; these are needed for UvNVR's OpenSSL/libuv calls and if
+  you build libuvcpp from source)
 
-FFmpeg development libraries are not required for M0. They will be added with the media
+FFmpeg development libraries are not required for M1. They will be added with the media
 core in M2.
 
 ### Linux x64 quick start
@@ -111,7 +124,8 @@ cmake --build build -j
 ./build/uvnvr --port 8080
 ```
 
-Open <http://127.0.0.1:8080>. Health check: <http://127.0.0.1:8080/healthz>.
+Open <http://127.0.0.1:8080>. On first launch you are redirected to `/setup` to create the
+administrator account. Health check: <http://127.0.0.1:8080/healthz>.
 
 For a local HTTPS listener with a generated certificate, run
 `./build/uvnvr --port 8080 --tls-self-signed`. Production deployments should provide
@@ -167,7 +181,7 @@ tests/             unit/integration/e2e tests
 | Milestone | Scope |
 |---|---|
 | M0 | Repository, rules, service scaffold, frontend shell, icons, CI smoke test |
-| M1 | Config, SQLite, first-run setup, auth/RBAC, lockout, audit, dashboard |
+| M1 | ✅ Config, SQLite, first-run setup, auth/RBAC, lockout, audit, dashboard |
 | M2 | Channels, ONVIF discovery, RTSP ingest, live view, snapshots |
 | M3 | Recording, segments, index, storage policies, playback, read-ahead |
 | M4 | RTSP server, API, alerts, GPU/perf, system settings |

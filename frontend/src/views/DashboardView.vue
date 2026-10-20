@@ -1,101 +1,255 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
-import { useAppStore } from '@/stores/app'
+import UsageMeter from '@/components/UsageMeter.vue'
+import { api } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
+
+defineOptions({ name: 'DashboardView' })
+
+interface Summary {
+  version: string
+  commit: string
+  serial: string
+  hostname: string
+  os: string
+  uptimeSeconds: number
+  setupRequired: boolean
+  maintenance: boolean
+  cpu: { cores: number; usagePercent: number }
+  memory: { totalBytes: number; usedBytes: number; freeBytes: number; usagePercent: number }
+  disk: {
+    path: string
+    totalBytes: number
+    usedBytes: number
+    freeBytes: number
+    usagePercent: number
+  }
+  counts: {
+    users: number
+    sessions: number
+    audit: number
+    channels: number
+    recordings: number
+  }
+}
 
 const { t } = useI18n()
-const app = useAppStore()
+const auth = useAuthStore()
+const summary = ref<Summary | null>(null)
+const error = ref('')
+const loading = ref(true)
+const updatedAt = ref<Date | null>(null)
+let timer: number | undefined
 
-const runtimeStatus = computed(() => {
-  if (app.server) return `${app.server.name} ${app.server.version} · ${app.server.commit}`
-  if (app.serverError) return t('app.offline')
-  return '…'
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)))
+  const amount = value / 1024 ** index
+  return `${amount.toFixed(amount >= 100 ? 0 : amount >= 10 ? 1 : 2)} ${units[index]}`
+}
+
+function formatDuration(totalSeconds: number) {
+  const seconds = Math.max(0, Math.floor(totalSeconds))
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m ${seconds % 60}s`
+}
+
+function tone(percent: number): 'ok' | 'warn' | 'danger' {
+  if (percent >= 90) return 'danger'
+  if (percent >= 70) return 'warn'
+  return 'ok'
+}
+
+const memoryDetail = computed(() => {
+  if (!summary.value) return ''
+  return `${formatBytes(summary.value.memory.usedBytes)} / ${formatBytes(summary.value.memory.totalBytes)}`
 })
 
-const cards = computed(() => [
-  { icon: 'settings', title: t('dashboard.runtime'), body: t('dashboard.runtimeBody') },
-  { icon: 'camera', title: t('dashboard.scope'), body: t('dashboard.scopeBody') },
-  { icon: 'storage', title: t('dashboard.storage'), body: t('dashboard.storageBody') },
-  { icon: 'info', title: t('dashboard.license'), body: t('dashboard.licenseBody') },
-])
+const diskDetail = computed(() => {
+  if (!summary.value) return ''
+  return `${formatBytes(summary.value.disk.usedBytes)} / ${formatBytes(summary.value.disk.totalBytes)}`
+})
+
+const updatedText = computed(() =>
+  updatedAt.value
+    ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(updatedAt.value)
+    : '—',
+)
+
+async function load() {
+  error.value = ''
+  try {
+    summary.value = await api<Summary>('/api/v1/dashboard/summary')
+    updatedAt.value = new Date()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : t('common.error')
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  void load()
+  timer = window.setInterval(load, 15_000)
+})
+
+onBeforeUnmount(() => {
+  if (timer) window.clearInterval(timer)
+})
 </script>
 
 <template>
-  <section class="hero panel">
-    <div class="hero-main">
-      <span class="pill accent">{{ t('app.status') }}</span>
-      <h2>{{ t('app.name') }} <span class="hero-version">0.1.0</span></h2>
-      <p class="hero-tagline">{{ t('app.tagline') }} — {{ t('app.subtitle') }}</p>
-      <p class="hero-intro">{{ t('dashboard.intro') }}</p>
-      <div class="hero-actions">
-        <a
-          class="button primary"
-          href="https://github.com/Antruly/uvnvr"
-          target="_blank"
-          rel="noreferrer"
-        >
-          <AppIcon name="github" :size="18" />
-          {{ t('dashboard.openGithub') }}
-        </a>
-        <a
-          class="button"
-          href="https://github.com/Antruly/uvnvr/blob/main/docs/development-plan.md"
-          target="_blank"
-          rel="noreferrer"
-        >
-          <AppIcon name="arrow" :size="18" />
-          {{ t('dashboard.readPlan') }}
-        </a>
-      </div>
-    </div>
-    <div class="hero-side">
-      <div class="runtime-card">
-        <span class="runtime-label">{{ t('dashboard.runtime') }}</span>
-        <span class="runtime-value">{{ runtimeStatus }}</span>
-        <span class="runtime-state" :class="{ online: app.server, offline: app.serverError }">
-          <span class="status-dot" :class="{ online: app.server, offline: app.serverError }"></span>
-          {{ app.server ? t('app.online') : app.serverError ? t('app.offline') : '…' }}
-        </span>
-      </div>
-      <div class="hero-mark">
-        <img src="/icon-512.png" alt="UvNVR" />
-      </div>
-    </div>
+  <section v-if="loading" class="panel empty-state">
+    <span class="spinner"></span>
+    {{ t('common.loading') }}
   </section>
 
-  <section class="card-grid">
-    <article v-for="card in cards" :key="card.title" class="panel feature-card">
-      <span class="feature-icon"><AppIcon :name="card.icon" :size="22" /></span>
-      <h3>{{ card.title }}</h3>
-      <p>{{ card.body }}</p>
-    </article>
+  <section v-else-if="error" class="panel empty-state error-state">
+    <AppIcon name="info" :size="26" />
+    <p>{{ error }}</p>
+    <button class="button" @click="load">
+      <AppIcon name="refresh" :size="16" />
+      {{ t('common.retry') }}
+    </button>
   </section>
 
-  <section class="two-column">
-    <article class="panel milestone-card">
-      <div class="section-heading">
-        <span class="pill">{{ t('dashboard.m0') }}</span>
-        <h3>{{ t('dashboard.m0Body') }}</h3>
+  <template v-else-if="summary">
+    <section class="dash-hero panel">
+      <div>
+        <span class="pill accent">{{ t('dashboard.title') }}</span>
+        <h2>{{ auth.user?.username }} · {{ summary.hostname }}</h2>
+        <p class="dash-subtitle">{{ t('dashboard.intro') }}</p>
+        <div class="dash-meta">
+          <span><AppIcon name="shield" :size="14" /> {{ summary.serial }}</span>
+          <span>{{ t('common.version') }} {{ summary.version }}</span>
+          <span>{{ summary.os }}</span>
+          <span>{{ t('dashboard.uptime') }} {{ formatDuration(summary.uptimeSeconds) }}</span>
+        </div>
       </div>
-      <ul class="check-list">
-        <li><AppIcon name="check" :size="16" /> GitHub repository, MIT license, contribution & security rules</li>
-        <li><AppIcon name="check" :size="16" /> libuvcpp 1.8.1 service with /healthz and version metadata</li>
-        <li><AppIcon name="check" :size="16" /> Vue 3 + TypeScript shell with zh-CN / en-US</li>
-        <li><AppIcon name="check" :size="16" /> Unified brand icon for web, Windows and macOS</li>
-        <li><AppIcon name="check" :size="16" /> Linux CI smoke build</li>
-      </ul>
-    </article>
+      <div class="dash-actions">
+        <span class="dash-updated">{{ t('dashboard.updated') }} {{ updatedText }}</span>
+        <button class="button" @click="load">
+          <AppIcon name="refresh" :size="16" />
+          {{ t('common.refresh') }}
+        </button>
+      </div>
+    </section>
 
-    <article class="panel next-card">
-      <div class="section-heading">
-        <span class="pill accent">{{ t('dashboard.next') }}</span>
-        <h3>{{ t('dashboard.nextBody') }}</h3>
-      </div>
-      <RouterLink class="inline-link" to="/preview">
-        {{ t('nav.preview') }}
-        <AppIcon name="arrow" :size="16" />
-      </RouterLink>
-    </article>
-  </section>
+    <section class="metric-grid">
+      <article class="panel metric-card">
+        <div class="metric-head">
+          <span class="feature-icon"><AppIcon name="settings" :size="20" /></span>
+          <span class="metric-title">{{ t('dashboard.cpu') }}</span>
+        </div>
+        <UsageMeter
+          :label="`${summary.cpu.cores} ${t('dashboard.cores')}`"
+          :percent="summary.cpu.usagePercent"
+          :tone="tone(summary.cpu.usagePercent)"
+        />
+      </article>
+
+      <article class="panel metric-card">
+        <div class="metric-head">
+          <span class="feature-icon"><AppIcon name="storage" :size="20" /></span>
+          <span class="metric-title">{{ t('dashboard.memory') }}</span>
+        </div>
+        <UsageMeter
+          :label="t('dashboard.memory')"
+          :percent="summary.memory.usagePercent"
+          :detail="memoryDetail"
+          :tone="tone(summary.memory.usagePercent)"
+        />
+      </article>
+
+      <article class="panel metric-card">
+        <div class="metric-head">
+          <span class="feature-icon"><AppIcon name="storage" :size="20" /></span>
+          <span class="metric-title">{{ t('dashboard.storageUsage') }}</span>
+        </div>
+        <UsageMeter
+          :label="summary.disk.path"
+          :percent="summary.disk.usagePercent"
+          :detail="diskDetail"
+          :tone="tone(summary.disk.usagePercent)"
+        />
+      </article>
+
+      <article class="panel metric-card">
+        <div class="metric-head">
+          <span class="feature-icon"><AppIcon name="users" :size="20" /></span>
+          <span class="metric-title">{{ t('dashboard.users') }}</span>
+        </div>
+        <div class="count-row">
+          <div>
+            <strong>{{ summary.counts.users }}</strong>
+            <span>{{ t('dashboard.users') }}</span>
+          </div>
+          <div>
+            <strong>{{ summary.counts.sessions }}</strong>
+            <span>{{ t('dashboard.sessions') }}</span>
+          </div>
+          <div>
+            <strong>{{ summary.counts.audit }}</strong>
+            <span>{{ t('dashboard.auditEvents') }}</span>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="two-column">
+      <article class="panel info-card">
+        <h3>{{ t('dashboard.runtime') }}</h3>
+        <dl class="meta-list">
+          <div>
+            <dt>{{ t('dashboard.hostname') }}</dt>
+            <dd>{{ summary.hostname }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('dashboard.operatingSystem') }}</dt>
+            <dd>{{ summary.os }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('dashboard.storagePath') }}</dt>
+            <dd>{{ summary.disk.path }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('dashboard.channels') }}</dt>
+            <dd>{{ summary.counts.channels }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('dashboard.recordings') }}</dt>
+            <dd>{{ summary.counts.recordings }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('dashboard.maintenance') }}</dt>
+            <dd>{{ summary.maintenance ? t('common.yes') : t('common.no') }}</dd>
+          </div>
+        </dl>
+        <p class="small-note">{{ t('dashboard.recordingsEmpty') }}</p>
+      </article>
+
+      <article class="panel info-card">
+        <h3>{{ t('dashboard.m0') }}</h3>
+        <p class="muted">{{ t('dashboard.m0Body') }}</p>
+        <ul class="check-list compact">
+          <li><AppIcon name="check" :size="16" /> {{ t('dashboard.securityBody') }}</li>
+          <li><AppIcon name="check" :size="16" /> {{ t('dashboard.runtimeBody') }}</li>
+          <li><AppIcon name="check" :size="16" /> {{ t('dashboard.storageBody') }}</li>
+        </ul>
+        <h3 class="next-heading">{{ t('dashboard.next') }}</h3>
+        <p class="muted">{{ t('dashboard.nextBody') }}</p>
+        <RouterLink class="inline-link" to="/preview">
+          {{ t('nav.preview') }}
+          <AppIcon name="arrow" :size="16" />
+        </RouterLink>
+      </article>
+    </section>
+  </template>
 </template>

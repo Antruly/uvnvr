@@ -1,19 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useNow } from '@vueuse/core'
 import AppIcon from '@/components/AppIcon.vue'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
+import { useTabsStore } from '@/stores/tabs'
 
 const app = useAppStore()
+const auth = useAuthStore()
+const tabs = useTabsStore()
 const route = useRoute()
+const router = useRouter()
 const { t, locale } = useI18n()
 const now = useNow({ interval: 1000 })
 
+const isPublic = computed(() => Boolean(route.meta.public))
+
 const primaryNav = [
-  { key: 'dashboard', to: '/', icon: 'dashboard' },
-  { key: 'preview', to: '/preview', icon: 'camera' },
+  { key: 'dashboard', to: '/', icon: 'dashboard', permission: 'dashboard.view' },
+  { key: 'preview', to: '/preview', icon: 'camera', permission: 'preview.view' },
 ]
 
 const plannedNav = [
@@ -21,9 +28,12 @@ const plannedNav = [
   { key: 'playback', icon: 'playback' },
   { key: 'storage', icon: 'storage' },
   { key: 'alerts', icon: 'bell' },
-  { key: 'users', icon: 'users' },
-  { key: 'logs', icon: 'logs' },
-  { key: 'settings', icon: 'settings' },
+]
+
+const adminNav = [
+  { key: 'users', to: '/users', icon: 'users', permission: 'user.view' },
+  { key: 'logs', to: '/audit', icon: 'logs', permission: 'log.view' },
+  { key: 'settings', to: '/system', icon: 'settings', permission: 'system.view' },
 ]
 
 const aboutNav = { key: 'about', to: '/about', icon: 'help' }
@@ -37,6 +47,10 @@ function switchLocale(value: 'zh-CN' | 'en-US') {
   locale.value = value
   localStorage.setItem('uvnvr.locale', value)
   document.documentElement.lang = value
+}
+
+function canSee(permission?: string) {
+  return !permission || auth.hasPermission(permission)
 }
 
 const pageTitle = computed(() => {
@@ -72,6 +86,21 @@ function isActive(to: string) {
   return route.path === to
 }
 
+function openTab(path: string) {
+  if (route.path !== path) void router.push(path)
+}
+
+function closeTab(path: string) {
+  const next = tabs.close(path)
+  if (route.path === path) void router.push(next)
+}
+
+async function logout() {
+  await auth.logout()
+  tabs.$reset()
+  await router.push('/login')
+}
+
 onMounted(() => {
   document.documentElement.lang = locale.value
   void app.fetchServerInfo()
@@ -80,7 +109,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'sidebar-collapsed': app.sidebarCollapsed }">
+  <div v-if="isPublic" class="public-shell">
+    <RouterView />
+  </div>
+
+  <div v-else class="app-shell" :class="{ 'sidebar-collapsed': app.sidebarCollapsed }">
     <aside class="sidebar">
       <div class="brand">
         <img src="/icon-512.png" alt="" class="brand-mark" />
@@ -92,7 +125,7 @@ onMounted(() => {
 
       <nav class="nav">
         <RouterLink
-          v-for="item in primaryNav"
+          v-for="item in primaryNav.filter((entry) => canSee(entry.permission))"
           :key="item.key"
           :to="item.to"
           class="nav-item"
@@ -111,6 +144,21 @@ onMounted(() => {
           <span class="nav-label">{{ t(`nav.${item.key}`) }}</span>
           <span class="nav-soon">{{ t('nav.soon') }}</span>
         </div>
+
+        <div v-if="adminNav.some((entry) => canSee(entry.permission))" class="nav-section">
+          <span class="nav-section-label">{{ t('nav.administration') }}</span>
+        </div>
+
+        <RouterLink
+          v-for="item in adminNav.filter((entry) => canSee(entry.permission))"
+          :key="item.key"
+          :to="item.to"
+          class="nav-item"
+          :class="{ active: isActive(item.to) }"
+        >
+          <AppIcon :name="item.icon" />
+          <span class="nav-label">{{ t(`nav.${item.key}`) }}</span>
+        </RouterLink>
 
         <div class="nav-section nav-section-bottom"></div>
         <RouterLink
@@ -160,6 +208,17 @@ onMounted(() => {
           </button>
         </div>
 
+        <div v-if="auth.user" class="user-chip">
+          <span class="user-avatar">{{ auth.user.username.slice(0, 1).toUpperCase() }}</span>
+          <span class="user-meta">
+            <strong>{{ auth.user.username }}</strong>
+            <small>{{ auth.user.role }}</small>
+          </span>
+          <button class="icon-button" :title="t('common.logout')" @click="logout">
+            <AppIcon name="logout" :size="18" />
+          </button>
+        </div>
+
         <a
           class="icon-button"
           href="https://github.com/Antruly/uvnvr"
@@ -171,11 +230,32 @@ onMounted(() => {
         </a>
       </header>
 
+      <div class="tabbar">
+        <button
+          v-for="tab in tabs.tabs"
+          :key="tab.path"
+          class="tab"
+          :class="{ active: route.path === tab.path }"
+          @click="openTab(tab.path)"
+        >
+          <span class="tab-label">{{ t(tab.titleKey) }}</span>
+          <span
+            v-if="tab.closable"
+            class="tab-close"
+            role="button"
+            :aria-label="t('common.close')"
+            @click.stop="closeTab(tab.path)"
+          >
+            ×
+          </span>
+        </button>
+      </div>
+
       <main class="content">
-        <RouterView v-slot="{ Component }">
-          <Transition name="page" mode="out-in">
-            <component :is="Component" />
-          </Transition>
+        <RouterView v-slot="{ Component, route: current }">
+          <KeepAlive :include="tabs.cachedNames">
+            <component :is="Component" :key="String(current.name)" />
+          </KeepAlive>
         </RouterView>
       </main>
     </div>

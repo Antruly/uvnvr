@@ -1,4 +1,7 @@
 <script setup lang="ts">
+
+defineOptions({ name: 'PreviewView' })
+
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 

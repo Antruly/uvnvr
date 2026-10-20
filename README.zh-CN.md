@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-M0%20scaffolding-fbbf24)](#状态)
+[![Status](https://img.shields.io/badge/status-M1%20foundation-38bdf8)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,14 +22,25 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**M0 — 工程底座。** 仓库、许可证/专利政策、libuvcpp 服务、Vue 3 壳层、品牌图标和 Linux CI
-冒烟测试已经就绪；摄像头、录像与回放功能尚未实现。里程碑见
-[`docs/development-plan.md`](docs/development-plan.md)。
+**M1 — 鉴权、角色、审计与持久化。** 录像机现已具备首次初始化、会话鉴权、CSRF 防护、
+用户/角色/权限、API Token、审计日志、SQLite 迁移与实时仪表盘。摄像头、录像与回放功能
+将在 M2/M3 接入。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
 UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 ONVIF 发现、RTSP 拉流、一路摄像头
 向多客户端分发、关键帧对齐的 MPEG-TS 切片录像、SQLite 索引、无缝回放以及 RTSP 对外输出。
+
+### M1 已实现
+
+- 首次初始化与默认 `admin` 账户；scrypt 密码哈希。
+- 会话 Cookie（HttpOnly/SameSite）、CSRF 防护与 API Bearer Token。
+- 用户、角色与细粒度 Web/API 权限；内置 admin/operator/viewer 角色。
+- Web 与 API 失败锁定，阈值可配置。
+- 审计日志分类、筛选、分页与 180 天保留清理。
+- SQLite 迁移、系统元数据、序列号与系统指标。
+- 仪表盘展示 CPU、内存、磁盘、用户、会话与审计计数。
+- 中英文界面、多标签缓存工作区与响应式管理端。
 
 ### 0.1.0 规划范围
 
@@ -75,10 +86,11 @@ SQLite（WAL）
 - CMake 3.24+、C++20 编译器、`pkg-config`、`ninja` 或 `make`
 - **libuvcpp 1.8.1**（Release 归档或已安装的 CMake 包）
 - Node.js 22.19+ / 24.11+ / 26+ 与 npm（仅前端）
-- Linux：`libssl-dev`、`libsqlite3-dev`、`zlib1g-dev`（Release 归档已自带依赖；从源码构建
-  libuvcpp 时需要）
+- Linux：`libssl-dev`、`libuv1-dev`、`libsqlite3-dev`、`zlib1g-dev`（libuvcpp Release
+  归档已自带大部分依赖；UvNVR 自身调用 OpenSSL/libuv 时需要这些开发包，从源码构建
+  libuvcpp 时也需要）
 
-M0 暂不需要 FFmpeg 开发库，M2 接入媒体核心时再加入。
+M1 暂不需要 FFmpeg 开发库，M2 接入媒体核心时再加入。
 
 ### Linux x64 快速开始
 
@@ -106,7 +118,8 @@ cmake --build build -j
 ./build/uvnvr --port 8080
 ```
 
-浏览器打开 <http://127.0.0.1:8080>；健康检查 <http://127.0.0.1:8080/healthz>。
+浏览器打开 <http://127.0.0.1:8080>。首次启动会跳转到 `/setup` 创建管理员账户。
+健康检查 <http://127.0.0.1:8080/healthz>。
 
 本地 HTTPS 调试可运行 `./build/uvnvr --port 8080 --tls-self-signed`，使用自动生成的本机证书。
 生产环境应通过 `UVNVR_TLS_CERT` 与 `UVNVR_TLS_KEY` 提供正式证书，不要使用开发证书。
@@ -159,7 +172,7 @@ tests/             单元/集成/E2E 测试
 | 阶段 | 内容 |
 |---|---|
 | M0 | 仓库与规则、服务脚手架、前端壳层、图标、CI 冒烟测试 |
-| M1 | 配置、SQLite、首次安装、鉴权/RBAC、锁定、审计、仪表盘 |
+| M1 | ✅ 配置、SQLite、首次安装、鉴权/RBAC、锁定、审计、仪表盘 |
 | M2 | 通道、ONVIF 发现、RTSP 拉流、实时预览、抓拍 |
 | M3 | 录像、切片、索引、存储策略、回放、预读 |
 | M4 | RTSP Server、API、预警、GPU/性能、系统设置 |
