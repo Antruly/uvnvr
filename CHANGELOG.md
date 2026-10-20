@@ -42,8 +42,10 @@ All notable changes to UvNVR are documented here. The format follows
   the build root as well as `build\Release`.
 - Release automation now publishes only when the complete six-platform matrix succeeds,
   is idempotent on re-runs, and attaches `SHA256SUMS`.
-- macOS packaging reports each stage and bounds `dylibbundler`, `zip`, `pkgbuild` and
-  `hdiutil` so a stuck external tool cannot consume the whole job.
+- macOS packaging resolves `@rpath` dependencies through the build tree and Homebrew
+  search paths (previously `dylibbundler` waited on an interactive prompt), reports
+  each stage, and bounds `dylibbundler`, `zip`, `pkgbuild` and `hdiutil` so a stuck
+  external tool cannot consume the whole job.
 
 ### Notes
 

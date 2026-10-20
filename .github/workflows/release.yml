@@ -256,9 +256,17 @@ jobs:
           cmake --build build --parallel
 
       - name: Package
+        timeout-minutes: 25
         run: |
           chmod +x packaging/macos/build-macos.sh
-          packaging/macos/build-macos.sh             --build build --version "${GITHUB_REF_NAME#v}" --arch "${{ matrix.arch }}"             --out dist-packages --ffmpeg "$RUNNER_TEMP/ffmpeg/bin/ffmpeg"
+          packaging/macos/build-macos.sh \
+            --build build \
+            --version "${GITHUB_REF_NAME#v}" \
+            --arch "${{ matrix.arch }}" \
+            --out dist-packages \
+            --ffmpeg "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" \
+            --search-path "$RUNNER_TEMP/uvcpp-install/lib" \
+            --search-path "$(brew --prefix)/lib"
 
       - uses: actions/upload-artifact@v7
         with:
