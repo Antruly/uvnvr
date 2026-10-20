@@ -128,6 +128,9 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 
 target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
+if(WIN32)
+  target_link_libraries(uvnvr PRIVATE ws2_32)
+endif()
 
 # The release archive is a shared library outside the normal loader path.
 if(UVNVR_LIBUVCPP_ROOT)

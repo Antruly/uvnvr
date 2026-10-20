@@ -58,10 +58,18 @@ std::string ExecutablePath() {
 }
 
 std::string HostName() {
+#ifdef _WIN32
+  char name[256] = {0};
+  DWORD size = sizeof(name);
+  if (!GetComputerNameA(name, &size))
+    return "unknown";
+  return std::string(name, size);
+#else
   char name[256] = {0};
   if (gethostname(name, sizeof(name) - 1) != 0)
     return "unknown";
   return name;
+#endif
 }
 
 std::string OsDescription() {
