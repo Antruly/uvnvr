@@ -31,10 +31,21 @@ All notable changes to UvNVR are documented here. The format follows
 - Performance tier, GPU detection/toggle, time API and help manual.
 - Linux deb/tar.gz packaging and Windows portable/NSIS packaging workflow.
 
+### Fixed
+
+- Windows arm64 (MSVC): `NOMINMAX` keeps the Windows `min`/`max` macros from breaking
+  `std::min`/`std::max` in the RTSP server.
+- Release automation now publishes only when the complete six-platform matrix succeeds,
+  is idempotent on re-runs, and attaches `SHA256SUMS`.
+- macOS packaging reports each stage and bounds `dylibbundler`, `zip`, `pkgbuild` and
+  `hdiutil` so a stuck external tool cannot consume the whole job.
+
 ### Notes
 
 - 0.1.0 is a release candidate. WebRTC, cloud access, face/plate recognition and advanced
   analytics are outside this release. See `docs/development-plan.md` for details.
+- 0.1.0 ships an English and a Chinese user guide (`docs/user-guide.md`,
+  `docs/user-guide.zh-CN.md`).
 
 ## [0.1.0] - 2026-10-21
 

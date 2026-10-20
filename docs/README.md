@@ -8,8 +8,9 @@
 | [`architecture.md`](architecture.md) | Living architecture notes (expanded with the media core) |
 | [`api.md`](api.md) | REST/WebSocket/RTSP API reference (M4) |
 | [`deployment.md`](deployment.md) | Installation and operations guide (M5) |
-| [`user-guide.md`](user-guide.md) | End-user manual (M6) |
-| [`faq.md`](faq.md) | Frequently asked questions (M6) |
+| [`user-guide.md`](user-guide.md) | End-user manual |
+| [`user-guide.zh-CN.md`](user-guide.zh-CN.md) | 使用手册（中文） |
+| [`faq.md`](faq.md) | Frequently asked questions |
+| [`release-notes-0.1.0.md`](release-notes-0.1.0.md) | 0.1.0 release notes |
 
-Until the later documents exist, `development-plan.md` is the source of truth for scope and
-design decisions.
+`development-plan.md` remains the source of truth for scope and design decisions.
