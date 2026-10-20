@@ -33,23 +33,49 @@ install -m 0755 "${FFMPEG_BIN}" "${APP}/bin/ffmpeg"
 cp "${ROOT}/LICENSE" "${ROOT}/THIRD_PARTY_NOTICES.md" "${APP}/share/doc/uvnvr/"
 cp "${ROOT}/resources/branding/uvnvr-256.png" "${APP}/share/doc/uvnvr/uvnvr.png"
 cp -a "${ROOT}/frontend/dist/." "${APP}/share/uvnvr/frontend/dist/" 2>/dev/null || true
+log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+run_bounded() {
+  local seconds="$1"
+  shift
+  perl -e 'alarm shift; exec @ARGV' "${seconds}" "$@"
+}
+log "bundling dylibs"
 if command -v dylibbundler >/dev/null 2>&1; then
-  dylibbundler -od -b -x "${APP}/bin/uvnvr" -d "${APP}/lib" -p "@loader_path/../lib" >/dev/null
+  run_bounded 300 dylibbundler -od -b -x "${APP}/bin/uvnvr" -d "${APP}/lib" \
+    -p "@loader_path/../lib"
 else
   echo "dylibbundler is required" >&2
   exit 1
 fi
+log "staging launchd daemon"
 install -m 0644 "${ROOT}/packaging/macos/com.antruly.uvnvr.plist" "${STAGE}/Library/LaunchDaemons/com.antruly.uvnvr.plist"
 chmod +x "${ROOT}/packaging/macos/scripts/postinstall"
-(cd "${STAGE}" && zip -qry "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.zip" opt Library)
-pkgbuild --root "${STAGE}" --identifier com.antruly.uvnvr --version "${VERSION}" \
-  --install-location / --scripts "${ROOT}/packaging/macos/scripts" \
+log "creating zip"
+(cd "${STAGE}" && run_bounded 300 zip -qry "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.zip" opt Library)
+log "creating pkg"
+run_bounded 300 pkgbuild --root "${STAGE}" --identifier com.antruly.uvnvr \
+  --version "${VERSION}" --install-location / \
+  --scripts "${ROOT}/packaging/macos/scripts" \
   "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.pkg" >/dev/null
-# The dmg is a convenience wrapper around the pkg/zip. hdiutil can be
-# unreliable on headless runners, so it must not block the release assets.
+# The dmg is a convenience wrapper around the pkg/zip. hdiutil can be slow or
+# unavailable on headless runners, so bound it and never fail the job on it.
 if command -v hdiutil >/dev/null 2>&1; then
-  (hdiutil create -volname "UvNVR ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO \
-     "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.dmg" >/dev/null 2>&1 &)
+  log "creating dmg"
+  hdiutil create -volname "UvNVR ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO \
+    "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.dmg" >"${STAGE}/dmg.log" 2>&1 &
+  dmg_pid=$!
+  for _ in $(seq 1 120); do
+    if ! kill -0 "${dmg_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if kill -0 "${dmg_pid}" 2>/dev/null; then
+    log "dmg timed out after 120s; continuing without it"
+    kill "${dmg_pid}" 2>/dev/null || true
+    rm -f "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.dmg"
+  fi
+  wait "${dmg_pid}" 2>/dev/null || true
 fi
 echo "macOS packages written to ${OUT}"
 ls -lh "${OUT}"/*macos*
