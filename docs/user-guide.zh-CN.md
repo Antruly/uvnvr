@@ -26,7 +26,26 @@ Linux 安装包会安装并启动 systemd 服务。浏览器打开 `http://<主�
 uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
 
-常用参数：`--version`、`--help`、`--tls-self-signed`、`--maintenance`。安装版在 `Program Files` 下运行时默认使用 `%ProgramData%\UvNVR`；若数据目录仍无法创建，可显式指定：
+端口与数据目录来自启动配置文件，无需重新构建或重装即可修改：
+
+- Windows 安装包：在“服务端口”页设置 HTTP 与 RTSP 端口，安装程序写入
+  `%ProgramData%\UvNVR\uvnvr.json`，并在开始菜单生成“UvNVR Configuration”快捷方式。
+- Linux：编辑 `/etc/uvnvr/uvnvr.json`，然后 `sudo systemctl restart uvnvr`。
+- macOS：编辑 `/Library/Application Support/UvNVR/uvnvr.json`，然后重启 launchd 服务。
+- 任意版本：使用 `--config <路径>`，或 `--port`、`--rtsp-port`、`--data-dir`。
+
+命令行参数优先于环境变量，环境变量优先于配置文件。`uvnvr --print-config`
+可查看最终生效的配置，完整格式见 [`configuration.md`](configuration.md)（英文）。
+
+```json
+{
+  "http": { "port": 8080, "host": "0.0.0.0" },
+  "rtsp": { "port": 554 },
+  "dataDir": "/var/lib/uvnvr"
+}
+```
+
+常用参数：`--version`、`--help`、`--print-config`、`--tls-self-signed`、`--maintenance`。安装版在 `Program Files` 下运行时默认使用 `%ProgramData%\UvNVR`；若数据目录仍无法创建，可显式指定：
 
 ```bat
 uvnvr.exe --data-dir "%ProgramData%\UvNVR"
@@ -126,8 +145,11 @@ uvnvr.exe --data-dir "%ProgramData%\UvNVR"
 1. 选择通道、码流和日期。
 2. 时间轴显示有录像的区间；点击切片或时间点开始播放。
 3. 回放通过 WebSocket 发送 MPEG-TS，跨切片时无需重新加载播放器。
-4. 拖动进度条会从目标切片创建新的播放票据，只读取所需切片和小窗口预读数据。
-5. **下载** 获取单个 MPEG-TS 切片，可交给 VLC 播放或由 FFmpeg 转封装为 MP4。下载支持 HTTP Range 断点续传。
+4. 跳转会从目标时间创建新的播放票据，只读取所需切片和小窗口预读数据。点击时间轴上的录像区间即可跳转。
+5. 播放器工具栏提供 **−30s / −10s / +10s / +30s** 快退快进按钮和 **0.5×–8×** 倍速。
+   服务端按所选速率控制发送节奏；快进即高速正向播放，快退通过连续向后跳转实现
+   （浏览器无法反向解码 GOP）。
+6. **下载** 获取单个 MPEG-TS 切片，可交给 VLC 播放或由 FFmpeg 转封装为 MP4。下载支持 HTTP Range 断点续传。
 
 回放与下载共享存储模块内部的 LRU 块缓存和预读层；应用层只请求索引与字节偏移。
 

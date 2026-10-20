@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.1.0-fbbf24)](#status)
+[![Status](https://img.shields.io/badge/status-0.2.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,11 +22,16 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.1.0 — core NVR loop implemented.** The recorder now supports ONVIF
-discovery/probing, channel management, RTSP ingest with automatic reconnects, live
-multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback, RTSP output,
-snapshots, alerts, email notifications, users/roles, audit logging and a bilingual web UI.
-Peer-to-peer/WebRTC, cloud access and advanced analytics are out of scope for 0.1.0. Track
+**0.2.0 — configurable deployment and faster playback.** The recorder supports
+ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
+live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
+RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
+bilingual web UI.
+
+0.2.0 adds a startup JSON configuration file (HTTP/RTSP ports, bind address, data
+directory, TLS), port selection in the Windows installer, `/api/v1/system/config`,
+timeline seeking and 0.5×–8× playback with −30s/−10s/+10s/+30s controls.
+Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of scope. Track
 the milestones in [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -49,8 +54,12 @@ output.
 - Snapshots, motion/offline/storage alerts, SMTP email (QQ preset), audit log.
 - Performance tier, GPU detection and explicit GPU toggle; system time API.
 - Chinese/English UI, cached tabs, dashboard, help manual and API tokens.
+- Startup `uvnvr.json` with ports/bind/data/TLS, CLI/env/config precedence and
+  `--print-config`; Windows installer port page and macOS/Linux service configs.
+- Playback speed control (0.5×–8×), ±10s/±30s seek controls, timeline click-to-seek
+  and a playback position cursor.
 
-### Planned 0.1.0 scope
+### Delivered scope
 
 - ONVIF WS-Discovery and one-click add; manual RTSP; Hikvision/Dahua/URL templates.
 - Channel tree, groups, main/sub stream, reconnection, online/offline history, sync.
@@ -147,13 +156,16 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.1.0)
+## Known limitations (0.2.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
 - Browser playback uses MSE; H.265 depends on the browser/hardware. Prefer an H.264 sub stream.
 - RTSP output uses RTP/MP2T (payload type 33). Some clients expect H.264 RTP; VLC/ffplay work.
-- Windows ARM64, macOS signing/notarization and some installer polish are release-matrix tasks.
+- macOS packages are ad-hoc signed; Gatekeeper may require a right-click Open unless a
+  Developer ID is configured.
+- Playback rewind is implemented as repeated backward seeks; browsers do not decode a
+  reversed GOP. Fast-forward uses server-paced playback plus the media element rate.
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -214,8 +226,9 @@ tests/             unit/integration/e2e tests
 | M2 | ✅ Channels, ONVIF discovery, RTSP ingest, live view, snapshots |
 | M3 | ✅ Recording, segments, index, storage policies, playback, read-ahead |
 | M4 | ✅ RTSP server, API, alerts, GPU/perf, system settings |
-| M5 | Six-platform installers and CI matrix |
-| M6 | Soak/security hardening, docs, `v0.1.0` release |
+| M5 | ✅ Six-platform installers and CI matrix |
+| M6 | ✅ Release hardening, bilingual manuals, `v0.1.0` |
+| 0.2.0 | ✅ Startup config file and ports, installer port page, playback speed/seek |
 
 ## Contributing and security
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(uvnvr VERSION 0.1.0 LANGUAGES CXX)
+project(uvnvr VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,6 +103,7 @@ endforeach()
 add_executable(uvnvr
   src/main.cpp
   src/app.cpp
+  src/config.cpp
   src/media.cpp
   src/onvif.cpp
   src/recording.cpp

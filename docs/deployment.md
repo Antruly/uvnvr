@@ -6,8 +6,8 @@ Release packages install under `/opt/uvnvr` and bundle the application, static L
 
 ### Linux
 
-- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.1.0_amd64.deb`
-- RHEL/Fedora: `sudo rpm -i uvnvr-0.1.0-1.x86_64.rpm`
+- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.2.0_amd64.deb`
+- RHEL/Fedora: `sudo rpm -i uvnvr-0.2.0-1.x86_64.rpm`
 - Portable: extract the tar.gz and run `/opt/uvnvr/bin/uvnvr`.
 
 The systemd unit runs as `uvnvr`, stores data in `/var/lib/uvnvr`, binds HTTP 8080 and RTSP 554 (with `CAP_NET_BIND_SERVICE`). Open `http://<host>:8080` and complete first-run setup.
@@ -20,11 +20,30 @@ The NSIS installer installs under `Program Files\UvNVR`, data under `%ProgramDat
 
 The pkg installs under `/opt/uvnvr`, a launchd daemon `com.antruly.uvnvr` and data under `/Library/Application Support/UvNVR`. The dmg/zip are unsigned or ad-hoc signed; Gatekeeper may require a right-click Open or `xattr` adjustment. Provide a Developer ID for notarization in CI secrets when available.
 
+## Configuration
+
+Ports, bind address, the data directory and TLS are read from a JSON file at
+startup. Linux packages create `/etc/uvnvr/uvnvr.json`; the systemd unit and the
+macOS launchd job pass it with `--config`. The Windows installer writes
+`%ProgramData%\UvNVR\uvnvr.json` after asking for the HTTP and RTSP ports, and
+creates a **UvNVR Configuration** Start-menu shortcut for editing it.
+
+Precedence is command-line flags, then environment variables, then the file,
+then built-in defaults. `uvnvr --print-config` prints the merged settings. See
+[`configuration.md`](configuration.md) for the schema, search paths and
+validation rules. Restart the service after editing the file.
+
 ## Manual run
 
 ```bash
 UVNVR_FFMPEG=/opt/uvnvr/bin/ffmpeg \
-  /opt/uvnvr/bin/uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
+  /opt/uvnvr/bin/uvnvr --config /etc/uvnvr/uvnvr.json
+```
+
+Or pass the values directly:
+
+```bash
+/opt/uvnvr/bin/uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
 
 ## Ports

@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.1.0-fbbf24)](#状态)
+[![Status](https://img.shields.io/badge/status-0.2.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,10 +22,14 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.1.0 — 核心 NVR 闭环已实现。** 目前支持 ONVIF 发现/探测、通道管理、RTSP
+**0.2.0 — 可配置部署与更快回放。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
-输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。WebRTC、云平台与高级
-分析不在 0.1.0 范围内。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
+输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
+
+0.2.0 新增启动 JSON 配置文件（HTTP/RTSP 端口、绑定地址、数据目录、TLS）、Windows
+安装器端口选择、`/api/v1/system/config`、时间轴点击跳转与 0.5×–8× 倍速 /
+−30s、−10s、+10s、+30s 快退快进。WebRTC、云平台与高级分析仍不在范围内。里程碑见
+[`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -45,8 +49,11 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
 - 抓拍、移动/离线/存储预警、SMTP 邮件（QQ 预设）、审计日志。
 - 性能档位、GPU 探测与开关、系统时间 API。
 - 中英文界面、多标签缓存、仪表盘、帮助手册与 API Token。
+- 启动 `uvnvr.json`（端口/绑定地址/数据目录/TLS），命令行/环境变量/配置文件优先级与
+  `--print-config`；Windows 安装器端口页，Linux/macOS 服务配置。
+- 回放 0.5×–8× 倍速、±10s/±30s 快退快进、时间轴点击跳转与播放位置游标。
 
-### 0.1.0 规划范围
+### 已交付范围
 
 - ONVIF WS-Discovery 与一键添加；手动 RTSP；海康/大华/URL 模板。
 - 通道树、分组、主/子码流、掉线重连、在线/离线历史、配置同步。
@@ -140,13 +147,14 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.1.0 已知限制
+## 0.2.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
 - 浏览器回放使用 MSE；H.265 依赖浏览器/硬件，建议使用 H.264 子码流。
 - RTSP 输出使用 RTP/MP2T（payload type 33），部分客户端可能只接受 H.264 RTP；VLC/ffplay 可用。
-- Windows ARM64、macOS 签名/公证与部分安装包细节仍在发布矩阵中完善。
+- macOS 安装包为 ad-hoc 签名；未配置 Developer ID 时 Gatekeeper 可能要求右键打开。
+- 回退通过连续向后跳转实现（浏览器无法反向解码 GOP）；快进使用服务端限速与播放器倍速。
 - 审计日志与录像共用数据盘；独立审计路径为后续增强。
 
 ## 许可证
@@ -205,8 +213,9 @@ tests/             单元/集成/E2E 测试
 | M2 | ✅ 通道、ONVIF 发现、RTSP 拉流、实时预览、抓拍 |
 | M3 | ✅ 录像、切片、索引、存储策略、回放、预读 |
 | M4 | ✅ RTSP Server、API、预警、GPU/性能、系统设置 |
-| M5 | 六平台安装包与 CI 矩阵 |
-| M6 | 稳定性/安全加固、文档、发布 `v0.1.0` |
+| M5 | ✅ 六平台安装包与 CI 矩阵 |
+| M6 | ✅ 发布加固、中英文手册、`v0.1.0` |
+| 0.2.0 | ✅ 启动配置文件与端口、安装器端口页、回放倍速/快进快退 |
 
 ## 贡献与安全
 

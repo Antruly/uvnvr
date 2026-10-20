@@ -28,7 +28,31 @@ To run manually or with a custom data directory:
 uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
 
-Useful options are `--version`, `--help`, `--tls-self-signed` and `--maintenance`.
+Ports and the data directory come from a JSON file and can be changed without
+rebuilding or reinstalling:
+
+- Windows installer: choose the HTTP and RTSP ports on the **Service ports**
+  page. The installer writes `%ProgramData%\UvNVR\uvnvr.json` and adds a
+  **UvNVR Configuration** Start-menu shortcut.
+- Linux: edit `/etc/uvnvr/uvnvr.json`, then `sudo systemctl restart uvnvr`.
+- macOS: edit `/Library/Application Support/UvNVR/uvnvr.json`, then restart the
+  launchd job.
+- Any build: pass `--config <path>` or `--port`, `--rtsp-port`, `--data-dir`.
+
+Command-line flags override environment variables, which override the file.
+`uvnvr --print-config` shows the effective settings. See
+[`configuration.md`](configuration.md) for the full schema.
+
+```json
+{
+  "http": { "port": 8080, "host": "0.0.0.0" },
+  "rtsp": { "port": 554 },
+  "dataDir": "/var/lib/uvnvr"
+}
+```
+
+Useful options are `--version`, `--help`, `--print-config`, `--tls-self-signed`
+and `--maintenance`.
 If the data directory cannot be created, pass a writable location explicitly:
 
 ```bat
@@ -155,9 +179,14 @@ Open **Playback**.
 2. The timeline shows recorded intervals; click a segment or a time to play.
 3. Playback streams MPEG-TS over a WebSocket and crosses segment boundaries
    without reloading the player.
-4. Seeking starts a new ticket at the target segment, so only the required
-   segment and a small read-ahead window are read from disk.
-5. **Download** fetches a single MPEG-TS segment. Open it with VLC or remux it to
+4. Seeking starts a new ticket at the target time, so only the required segment
+   and a small read-ahead window are read from disk. Click a recorded interval
+   on the timeline to jump to that time.
+5. The player toolbar has **−30s / −10s / +10s / +30s** seek buttons and
+   **0.5×–8×** speed control. The server paces the stream to the selected rate;
+   fast-forward is forward playback at a higher rate, and rewind is repeated
+   backward seeks (browsers cannot decode a reversed GOP).
+6. **Download** fetches a single MPEG-TS segment. Open it with VLC or remux it to
    MP4 with FFmpeg. Downloads support HTTP Range for resumable transfers.
 
 Playback and downloads share an LRU block cache and a read-ahead layer inside the

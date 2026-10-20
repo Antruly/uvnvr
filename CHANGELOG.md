@@ -4,9 +4,27 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-21
 
 ### Added
+
+- Startup JSON configuration (`uvnvr.json`): HTTP/RTSP ports, bind address, data
+  directory, TLS, FFmpeg path and log level. Precedence is CLI flags, environment
+  variables, the file, then defaults; `--config` and `--print-config` are available.
+- `GET /api/v1/system/config` and a read-only **Startup configuration** panel on the
+  System page showing ports, bind address, data directory and the loaded file.
+- Windows installer **Service ports** page with validation; the installer writes
+  `%ProgramData%\UvNVR\uvnvr.json`, adds a **UvNVR Configuration** shortcut and starts
+  the service with `--config`.
+- Linux packages create `/etc/uvnvr/uvnvr.json` and the systemd unit uses `--config`;
+  the macOS pkg creates the Application Support config and launchd uses it. Portable
+  Windows zips include a default `uvnvr.json`.
+- Playback speed control (API 0.25×–8×, UI 0.5×–8×), ±10s/±30s seek controls,
+  timeline click-to-seek and a playback position cursor. The server paces MPEG-TS by
+  segment bitrate and starts near the nearest keyframe when seeking.
+- `--host`, `--tls-cert`, `--tls-key`, `--ffmpeg`, `--log-level`,
+  `UVNVR_PORT`/`UVNVR_RTSP_PORT`/`UVNVR_DATA_DIR`/`UVNVR_HOST` and
+  `docs/configuration.md`.
 
 - M0 engineering foundation: repository rules, MIT license, third-party/patent notices.
 - libuvcpp 1.8.1 service with `/healthz` and `/api/v1/system/info`.

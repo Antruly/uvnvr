@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify that a GitHub release carries the complete 0.1.0 asset matrix and that
+# Verify that a GitHub release carries the release asset matrix and that
 # SHA256SUMS matches the attached files.
 #
 #   scripts/verify-release.sh [version] [repo]

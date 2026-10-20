@@ -22,6 +22,7 @@ All endpoints are under `/api/v1` unless noted.
 | GET | `/api/v1/dashboard/summary` | dashboard.view |
 | GET | `/api/v1/system/info` | public (minimal) |
 | GET | `/api/v1/system/overview` | system.view |
+| GET | `/api/v1/system/config` | system.view |
 | GET/PUT | `/api/v1/settings` | system.view/manage |
 | GET | `/api/v1/system/time` | system.view |
 | POST | `/api/v1/system/time/sync` | system.manage |
@@ -69,7 +70,33 @@ RTP payload is MPEG-TS (payload type 33) over TCP interleaved or UDP unicast. If
 
 `POST /api/v1/streams/ticket` with `{ "channelId": 1, "stream": "main" }` returns a `wsPath` and `rtspPath`/`rtspPort`. Tickets expire quickly and are single-use.
 
-`POST /api/v1/playback/ticket` with `{ "channelId": 1, "stream": "main", "startMs": 0, "endMs": 0 }` returns a playback `wsPath`.
+`POST /api/v1/playback/ticket` with
+`{ "channelId": 1, "stream": "main", "startMs": 0, "endMs": 0, "speed": 1 }`
+returns a playback `wsPath`. `speed` accepts 0.25–8.0 (default 1.0); the server
+paces the MPEG-TS stream by the segment bitrate, and the web player additionally
+sets the media element's playback rate. Seeking (fast-forward/rewind buttons,
+timeline clicks) requests a new ticket starting at the target time; the server
+starts at the nearest keyframe.
+
+## Startup configuration
+
+`GET /api/v1/system/config` returns the effective startup settings without
+secrets:
+
+```json
+{
+  "http": { "port": 8080, "host": "0.0.0.0", "tls": { "cert": "", "key": "", "selfSigned": false } },
+  "rtsp": { "port": 554 },
+  "dataDir": "/var/lib/uvnvr",
+  "maintenance": false,
+  "ffmpeg": { "path": "" },
+  "logging": { "level": "info" },
+  "config": { "path": "/etc/uvnvr/uvnvr.json", "loaded": true }
+}
+```
+
+Ports and the data directory are applied at startup. See
+[`configuration.md`](configuration.md) for the file format and precedence.
 
 ## Errors
 
