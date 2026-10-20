@@ -14,6 +14,7 @@ $vcpkgBin = "$Root\build\vcpkg_installed\arm64-windows\bin"
 if (Test-Path $vcpkgBin) { Copy-Item "$vcpkgBin\*.dll" "$Out\bin\" -Force }
 Copy-Item "$Root\LICENSE", "$Root\THIRD_PARTY_NOTICES.md" "$Out\"
 Compress-Archive -Path "$Out\*" -DestinationPath "$Root\dist-packages\uvnvr-$Version-windows-arm64.zip" -Force
+$env:Path += ';C:\Program Files (x86)\NSIS'
 $makensis = Get-Command makensis -ErrorAction SilentlyContinue
 if ($makensis) {
   & $makensis.Source -V2 "-DVERSION=$Version" "-DARCH=arm64" "-DOUTDIR=$Root\dist-packages" "-DSOURCE=$Out" "-DROOT=$Root" "$Root\packaging\windows\uvnvr.nsi"

@@ -293,7 +293,7 @@ jobs:
       - name: Install vcpkg OpenSSL for arm64
         shell: pwsh
         run: |
-          vcpkg install openssl:arm64-windows --clean-after-build
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:arm64-windows --clean-after-build
       - name: Fetch dependencies
         shell: pwsh
         run: |
