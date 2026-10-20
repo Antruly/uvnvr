@@ -12,7 +12,10 @@
 !endif
 
 Name "UvNVR ${VERSION}"
-OutFile "..\dist-packages\uvnvr-${VERSION}-windows-x64-setup.exe"
+!ifndef OUTDIR
+  !define OUTDIR "..\dist-packages"
+!endif
+OutFile "${OUTDIR}\uvnvr-${VERSION}-windows-x64-setup.exe"
 InstallDir "$PROGRAMFILES64\UvNVR"
 InstallDirRegKey HKLM "Software\UvNVR" "InstallDir"
 RequestExecutionLevel admin

@@ -31,6 +31,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then VERSION="$(cat VERSION)"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -74,7 +82,7 @@ jobs:
             --libuvcpp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-${{ matrix.libuvcpp }}" \
             --ffmpeg "$FFMPEG_BIN" \
             --arch "${{ matrix.arch }}" \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${{ steps.version.outputs.version }}" \
             --out dist-packages
 
       - uses: actions/upload-artifact@v7
@@ -96,6 +104,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then VERSION="$(cat VERSION)"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -110,6 +126,7 @@ jobs:
             mingw-w64-x86_64-zlib
             mingw-w64-x86_64-nsis
             unzip
+            zip
 
       - uses: actions/setup-node@v7
         with:
@@ -142,8 +159,7 @@ jobs:
 
       - name: Stage portable tree
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$VERSION" == "refs/heads"* || -z "$VERSION" ]]; then VERSION="0.1.0-dev"; fi
+          VERSION="${{ steps.version.outputs.version }}"
           ROOT="$(pwd)"
           OUT="$ROOT/dist-packages/uvnvr-${VERSION}-windows-x64"
           mkdir -p "$OUT/bin" "$OUT/share/uvnvr/frontend/dist"
@@ -164,7 +180,7 @@ jobs:
           done
           cd dist-packages
           zip -qr "uvnvr-${VERSION}-windows-x64.zip" "uvnvr-${VERSION}-windows-x64"
-          makensis -V2 -DVERSION="$VERSION" -DSOURCE="$(cygpath -w "$OUT")" -DROOT="$(cygpath -w "$ROOT")" "$ROOT/packaging/windows/uvnvr.nsi"
+          makensis -V2 -DVERSION="$VERSION" -DOUTDIR="$(cygpath -w "$ROOT/dist-packages")" -DSOURCE="$(cygpath -w "$OUT")" -DROOT="$(cygpath -w "$ROOT")" "$ROOT/packaging/windows/uvnvr.nsi"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -188,6 +204,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9] ]]; then VERSION="$(cat VERSION)"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v7
         with:
