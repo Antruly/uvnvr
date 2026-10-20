@@ -293,7 +293,8 @@ jobs:
       - name: Install vcpkg OpenSSL for arm64
         shell: pwsh
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:arm64-windows --clean-after-build
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          & "$vcpkgRoot\vcpkg.exe" install openssl:arm64-windows --clean-after-build
       - name: Fetch dependencies
         shell: pwsh
         run: |
@@ -304,7 +305,8 @@ jobs:
       - name: Build backend
         shell: pwsh
         run: |
-          cmake -S . -B build -A ARM64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-windows -DUVNVR_LIBUVCPP_ROOT="$env:RUNNER_TEMP\uvcpp\libuvcpp-1.8.1-msvc-arm64"
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          cmake -S . -B build -A ARM64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-windows -DUVNVR_LIBUVCPP_ROOT="$env:RUNNER_TEMP\uvcpp\libuvcpp-1.8.1-msvc-arm64"
           cmake --build build --config Release --parallel
       - name: Package
         shell: pwsh
@@ -361,4 +363,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "UvNVR ${GITHUB_REF_NAME}" \
             --generate-notes \
-            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name 'FFmpeg-LGPLv3.txt' -o -name '*sbom*' \) -print)
+            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' -o -name '*.dmg' -o -name '*.tar.xz' -o -name 'FFmpeg-LGPLv3.txt' -o -name '*sbom*' \) -print)
