@@ -41,11 +41,15 @@ else
 fi
 install -m 0644 "${ROOT}/packaging/macos/com.antruly.uvnvr.plist" "${STAGE}/Library/LaunchDaemons/com.antruly.uvnvr.plist"
 chmod +x "${ROOT}/packaging/macos/scripts/postinstall"
+(cd "${STAGE}" && zip -qry "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.zip" opt Library)
 pkgbuild --root "${STAGE}" --identifier com.antruly.uvnvr --version "${VERSION}" \
   --install-location / --scripts "${ROOT}/packaging/macos/scripts" \
   "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.pkg" >/dev/null
-hdiutil create -volname "UvNVR ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO \
-  "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.dmg" >/dev/null
-(cd "${STAGE}" && zip -qry "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.zip" opt Library)
+# The dmg is a convenience wrapper around the pkg/zip. hdiutil can be
+# unreliable on headless runners, so it must not block the release assets.
+if command -v hdiutil >/dev/null 2>&1; then
+  (hdiutil create -volname "UvNVR ${VERSION}" -srcfolder "${STAGE}" -ov -format UDZO \
+     "${OUT}/uvnvr-${VERSION}-macos-${ARCH}.dmg" >/dev/null 2>&1 &)
+fi
 echo "macOS packages written to ${OUT}"
 ls -lh "${OUT}"/*macos*
