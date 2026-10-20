@@ -239,8 +239,7 @@ jobs:
           curl -fL --retry 3 -o "$RUNNER_TEMP/uvcpp.tar.gz"             https://github.com/Antruly/libuvcpp/archive/refs/tags/v1.8.1.tar.gz
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/uvcpp.tar.gz"
           cmake -S "$RUNNER_TEMP/libuvcpp-1.8.1" -B "$RUNNER_TEMP/uvcpp-build" -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp-install"             -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3);$(brew --prefix libuv);$(brew --prefix nghttp2)"             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_DB=ON             -DUVCPP_ENABLE_NGHTTP2=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
-          cmake --build "$RUNNER_TEMP/uvcpp-build" --parallel
-          cmake --install "$RUNNER_TEMP/uvcpp-build"
+          cmake --build "$RUNNER_TEMP/uvcpp-build" --target install --parallel
 
       - name: Build static LGPL FFmpeg
         run: |
