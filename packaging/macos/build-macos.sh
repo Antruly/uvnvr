@@ -25,7 +25,9 @@ if "${FFMPEG_BIN}" -buildconf 2>/dev/null | grep -q -- '--enable-gpl'; then
   echo "refusing to package a GPL FFmpeg build" >&2
   exit 1
 fi
-mkdir -p "${OUT}" "${OUT}/../.macos-stage"
+mkdir -p "${OUT}"
+# The zip is created from inside the staging directory, so make --out absolute.
+OUT="$(cd "${OUT}" && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 APP="${STAGE}/opt/uvnvr"
