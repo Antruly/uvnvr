@@ -21,11 +21,13 @@ const isPublic = computed(() => Boolean(route.meta.public))
 const primaryNav = [
   { key: 'dashboard', to: '/', icon: 'dashboard', permission: 'dashboard.view' },
   { key: 'preview', to: '/preview', icon: 'camera', permission: 'preview.view' },
+  { key: 'channels', to: '/channels', icon: 'camera', permission: 'channel.view' },
+  { key: 'playback', to: '/playback', icon: 'playback', permission: 'playback.view' },
+  { key: 'plans', to: '/plans', icon: 'dashboard', permission: 'plan.view' },
+  { key: 'storage', to: '/storage', icon: 'storage', permission: 'storage.view' },
 ]
 
 const plannedNav = [
-  { key: 'channels', icon: 'camera' },
-  { key: 'playback', icon: 'playback' },
   { key: 'storage', icon: 'storage' },
   { key: 'alerts', icon: 'bell' },
 ]

@@ -1,5 +1,7 @@
 #include "app.h"
 
+#include "onvif.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -170,6 +172,21 @@ std::string Join(const std::vector<std::string>& values, const std::string& sepa
   return out;
 }
 
+std::string PercentEncode(const std::string& input) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (const unsigned char c : input) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[(c >> 4) & 0x0f]);
+      out.push_back(kHex[c & 0x0f]);
+    }
+  }
+  return out;
+}
+
 std::string TableText(const uvcpp::uvcpp_db_table& table, size_t row, const std::string& column) {
   if (row >= table.rows().size())
     return {};
@@ -180,6 +197,29 @@ int64_t TableInt(const uvcpp::uvcpp_db_table& table, size_t row, const std::stri
   if (row >= table.rows().size())
     return 0;
   return table.at(row, column).to_int64();
+}
+
+void FillChannelRow(const uvcpp::uvcpp_db_table& table, size_t row, ChannelRow* channel) {
+  channel->id = TableInt(table, row, "id");
+  channel->name = TableText(table, row, "name");
+  channel->protocol = TableText(table, row, "protocol");
+  channel->host = TableText(table, row, "host");
+  channel->port = static_cast<int>(TableInt(table, row, "port"));
+  channel->username = TableText(table, row, "username");
+  channel->password_enc = TableText(table, row, "password_enc");
+  channel->main_url = TableText(table, row, "main_url");
+  channel->sub_url = TableText(table, row, "sub_url");
+  channel->sub_enabled = TableInt(table, row, "sub_enabled") != 0;
+  channel->enabled = TableInt(table, row, "enabled") != 0;
+  channel->brand = TableText(table, row, "brand");
+  channel->media_json = TableText(table, row, "media_json");
+  channel->watermark_json = TableText(table, row, "watermark_json");
+  channel->last_status = TableText(table, row, "last_status");
+  channel->last_error = TableText(table, row, "last_error");
+  channel->last_online_at = TableInt(table, row, "last_online_at");
+  channel->last_offline_at = TableInt(table, row, "last_offline_at");
+  channel->created_at = TableInt(table, row, "created_at");
+  channel->updated_at = TableInt(table, row, "updated_at");
 }
 
 std::vector<std::string> ParsePermissions(const std::string& text) {
@@ -378,6 +418,71 @@ bool App::Migrate(std::string* error) {
       "detail TEXT,"
       "request_id TEXT)",
       "CREATE TABLE IF NOT EXISTS system_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS channels ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "name TEXT NOT NULL,"
+      "protocol TEXT NOT NULL DEFAULT 'rtsp',"
+      "host TEXT NOT NULL DEFAULT '',"
+      "port INTEGER NOT NULL DEFAULT 554,"
+      "username TEXT NOT NULL DEFAULT '',"
+      "password_enc TEXT NOT NULL DEFAULT '',"
+      "main_url TEXT NOT NULL DEFAULT '',"
+      "sub_url TEXT NOT NULL DEFAULT '',"
+      "sub_enabled INTEGER NOT NULL DEFAULT 0,"
+      "enabled INTEGER NOT NULL DEFAULT 1,"
+      "brand TEXT NOT NULL DEFAULT '',"
+      "media_json TEXT NOT NULL DEFAULT '{}',"
+      "watermark_json TEXT NOT NULL DEFAULT '{}',"
+      "last_status TEXT NOT NULL DEFAULT 'unknown',"
+      "last_error TEXT NOT NULL DEFAULT '',"
+      "last_online_at INTEGER NOT NULL DEFAULT 0,"
+      "last_offline_at INTEGER NOT NULL DEFAULT 0,"
+      "created_at INTEGER NOT NULL,"
+      "updated_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS record_plans ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL,"
+      "weekday INTEGER NOT NULL,"
+      "start_min INTEGER NOT NULL,"
+      "end_min INTEGER NOT NULL,"
+      "mode TEXT NOT NULL DEFAULT 'timed',"
+      "stream TEXT NOT NULL DEFAULT 'main',"
+      "enabled INTEGER NOT NULL DEFAULT 1,"
+      "created_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS storage_volumes ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "path TEXT NOT NULL UNIQUE,"
+      "label TEXT NOT NULL DEFAULT '',"
+      "mode TEXT NOT NULL DEFAULT 'loop',"
+      "max_usage_pct INTEGER NOT NULL DEFAULT 90,"
+      "reserve_gb INTEGER NOT NULL DEFAULT 5,"
+      "retention_days INTEGER NOT NULL DEFAULT 30,"
+      "enabled INTEGER NOT NULL DEFAULT 1,"
+      "created_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS recordings ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL,"
+      "stream TEXT NOT NULL,"
+      "volume_id INTEGER NOT NULL DEFAULT 1,"
+      "path TEXT NOT NULL,"
+      "start_ms INTEGER NOT NULL,"
+      "end_ms INTEGER NOT NULL,"
+      "duration_ms INTEGER NOT NULL,"
+      "size_bytes INTEGER NOT NULL,"
+      "codec TEXT NOT NULL DEFAULT '',"
+      "record_type TEXT NOT NULL DEFAULT 'timed',"
+      "created_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS channel_events ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL,"
+      "state TEXT NOT NULL,"
+      "reason TEXT NOT NULL DEFAULT '',"
+      "at INTEGER NOT NULL)",
+      "CREATE INDEX IF NOT EXISTS idx_channels_enabled ON channels(enabled)",
+      "CREATE INDEX IF NOT EXISTS idx_plans_channel ON record_plans(channel_id, weekday)",
+      "CREATE INDEX IF NOT EXISTS idx_recordings_channel ON recordings(channel_id, start_ms)",
+      "CREATE INDEX IF NOT EXISTS idx_recordings_volume ON recordings(volume_id, start_ms)",
+      "CREATE INDEX IF NOT EXISTS idx_channel_events ON channel_events(channel_id, at)",
       "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
       "CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)",
       "CREATE INDEX IF NOT EXISTS idx_attempts_at ON login_attempts(kind, at)",
@@ -411,10 +516,19 @@ bool App::Migrate(std::string* error) {
   }
 
   const std::vector<std::pair<std::string, std::string>> settings = {
-      {"security.web_max_failures", "10"},  {"security.web_lock_minutes", "10"},
-      {"security.api_max_failures", "100"}, {"security.api_lock_minutes", "10"},
-      {"security.api_locked_until", "0"},   {"audit.retention_days", "180"},
-      {"system.timezone", "UTC"},           {"system.language", "auto"},
+      {"security.web_max_failures", "10"},
+      {"security.web_lock_minutes", "10"},
+      {"security.api_max_failures", "100"},
+      {"security.api_lock_minutes", "10"},
+      {"security.api_locked_until", "0"},
+      {"audit.retention_days", "180"},
+      {"system.timezone", "UTC"},
+      {"system.language", "auto"},
+      {"live.cache_mb", "8"},
+      {"recording.segment_minutes", "5"},
+      {"recording.segment_size_mb", "256"},
+      {"recording.segment_mode", "time"},
+      {"recording.retention_days", "30"},
   };
   for (const auto& [key, value] : settings) {
     uvcpp::uvcpp_db_params params;
@@ -483,6 +597,12 @@ bool App::Init(std::string* error) {
       *error = "cannot initialise serial number: " + *error;
     return false;
   }
+  if (!EnsureSecretKey(error)) {
+    if (error != nullptr)
+      *error = "cannot initialise the secret key: " + *error;
+    return false;
+  }
+  EnsureDefaults();
 
   setup_required_ = CountUsers() == 0;
   CleanupAudit();
@@ -1157,8 +1277,10 @@ void App::RegisterMiddleware() {
         resp.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
         resp.set_header("Content-Security-Policy",
                         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                        "img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; "
-                        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+                        "img-src 'self' data:; media-src 'self' blob:; "
+                        "worker-src 'self' blob:; child-src 'self' blob:; font-src 'self'; "
+                        "connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; "
+                        "frame-ancestors 'none'");
         next();
       });
   web_.use(uvcpp::web_middleware_request_id("X-Request-Id", false));
@@ -1314,9 +1436,30 @@ int App::Run() {
 
   std::printf("UvNVR %s (%s) listening on %s://127.0.0.1:%d\n", UVNVR_VERSION, UVNVR_GIT_SHA,
               tls_enabled ? "https" : "http", web_.bound_port());
+  media_ = std::make_unique<MediaService>(&web_);
+  if (const char* ffmpeg = std::getenv("UVNVR_FFMPEG"); ffmpeg != nullptr && ffmpeg[0] != '\0') {
+    media_->SetFfmpegPath(ffmpeg);
+  }
+  media_->Start();
+  SyncAllMedia();
+  recording_ = std::make_unique<RecordingService>(&db_, config_.data_dir);
+  media_->SetDataSink(
+      [this](int64_t channel_id, const std::string& stream, const uint8_t* data, size_t len) {
+        if (recording_)
+          recording_->OnTs(channel_id, stream, data, len);
+      });
+  recording_->Start();
+  playback_ = std::make_unique<PlaybackService>(&web_, &db_);
+
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
+  std::printf("ffmpeg: %s (%s)\n", media_->FfmpegPath().c_str(),
+              media_->Available() ? "available" : "not found");
   std::fflush(stdout);
   web_.join();
+  if (recording_)
+    recording_->Stop();
+  media_.reset();
+  recording_.reset();
   return 0;
 }
 
@@ -1692,6 +1835,12 @@ void SendOp(uvcpp::uvcpp_web_response& resp, const OpResult& result) {
 
 void App::RegisterProtectedRoutes() {
   RegisterCoreRoutes();
+  RegisterChannelRoutes();
+  RegisterOnvifRoutes();
+  RegisterStreamRoutes();
+  RegisterRecordingRoutes();
+  RegisterStorageRoutes();
+  RegisterPlanRoutes();
 
   // Users -----------------------------------------------------------------
   web_.get(
@@ -2575,6 +2724,1671 @@ void App::RegisterProtectedRoutes() {
                      });
                },
                "api.access"));
+}
+
+bool App::EnsureSecretKey(std::string* error) {
+  const std::filesystem::path path = std::filesystem::path(config_.data_dir) / "secret.key";
+  if (std::filesystem::exists(path)) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      if (error)
+        *error = "cannot read " + path.string();
+      return false;
+    }
+    secret_key_.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    if (secret_key_.size() != 32) {
+      if (error)
+        *error = "secret.key must contain exactly 32 bytes";
+      return false;
+    }
+    return true;
+  }
+
+  secret_key_.assign(32, 0);
+  if (RAND_bytes(secret_key_.data(), static_cast<int>(secret_key_.size())) != 1) {
+    if (error)
+      *error = "cannot generate the secret key";
+    return false;
+  }
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    if (error)
+      *error = "cannot write " + path.string();
+    return false;
+  }
+  output.write(reinterpret_cast<const char*>(secret_key_.data()),
+               static_cast<std::streamsize>(secret_key_.size()));
+  output.close();
+  std::error_code ec;
+  std::filesystem::permissions(
+      path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace, ec);
+  return true;
+}
+
+void App::EnsureDefaults() {
+  std::error_code ec;
+  const std::filesystem::path recordings =
+      std::filesystem::absolute(std::filesystem::path(config_.data_dir) / "recordings", ec);
+  std::filesystem::create_directories(recordings, ec);
+
+  uvcpp::uvcpp_db_table table;
+  std::string error;
+  if (!Query("SELECT COUNT(*) AS n FROM storage_volumes", {}, &table, &error))
+    return;
+  if (!table.empty() && TableInt(table, 0, "n") > 0)
+    return;
+
+  uvcpp::uvcpp_db_params params;
+  params.add(recordings.string());
+  params.add("Default");
+  params.add("loop");
+  params.add(90);
+  params.add(5);
+  params.add(30);
+  params.add(1);
+  params.add(NowSeconds());
+  Exec("INSERT INTO storage_volumes(path, label, mode, max_usage_pct, reserve_gb, "
+       "retention_days, enabled, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+       params, nullptr, &error);
+}
+
+std::string App::EncryptSecret(const std::string& plain, std::string* error) {
+  if (plain.empty())
+    return {};
+  if (secret_key_.size() != 32) {
+    if (error)
+      *error = "secret key is not initialised";
+    return {};
+  }
+  unsigned char iv[12];
+  if (RAND_bytes(iv, sizeof(iv)) != 1) {
+    if (error)
+      *error = "cannot generate an IV";
+    return {};
+  }
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (ctx == nullptr) {
+    if (error)
+      *error = "cannot allocate the cipher context";
+    return {};
+  }
+  std::vector<unsigned char> cipher(plain.size());
+  unsigned char tag[16];
+  int out_len = 0;
+  int total = 0;
+  bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), nullptr) == 1 &&
+            EVP_EncryptInit_ex(ctx, nullptr, nullptr, secret_key_.data(), iv) == 1 &&
+            EVP_EncryptUpdate(ctx, cipher.data(), &out_len,
+                              reinterpret_cast<const unsigned char*>(plain.data()),
+                              static_cast<int>(plain.size())) == 1;
+  if (ok) {
+    total = out_len;
+    ok = EVP_EncryptFinal_ex(ctx, cipher.data() + total, &out_len) == 1;
+    if (ok)
+      total += out_len;
+  }
+  if (ok)
+    ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) == 1;
+  EVP_CIPHER_CTX_free(ctx);
+  if (!ok) {
+    if (error)
+      *error = "AES-GCM encryption failed";
+    return {};
+  }
+  cipher.resize(static_cast<size_t>(total));
+  return "v1:" + HexEncode(iv, sizeof(iv)) + ":" + HexEncode(cipher.data(), cipher.size()) + ":" +
+         HexEncode(tag, sizeof(tag));
+}
+
+std::string App::DecryptSecret(const std::string& encoded, std::string* error) {
+  if (encoded.empty())
+    return {};
+  const std::vector<std::string> parts = Split(encoded, ':');
+  if (parts.size() != 4 || parts[0] != "v1") {
+    if (error)
+      *error = "unsupported secret format";
+    return {};
+  }
+  std::vector<unsigned char> iv;
+  std::vector<unsigned char> cipher;
+  std::vector<unsigned char> tag;
+  if (!HexDecode(parts[1], &iv) || !HexDecode(parts[2], &cipher) || !HexDecode(parts[3], &tag) ||
+      iv.size() != 12 || tag.size() != 16 || secret_key_.size() != 32) {
+    if (error)
+      *error = "invalid secret encoding";
+    return {};
+  }
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (ctx == nullptr) {
+    if (error)
+      *error = "cannot allocate the cipher context";
+    return {};
+  }
+  std::vector<unsigned char> plain(cipher.size() + 16);
+  int out_len = 0;
+  int total = 0;
+  bool ok =
+      EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(iv.size()), nullptr) == 1 &&
+      EVP_DecryptInit_ex(ctx, nullptr, nullptr, secret_key_.data(), iv.data()) == 1 &&
+      EVP_DecryptUpdate(ctx, plain.data(), &out_len, cipher.data(),
+                        static_cast<int>(cipher.size())) == 1;
+  if (ok) {
+    total = out_len;
+    ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, static_cast<int>(tag.size()), tag.data()) ==
+             1 &&
+         EVP_DecryptFinal_ex(ctx, plain.data() + total, &out_len) == 1;
+    if (ok)
+      total += out_len;
+  }
+  EVP_CIPHER_CTX_free(ctx);
+  if (!ok) {
+    if (error)
+      *error = "AES-GCM authentication failed";
+    return {};
+  }
+  return std::string(reinterpret_cast<char*>(plain.data()), static_cast<size_t>(total));
+}
+
+bool App::LoadChannel(int64_t id, ChannelRow* out, std::string* error) {
+  uvcpp::uvcpp_db_table table;
+  uvcpp::uvcpp_db_params params;
+  params.add(id);
+  if (!Query("SELECT * FROM channels WHERE id = ?", params, &table, error) || table.empty()) {
+    return false;
+  }
+  FillChannelRow(table, 0, out);
+  return true;
+}
+
+std::vector<ChannelRow> App::LoadChannels(std::string* error) {
+  std::vector<ChannelRow> result;
+  uvcpp::uvcpp_db_table table;
+  if (!Query("SELECT * FROM channels ORDER BY name COLLATE NOCASE, id", {}, &table, error)) {
+    return result;
+  }
+  result.reserve(table.rows().size());
+  for (size_t i = 0; i < table.rows().size(); ++i) {
+    ChannelRow channel;
+    FillChannelRow(table, i, &channel);
+    result.push_back(std::move(channel));
+  }
+  return result;
+}
+
+json App::ChannelJson(const ChannelRow& channel) const {
+  json media = json::parse(channel.media_json, nullptr, false);
+  if (media.is_discarded() || !media.is_object())
+    media = json::object();
+  json watermark = json::parse(channel.watermark_json, nullptr, false);
+  if (watermark.is_discarded() || !watermark.is_object())
+    watermark = json::object();
+  return json{
+      {"id", channel.id},
+      {"name", channel.name},
+      {"protocol", channel.protocol},
+      {"host", channel.host},
+      {"port", channel.port},
+      {"username", channel.username},
+      {"hasPassword", !channel.password_enc.empty()},
+      {"mainUrl", channel.main_url},
+      {"subUrl", channel.sub_url},
+      {"subEnabled", channel.sub_enabled},
+      {"enabled", channel.enabled},
+      {"brand", channel.brand},
+      {"media", media},
+      {"watermark", watermark},
+      {"lastStatus", channel.last_status},
+      {"lastError", channel.last_error},
+      {"lastOnlineAt", channel.last_online_at},
+      {"lastOfflineAt", channel.last_offline_at},
+      {"createdAt", channel.created_at},
+      {"updatedAt", channel.updated_at},
+  };
+}
+
+std::string App::BuildChannelUrl(const ChannelRow& channel, bool sub, std::string* error) {
+  std::string url = sub ? channel.sub_url : channel.main_url;
+  if (url.empty() && channel.protocol == "hikvision") {
+    url = sub ? "rtsp://{user}:{pass}@{host}:{port}/Streaming/Channels/102"
+              : "rtsp://{user}:{pass}@{host}:{port}/Streaming/Channels/101";
+  } else if (url.empty() && channel.protocol == "dahua") {
+    url = sub ? "rtsp://{user}:{pass}@{host}:{port}/cam/realmonitor?channel=1&subtype=1"
+              : "rtsp://{user}:{pass}@{host}:{port}/cam/realmonitor?channel=1&subtype=0";
+  }
+  if (url.empty()) {
+    if (error)
+      *error = "stream URL is empty";
+    return {};
+  }
+  std::string password;
+  if (!channel.password_enc.empty()) {
+    password = DecryptSecret(channel.password_enc, error);
+    if (password.empty() && error != nullptr && !error->empty())
+      return {};
+  }
+  auto replace_all = [](std::string& target, const std::string& from, const std::string& to) {
+    size_t pos = 0;
+    while ((pos = target.find(from, pos)) != std::string::npos) {
+      target.replace(pos, from.size(), to);
+      pos += to.size();
+    }
+  };
+  replace_all(url, "{user}", PercentEncode(channel.username));
+  replace_all(url, "{pass}", PercentEncode(password));
+  replace_all(url, "{host}", channel.host);
+  replace_all(url, "{port}", std::to_string(channel.port));
+
+  if (!channel.username.empty() && url.rfind("rtsp://", 0) == 0) {
+    const size_t authority = 7;
+    const size_t slash = url.find('/', authority);
+    const size_t at = url.find('@', authority);
+    if (at == std::string::npos || (slash != std::string::npos && at > slash)) {
+      url.insert(authority, PercentEncode(channel.username) + ":" + PercentEncode(password) + "@");
+    }
+  }
+  return url;
+}
+
+void App::SyncMediaChannel(int64_t id) {
+  if (!media_)
+    return;
+  ChannelRow channel;
+  std::string error;
+  if (!LoadChannel(id, &channel, &error) || !channel.enabled) {
+    media_->Remove(id);
+    return;
+  }
+  ChannelSpec spec;
+  spec.id = channel.id;
+  spec.name = channel.name;
+  spec.enabled = channel.enabled;
+  spec.sub_enabled = channel.sub_enabled;
+  spec.main_url = BuildChannelUrl(channel, false, &error);
+  if (spec.main_url.empty()) {
+    std::fprintf(stderr, "channel %lld has no usable main stream: %s\n", static_cast<long long>(id),
+                 error.c_str());
+    media_->Remove(id);
+    return;
+  }
+  if (channel.sub_enabled) {
+    spec.sub_url = BuildChannelUrl(channel, true, &error);
+    if (spec.sub_url.empty()) {
+      spec.sub_enabled = false;
+      std::fprintf(stderr, "channel %lld has no usable sub stream: %s\n",
+                   static_cast<long long>(id), error.c_str());
+    }
+  }
+  media_->Upsert(spec);
+}
+
+void App::SyncAllMedia() {
+  if (!media_)
+    return;
+  std::string error;
+  const auto channels = LoadChannels(&error);
+  for (const auto& channel : channels) {
+    if (!channel.enabled)
+      continue;
+    SyncMediaChannel(channel.id);
+  }
+}
+
+bool App::CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
+                             std::string* token, int64_t* expires_at, std::string* error) {
+  if (stream != "main" && stream != "sub") {
+    if (error)
+      *error = "stream must be main or sub";
+    return false;
+  }
+  *token = RandomHex(24);
+  if (token->empty()) {
+    if (error)
+      *error = "cannot generate a stream ticket";
+    return false;
+  }
+  *expires_at = NowSeconds() + 30;
+  std::lock_guard<std::mutex> lock(tickets_mutex_);
+  const int64_t now = NowSeconds();
+  for (auto it = tickets_.begin(); it != tickets_.end();) {
+    if (it->second.expires_at <= now) {
+      it = tickets_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  StreamTicket ticket;
+  ticket.user_id = user_id;
+  ticket.channel_id = channel_id;
+  ticket.stream = stream;
+  ticket.expires_at = *expires_at;
+  tickets_[*token] = ticket;
+  return true;
+}
+
+bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
+                               int64_t start_ms, int64_t end_ms, std::string* token,
+                               int64_t* expires_at, std::string* error) {
+  if (stream != "main" && stream != "sub") {
+    if (error)
+      *error = "stream must be main or sub";
+    return false;
+  }
+  *token = RandomHex(24);
+  if (token->empty()) {
+    if (error)
+      *error = "cannot generate a playback ticket";
+    return false;
+  }
+  *expires_at = NowSeconds() + 60;
+  std::lock_guard<std::mutex> lock(tickets_mutex_);
+  const int64_t now = NowSeconds();
+  for (auto it = tickets_.begin(); it != tickets_.end();) {
+    if (it->second.expires_at <= now) {
+      it = tickets_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  StreamTicket ticket;
+  ticket.user_id = user_id;
+  ticket.channel_id = channel_id;
+  ticket.stream = stream;
+  ticket.expires_at = *expires_at;
+  ticket.playback = true;
+  ticket.start_ms = start_ms;
+  ticket.end_ms = end_ms;
+  tickets_[*token] = ticket;
+  return true;
+}
+
+bool App::ValidateStreamTicket(const std::string& token, StreamTicket* ticket) {
+  std::lock_guard<std::mutex> lock(tickets_mutex_);
+  const auto it = tickets_.find(token);
+  if (it == tickets_.end())
+    return false;
+  if (it->second.expires_at <= NowSeconds()) {
+    tickets_.erase(it);
+    return false;
+  }
+  *ticket = it->second;
+  tickets_.erase(it);
+  return true;
+}
+
+void App::OnSignal(uv_signal_t* handle, int signum) {
+  (void)signum;
+  App* app = static_cast<App*>(handle->data);
+  if (app != nullptr)
+    app->Shutdown();
+}
+
+void App::Shutdown() {
+  if (media_)
+    media_->Stop();
+  for (auto*& handle : signal_handles_) {
+    if (handle != nullptr) {
+      uv_signal_stop(handle);
+      uv_close(reinterpret_cast<uv_handle_t*>(handle),
+               [](uv_handle_t* h) { delete reinterpret_cast<uv_signal_t*>(h); });
+      handle = nullptr;
+    }
+  }
+  web_.stop();
+}
+
+void App::RegisterChannelRoutes() {
+  web_.get("/api/v1/channels",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 auto items = std::make_shared<json>(json::array());
+                 RunWork(
+                     [this, items] {
+                       std::string error;
+                       const auto channels = LoadChannels(&error);
+                       for (const auto& channel : channels) {
+                         json item = ChannelJson(channel);
+                         StreamStatus main_status;
+                         StreamStatus sub_status;
+                         if (media_) {
+                           main_status = media_->Status(channel.id, "main");
+                           sub_status = media_->Status(channel.id, "sub");
+                         }
+                         item["mainState"] = main_status.state;
+                         item["mainError"] = main_status.error;
+                         item["mainHasKeyframe"] = main_status.has_keyframe;
+                         item["subState"] = sub_status.state;
+                         item["subError"] = sub_status.error;
+                         item["subHasKeyframe"] = sub_status.has_keyframe;
+                         items->push_back(std::move(item));
+                       }
+                     },
+                     [items, &resp, next] {
+                       SendJson(resp, 200, *items);
+                       next();
+                     });
+               },
+               "channel.view"));
+
+  web_.post(
+      "/api/v1/channels",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const std::string name = JsonString(body, "name");
+            const std::string protocol = JsonString(body, "protocol", "rtsp");
+            const std::string host = JsonString(body, "host");
+            const int64_t port = JsonInt(body, "port", 554);
+            const std::string username = JsonString(body, "username");
+            const std::string password = JsonString(body, "password");
+            const std::string main_url = JsonString(body, "mainUrl");
+            const std::string sub_url = JsonString(body, "subUrl");
+            const bool sub_enabled = JsonBool(body, "subEnabled", !sub_url.empty());
+            const bool enabled = JsonBool(body, "enabled", true);
+            const std::string brand = JsonString(body, "brand");
+            const json media = body.contains("media") && body["media"].is_object() ? body["media"]
+                                                                                   : json::object();
+            const json watermark = body.contains("watermark") && body["watermark"].is_object()
+                                       ? body["watermark"]
+                                       : json::object();
+            if (name.empty() || name.size() > 64) {
+              SendError(resp, 400, "invalid_name", "channel name is required (max 64 characters)");
+              next();
+              return;
+            }
+            if (port < 1 || port > 65535) {
+              SendError(resp, 400, "invalid_port", "port must be between 1 and 65535");
+              next();
+              return;
+            }
+            if (main_url.empty() && protocol != "hikvision" && protocol != "dahua") {
+              SendError(resp, 400, "missing_url", "mainUrl is required for this protocol");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, name, protocol, host, port, username, password, main_url, sub_url,
+                 sub_enabled, enabled, brand, media, watermark, actor, ip, ua, op] {
+                  std::string encrypt_error;
+                  const std::string password_enc = EncryptSecret(password, &encrypt_error);
+                  if (!password.empty() && password_enc.empty()) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "encrypt_failed";
+                    op->message = encrypt_error;
+                    return;
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(name);
+                  params.add(protocol);
+                  params.add(host);
+                  params.add(port);
+                  params.add(username);
+                  params.add(password_enc);
+                  params.add(main_url);
+                  params.add(sub_url);
+                  params.add(sub_enabled ? 1 : 0);
+                  params.add(enabled ? 1 : 0);
+                  params.add(brand);
+                  params.add(media.dump());
+                  params.add(watermark.dump());
+                  params.add(NowSeconds());
+                  params.add(NowSeconds());
+                  uvcpp::uvcpp_db_value new_id;
+                  std::string error;
+                  if (!uvcpp::uvcpp_db_ok(db_.insert("INSERT INTO channels(name, protocol, host, "
+                                                     "port, username, password_enc, "
+                                                     "main_url, sub_url, sub_enabled, enabled, "
+                                                     "brand, media_json, watermark_json, "
+                                                     "created_at, updated_at) VALUES(?, ?, ?, ?, "
+                                                     "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                                     params, &new_id))) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the channel could not be created";
+                    return;
+                  }
+                  const int64_t id = new_id.to_int64();
+                  Audit("channel", "info", actor.username, ip, ua, "channel", std::to_string(id),
+                        "create", "success", "", json{{"name", name}}.dump());
+                  op->status = 201;
+                  op->data = json{{"id", id}, {"name", name}};
+                },
+                [this, op, &resp, next] {
+                  if (op->ok && op->data.contains("id")) {
+                    SyncMediaChannel(op->data["id"].get<int64_t>());
+                  }
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "channel.manage"));
+
+  web_.put(
+      "/api/v1/channels/:id",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string* id_param = req.param("id");
+            int64_t channel_id = 0;
+            if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid channel id");
+              next();
+              return;
+            }
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const bool has_password = body.contains("password");
+            const std::string password = JsonString(body, "password");
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, channel_id, body, has_password, password, actor, ip, ua, op] {
+                  ChannelRow existing;
+                  std::string error;
+                  if (!LoadChannel(channel_id, &existing, &error)) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "channel not found";
+                    return;
+                  }
+                  const std::string name =
+                      body.contains("name") ? JsonString(body, "name") : existing.name;
+                  const std::string protocol =
+                      body.contains("protocol") ? JsonString(body, "protocol") : existing.protocol;
+                  const std::string host =
+                      body.contains("host") ? JsonString(body, "host") : existing.host;
+                  const int64_t port =
+                      body.contains("port") ? JsonInt(body, "port", existing.port) : existing.port;
+                  const std::string username =
+                      body.contains("username") ? JsonString(body, "username") : existing.username;
+                  const std::string main_url =
+                      body.contains("mainUrl") ? JsonString(body, "mainUrl") : existing.main_url;
+                  const std::string sub_url =
+                      body.contains("subUrl") ? JsonString(body, "subUrl") : existing.sub_url;
+                  const bool sub_enabled = body.contains("subEnabled")
+                                               ? JsonBool(body, "subEnabled", existing.sub_enabled)
+                                               : existing.sub_enabled;
+                  const bool enabled = body.contains("enabled")
+                                           ? JsonBool(body, "enabled", existing.enabled)
+                                           : existing.enabled;
+                  const std::string brand =
+                      body.contains("brand") ? JsonString(body, "brand") : existing.brand;
+                  const std::string media_json = body.contains("media") && body["media"].is_object()
+                                                     ? body["media"].dump()
+                                                     : existing.media_json;
+                  const std::string watermark_json =
+                      body.contains("watermark") && body["watermark"].is_object()
+                          ? body["watermark"].dump()
+                          : existing.watermark_json;
+                  if (name.empty() || name.size() > 64 || port < 1 || port > 65535) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "invalid_channel";
+                    op->message = "invalid name or port";
+                    return;
+                  }
+                  std::string password_enc = existing.password_enc;
+                  if (has_password && !password.empty()) {
+                    std::string encrypt_error;
+                    password_enc = EncryptSecret(password, &encrypt_error);
+                    if (password_enc.empty()) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "encrypt_failed";
+                      op->message = encrypt_error;
+                      return;
+                    }
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(name);
+                  params.add(protocol);
+                  params.add(host);
+                  params.add(port);
+                  params.add(username);
+                  params.add(password_enc);
+                  params.add(main_url);
+                  params.add(sub_url);
+                  params.add(sub_enabled ? 1 : 0);
+                  params.add(enabled ? 1 : 0);
+                  params.add(brand);
+                  params.add(media_json);
+                  params.add(watermark_json);
+                  params.add(NowSeconds());
+                  params.add(channel_id);
+                  if (!Exec("UPDATE channels SET name=?, protocol=?, host=?, port=?, username=?, "
+                            "password_enc=?, main_url=?, sub_url=?, sub_enabled=?, enabled=?, "
+                            "brand=?, "
+                            "media_json=?, watermark_json=?, updated_at=? WHERE id=?",
+                            params, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the channel could not be updated";
+                    return;
+                  }
+                  Audit("channel", "info", actor.username, ip, ua, "channel",
+                        std::to_string(channel_id), "update", "success", "",
+                        json{{"name", name}}.dump());
+                  op->data = json{{"id", channel_id}, {"name", name}};
+                },
+                [this, op, channel_id, &resp, next] {
+                  if (op->ok)
+                    SyncMediaChannel(channel_id);
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "channel.manage"));
+
+  web_.del("/api/v1/channels/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, channel_id, actor, ip, ua, op] {
+                       ChannelRow channel;
+                       std::string error;
+                       if (!LoadChannel(channel_id, &channel, &error)) {
+                         op->ok = false;
+                         op->status = 404;
+                         op->code = "not_found";
+                         op->message = "channel not found";
+                         return;
+                       }
+                       uvcpp::uvcpp_db_params params;
+                       params.add(channel_id);
+                       Exec("DELETE FROM record_plans WHERE channel_id = ?", params, nullptr,
+                            &error);
+                       if (!Exec("DELETE FROM channels WHERE id = ?", params, nullptr, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = "the channel could not be deleted";
+                         return;
+                       }
+                       Audit("channel", "warning", actor.username, ip, ua, "channel",
+                             std::to_string(channel_id), "delete", "success", "",
+                             json{{"name", channel.name}}.dump());
+                       op->data = json{{"ok", true}};
+                     },
+                     [this, op, channel_id, &resp, next] {
+                       if (op->ok && media_)
+                         media_->Remove(channel_id);
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "channel.manage"));
+
+  web_.post("/api/v1/channels/:id/reconnect",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const std::string* id_param = req.param("id");
+                  int64_t channel_id = 0;
+                  if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+                    SendError(resp, 400, "invalid_id", "invalid channel id");
+                    next();
+                    return;
+                  }
+                  if (media_)
+                    media_->Reconnect(channel_id);
+                  SendJson(resp, 200, json{{"ok", true}});
+                  next();
+                },
+                "channel.manage"));
+
+  web_.post("/api/v1/channels/sync",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object() || !body.contains("targetIds") ||
+                      !body["targetIds"].is_array()) {
+                    SendError(resp, 400, "invalid_json", "targetIds is required");
+                    next();
+                    return;
+                  }
+                  const int64_t source_id = JsonInt(body, "sourceId", 0);
+                  std::vector<int64_t> targets;
+                  for (const auto& item : body["targetIds"]) {
+                    if (item.is_number_integer())
+                      targets.push_back(item.get<int64_t>());
+                  }
+                  if (source_id <= 0 || targets.empty()) {
+                    SendError(resp, 400, "invalid_targets", "sourceId and targetIds are required");
+                    next();
+                    return;
+                  }
+                  const UserContext actor = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, source_id, targets, actor, ip, ua, op] {
+                        ChannelRow source;
+                        std::string error;
+                        if (!LoadChannel(source_id, &source, &error)) {
+                          op->ok = false;
+                          op->status = 404;
+                          op->code = "not_found";
+                          op->message = "source channel not found";
+                          return;
+                        }
+                        for (const int64_t target : targets) {
+                          ChannelRow existing;
+                          if (!LoadChannel(target, &existing, &error))
+                            continue;
+                          uvcpp::uvcpp_db_params params;
+                          params.add(source.protocol);
+                          params.add(source.host);
+                          params.add(source.port);
+                          params.add(source.username);
+                          params.add(source.password_enc);
+                          params.add(source.main_url);
+                          params.add(source.sub_url);
+                          params.add(source.sub_enabled ? 1 : 0);
+                          params.add(source.brand);
+                          params.add(source.media_json);
+                          params.add(source.watermark_json);
+                          params.add(NowSeconds());
+                          params.add(target);
+                          Exec("UPDATE channels SET protocol=?, host=?, port=?, username=?, "
+                               "password_enc=?, "
+                               "main_url=?, sub_url=?, sub_enabled=?, brand=?, media_json=?, "
+                               "watermark_json=?, updated_at=? WHERE id=?",
+                               params, nullptr, &error);
+                        }
+                        Audit("channel", "info", actor.username, ip, ua, "channel",
+                              std::to_string(source_id), "sync", "success", "",
+                              json{{"targets", targets}}.dump());
+                        op->data = json{{"ok", true}, {"targets", targets}};
+                      },
+                      [this, op, targets, &resp, next] {
+                        if (op->ok) {
+                          for (const int64_t target : targets)
+                            SyncMediaChannel(target);
+                        }
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "channel.manage"));
+}
+
+void App::RegisterOnvifRoutes() {
+  web_.post("/api/v1/channels/discover",
+            Protected(
+                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [op] {
+                        std::vector<OnvifDevice> devices;
+                        std::string error;
+                        if (!DiscoverOnvif(&devices, 3000, &error)) {
+                          op->ok = false;
+                          op->status = 502;
+                          op->code = "discovery_failed";
+                          op->message = error;
+                          return;
+                        }
+                        json items = json::array();
+                        for (const auto& device : devices) {
+                          items.push_back(json{{"xaddr", device.xaddr}, {"ip", device.ip}});
+                        }
+                        op->data = json{{"devices", items}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "channel.manage"));
+
+  web_.post("/api/v1/channels/onvif/probe",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  const std::string xaddr = JsonString(body, "xaddr");
+                  const std::string username = JsonString(body, "username");
+                  const std::string password = JsonString(body, "password");
+                  if (xaddr.empty()) {
+                    SendError(resp, 400, "missing_xaddr", "xaddr is required");
+                    next();
+                    return;
+                  }
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [xaddr, username, password, op] {
+                        OnvifInfo info;
+                        std::string error;
+                        if (!ProbeOnvif(xaddr, username, password, &info, &error)) {
+                          op->ok = false;
+                          op->status = 502;
+                          op->code = "probe_failed";
+                          op->message = error.empty()
+                                            ? "the camera did not return usable ONVIF profiles"
+                                            : error;
+                          return;
+                        }
+                        json profiles = json::array();
+                        for (const auto& profile : info.profiles) {
+                          profiles.push_back(json{{"token", profile.token},
+                                                  {"name", profile.name},
+                                                  {"streamUri", profile.stream_uri}});
+                        }
+                        op->data = json{{"device", json{{"manufacturer", info.manufacturer},
+                                                        {"model", info.model},
+                                                        {"firmware", info.firmware},
+                                                        {"serial", info.serial}}},
+                                        {"profiles", profiles}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "channel.manage"));
+}
+
+void App::RegisterStreamRoutes() {
+  web_.post("/api/v1/streams/ticket",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  const int64_t channel_id = JsonInt(body, "channelId", 0);
+                  const std::string stream = JsonString(body, "stream", "main");
+                  if (channel_id <= 0 || (stream != "main" && stream != "sub")) {
+                    SendError(resp, 400, "invalid_stream",
+                              "channelId and stream (main/sub) are required");
+                    next();
+                    return;
+                  }
+                  const UserContext user = UserFromRequest(req);
+                  auto result = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, user, channel_id, stream, result] {
+                        ChannelRow channel;
+                        std::string error;
+                        if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                          result->ok = false;
+                          result->status = 404;
+                          result->code = "not_found";
+                          result->message = "channel not found or disabled";
+                          return;
+                        }
+                        if (stream == "sub" && !channel.sub_enabled) {
+                          result->ok = false;
+                          result->status = 400;
+                          result->code = "sub_disabled";
+                          result->message = "the sub stream is disabled for this channel";
+                          return;
+                        }
+                        std::string token;
+                        int64_t expires_at = 0;
+                        if (!CreateStreamTicket(user.id, channel_id, stream, &token, &expires_at,
+                                                &error)) {
+                          result->ok = false;
+                          result->status = 500;
+                          result->code = "ticket_failed";
+                          result->message = error;
+                          return;
+                        }
+                        result->data = json{{"ticket", token},
+                                            {"wsPath", "/ws/live?ticket=" + token},
+                                            {"expiresAt", expires_at},
+                                            {"channelId", channel_id},
+                                            {"stream", stream}};
+                      },
+                      [result, &resp, next] {
+                        SendOp(resp, *result);
+                        next();
+                      });
+                },
+                "preview.view"));
+
+  web_.post("/api/v1/playback/ticket",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  const int64_t channel_id = JsonInt(body, "channelId", 0);
+                  const std::string stream = JsonString(body, "stream", "main");
+                  const int64_t start_ms = JsonInt(body, "startMs", 0);
+                  const int64_t end_ms = JsonInt(body, "endMs", 0);
+                  if (channel_id <= 0 || (stream != "main" && stream != "sub")) {
+                    SendError(resp, 400, "invalid_stream",
+                              "channelId and stream (main/sub) are required");
+                    next();
+                    return;
+                  }
+                  const UserContext user = UserFromRequest(req);
+                  auto result = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, user, channel_id, stream, start_ms, end_ms, result] {
+                        ChannelRow channel;
+                        std::string error;
+                        if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                          result->ok = false;
+                          result->status = 404;
+                          result->code = "not_found";
+                          result->message = "channel not found or disabled";
+                          return;
+                        }
+                        std::string token;
+                        int64_t expires_at = 0;
+                        if (!CreatePlaybackTicket(user.id, channel_id, stream, start_ms, end_ms,
+                                                  &token, &expires_at, &error)) {
+                          result->ok = false;
+                          result->status = 500;
+                          result->code = "ticket_failed";
+                          result->message = error;
+                          return;
+                        }
+                        result->data = json{{"ticket", token},
+                                            {"wsPath", "/ws/playback?ticket=" + token},
+                                            {"expiresAt", expires_at},
+                                            {"channelId", channel_id},
+                                            {"stream", stream}};
+                      },
+                      [result, &resp, next] {
+                        SendOp(resp, *result);
+                        next();
+                      });
+                },
+                "playback.view"));
+
+  web_.websocket("/ws/live", [this](uvcpp::uvcpp_web_ws_request& ws) {
+    const std::string* ticket_value = ws.query("ticket");
+    StreamTicket ticket;
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket)) {
+      if (auto* connection = ws.connection()) {
+        const std::string message = R"({"error":"invalid_ticket"})";
+        connection->send_text(message.data(), message.size());
+        connection->close();
+      }
+      return;
+    }
+    std::string error;
+    if (!media_ || !media_->Subscribe(ticket.channel_id, ticket.stream, ws.connection(), &error)) {
+      if (auto* connection = ws.connection()) {
+        const json message = json{{"error", "stream_unavailable"}, {"message", error}};
+        const std::string text = message.dump();
+        connection->send_text(text.data(), text.size());
+        connection->close();
+      }
+    }
+  });
+
+  web_.websocket("/ws/playback", [this](uvcpp::uvcpp_web_ws_request& ws) {
+    const std::string* ticket_value = ws.query("ticket");
+    StreamTicket ticket;
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) ||
+        !ticket.playback) {
+      if (auto* connection = ws.connection()) {
+        const std::string message = R"({"error":"invalid_ticket"})";
+        connection->send_text(message.data(), message.size());
+        connection->close();
+      }
+      return;
+    }
+    if (!playback_) {
+      if (auto* connection = ws.connection()) {
+        const std::string message = R"({"error":"playback_unavailable"})";
+        connection->send_text(message.data(), message.size());
+        connection->close();
+      }
+      return;
+    }
+    playback_->Open(ws.connection(), ticket.channel_id, ticket.stream, ticket.start_ms,
+                    ticket.end_ms);
+  });
+}
+
+void App::RegisterPlanRoutes() {
+  web_.get(
+      "/api/v1/plans",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            int64_t channel_id = 0;
+            if (const std::string* value = req.query("channelId")) {
+              ParseIntParam(value, &channel_id);
+            }
+            auto items = std::make_shared<json>(json::array());
+            RunWork(
+                [this, channel_id, items] {
+                  uvcpp::uvcpp_db_table table;
+                  std::string error;
+                  if (channel_id > 0) {
+                    uvcpp::uvcpp_db_params params;
+                    params.add(channel_id);
+                    Query(
+                        "SELECT id, channel_id, weekday, start_min, end_min, mode, stream, enabled "
+                        "FROM record_plans WHERE channel_id = ? ORDER BY weekday, start_min",
+                        params, &table, &error);
+                  } else {
+                    Query(
+                        "SELECT id, channel_id, weekday, start_min, end_min, mode, stream, enabled "
+                        "FROM record_plans ORDER BY channel_id, weekday, start_min",
+                        {}, &table, &error);
+                  }
+                  for (size_t i = 0; i < table.rows().size(); ++i) {
+                    items->push_back(json{
+                        {"id", TableInt(table, i, "id")},
+                        {"channelId", TableInt(table, i, "channel_id")},
+                        {"weekday", TableInt(table, i, "weekday")},
+                        {"startMin", TableInt(table, i, "start_min")},
+                        {"endMin", TableInt(table, i, "end_min")},
+                        {"mode", TableText(table, i, "mode")},
+                        {"stream", TableText(table, i, "stream")},
+                        {"enabled", TableInt(table, i, "enabled") != 0},
+                    });
+                  }
+                },
+                [items, &resp, next] {
+                  SendJson(resp, 200, *items);
+                  next();
+                });
+          },
+          "plan.view"));
+
+  web_.put("/api/v1/plans",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 const int64_t channel_id = body.is_object() ? JsonInt(body, "channelId", 0) : 0;
+                 if (!body.is_object() || channel_id <= 0 || !body.contains("plans") ||
+                     !body["plans"].is_array()) {
+                   SendError(resp, 400, "invalid_json", "channelId and plans are required");
+                   next();
+                   return;
+                 }
+                 struct Plan {
+                   int weekday = 0;
+                   int start_min = 0;
+                   int end_min = 0;
+                   std::string mode;
+                   std::string stream;
+                   bool enabled = true;
+                 };
+                 std::vector<Plan> plans;
+                 for (const auto& item : body["plans"]) {
+                   if (!item.is_object())
+                     continue;
+                   Plan plan;
+                   plan.weekday = static_cast<int>(JsonInt(item, "weekday", -1));
+                   plan.start_min = static_cast<int>(JsonInt(item, "startMin", -1));
+                   plan.end_min = static_cast<int>(JsonInt(item, "endMin", -1));
+                   plan.mode = JsonString(item, "mode", "timed");
+                   plan.stream = JsonString(item, "stream", "main");
+                   plan.enabled = JsonBool(item, "enabled", true);
+                   if (plan.weekday < 0 || plan.weekday > 6 || plan.start_min < 0 ||
+                       plan.start_min > 1439 || plan.end_min < 0 || plan.end_min > 1439) {
+                     continue;
+                   }
+                   if (plan.mode != "timed" && plan.mode != "event" && plan.mode != "both")
+                     continue;
+                   if (plan.stream != "main" && plan.stream != "sub")
+                     plan.stream = "main";
+                   plans.push_back(std::move(plan));
+                 }
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, channel_id, plans, actor, ip, ua, op] {
+                       uvcpp::uvcpp_db_params del;
+                       del.add(channel_id);
+                       std::string error;
+                       if (!Exec("DELETE FROM record_plans WHERE channel_id = ?", del, nullptr,
+                                 &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = "existing plans could not be replaced";
+                         return;
+                       }
+                       for (const auto& plan : plans) {
+                         uvcpp::uvcpp_db_params params;
+                         params.add(channel_id);
+                         params.add(plan.weekday);
+                         params.add(plan.start_min);
+                         params.add(plan.end_min);
+                         params.add(plan.mode);
+                         params.add(plan.stream);
+                         params.add(plan.enabled ? 1 : 0);
+                         params.add(NowSeconds());
+                         if (!Exec("INSERT INTO record_plans(channel_id, weekday, start_min, "
+                                   "end_min, mode, "
+                                   "stream, enabled, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                                   params, nullptr, &error)) {
+                           op->ok = false;
+                           op->status = 500;
+                           op->code = "database_error";
+                           op->message = "a plan could not be stored";
+                           return;
+                         }
+                       }
+                       Audit("record", "info", actor.username, ip, ua, "channel",
+                             std::to_string(channel_id), "plan_update", "success", "",
+                             json{{"count", plans.size()}}.dump());
+                       op->data = json{{"ok", true}, {"count", plans.size()}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "plan.manage"));
+
+  web_.post(
+      "/api/v1/plans/sync",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            const int64_t source_id = body.is_object() ? JsonInt(body, "sourceId", 0) : 0;
+            if (!body.is_object() || source_id <= 0 || !body.contains("targetIds") ||
+                !body["targetIds"].is_array()) {
+              SendError(resp, 400, "invalid_json", "sourceId and targetIds are required");
+              next();
+              return;
+            }
+            std::vector<int64_t> targets;
+            for (const auto& item : body["targetIds"]) {
+              if (item.is_number_integer())
+                targets.push_back(item.get<int64_t>());
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, source_id, targets, actor, ip, ua, op] {
+                  uvcpp::uvcpp_db_table source;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(source_id);
+                  std::string error;
+                  if (!Query("SELECT weekday, start_min, end_min, mode, stream, enabled FROM "
+                             "record_plans WHERE channel_id = ?",
+                             params, &source, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "source plans could not be read";
+                    return;
+                  }
+                  for (const int64_t target : targets) {
+                    uvcpp::uvcpp_db_params del;
+                    del.add(target);
+                    Exec("DELETE FROM record_plans WHERE channel_id = ?", del, nullptr, &error);
+                    for (size_t i = 0; i < source.rows().size(); ++i) {
+                      uvcpp::uvcpp_db_params insert;
+                      insert.add(target);
+                      insert.add(TableInt(source, i, "weekday"));
+                      insert.add(TableInt(source, i, "start_min"));
+                      insert.add(TableInt(source, i, "end_min"));
+                      insert.add(TableText(source, i, "mode"));
+                      insert.add(TableText(source, i, "stream"));
+                      insert.add(TableInt(source, i, "enabled"));
+                      insert.add(NowSeconds());
+                      Exec(
+                          "INSERT INTO record_plans(channel_id, weekday, start_min, end_min, mode, "
+                          "stream, enabled, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                          insert, nullptr, &error);
+                    }
+                  }
+                  Audit("record", "info", actor.username, ip, ua, "channel",
+                        std::to_string(source_id), "plan_sync", "success", "",
+                        json{{"targets", targets}}.dump());
+                  op->data = json{{"ok", true}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "plan.manage"));
+}
+
+void App::RegisterStorageRoutes() {
+  web_.get(
+      "/api/v1/storage/volumes",
+      Protected(
+          [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            auto items = std::make_shared<json>(json::array());
+            RunWork(
+                [this, items] {
+                  uvcpp::uvcpp_db_table table;
+                  std::string error;
+                  if (!Query("SELECT id, path, label, mode, max_usage_pct, reserve_gb, "
+                             "retention_days, "
+                             "enabled FROM storage_volumes ORDER BY id",
+                             {}, &table, &error)) {
+                    return;
+                  }
+                  for (size_t i = 0; i < table.rows().size(); ++i) {
+                    const std::string path = TableText(table, i, "path");
+                    json item{
+                        {"id", TableInt(table, i, "id")},
+                        {"path", path},
+                        {"label", TableText(table, i, "label")},
+                        {"mode", TableText(table, i, "mode")},
+                        {"maxUsagePct", TableInt(table, i, "max_usage_pct")},
+                        {"reserveGb", TableInt(table, i, "reserve_gb")},
+                        {"retentionDays", TableInt(table, i, "retention_days")},
+                        {"enabled", TableInt(table, i, "enabled") != 0},
+                        {"totalBytes", 0},
+                        {"freeBytes", 0},
+                        {"usagePercent", 0.0},
+                    };
+#ifdef _WIN32
+                    ULARGE_INTEGER free_bytes{};
+                    ULARGE_INTEGER total_bytes{};
+                    if (GetDiskFreeSpaceExA(path.c_str(), &free_bytes, &total_bytes, nullptr)) {
+                      item["totalBytes"] = total_bytes.QuadPart;
+                      item["freeBytes"] = free_bytes.QuadPart;
+                    }
+#else
+                    struct statvfs stat {};
+                    if (statvfs(path.c_str(), &stat) == 0) {
+                      const uint64_t total = static_cast<uint64_t>(stat.f_blocks) * stat.f_frsize;
+                      const uint64_t free = static_cast<uint64_t>(stat.f_bavail) * stat.f_frsize;
+                      item["totalBytes"] = total;
+                      item["freeBytes"] = free;
+                    }
+#endif
+                    const uint64_t total = item["totalBytes"].get<uint64_t>();
+                    const uint64_t free = item["freeBytes"].get<uint64_t>();
+                    if (total > 0)
+                      item["usagePercent"] = 100.0 * (1.0 - static_cast<double>(free) / total);
+                    items->push_back(std::move(item));
+                  }
+                },
+                [items, &resp, next] {
+                  SendJson(resp, 200, *items);
+                  next();
+                });
+          },
+          "storage.view"));
+
+  web_.post(
+      "/api/v1/storage/volumes",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const std::string path = JsonString(body, "path");
+            const std::string label = JsonString(body, "label", "Volume");
+            const std::string mode = JsonString(body, "mode", "loop");
+            const int64_t max_usage = JsonInt(body, "maxUsagePct", 90);
+            const int64_t reserve = JsonInt(body, "reserveGb", 5);
+            const int64_t retention = JsonInt(body, "retentionDays", 30);
+            if (path.empty() || path.size() > 1024 || (mode != "loop" && mode != "alert") ||
+                max_usage < 50 || max_usage > 99 || reserve < 0 || reserve > 1000 ||
+                retention < 1 || retention > 3650) {
+              SendError(resp, 400, "invalid_volume", "invalid volume settings");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, path, label, mode, max_usage, reserve, retention, actor, ip, ua, op] {
+                  std::error_code ec;
+                  std::filesystem::create_directories(path, ec);
+                  if (ec) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "path_unusable";
+                    op->message = "cannot create the storage directory: " + ec.message();
+                    return;
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(path);
+                  params.add(label);
+                  params.add(mode);
+                  params.add(max_usage);
+                  params.add(reserve);
+                  params.add(retention);
+                  params.add(1);
+                  params.add(NowSeconds());
+                  uvcpp::uvcpp_db_value new_id;
+                  std::string error;
+                  if (!uvcpp::uvcpp_db_ok(db_.insert(
+                          "INSERT INTO storage_volumes(path, label, mode, max_usage_pct, "
+                          "reserve_gb, "
+                          "retention_days, enabled, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                          params, &new_id))) {
+                    op->ok = false;
+                    op->status = 409;
+                    op->code = "volume_exists";
+                    op->message = "that storage path is already configured";
+                    return;
+                  }
+                  const int64_t id = new_id.to_int64();
+                  Audit("storage", "info", actor.username, ip, ua, "volume", std::to_string(id),
+                        "create", "success", "", json{{"path", path}}.dump());
+                  op->status = 201;
+                  op->data = json{{"id", id}, {"path", path}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "storage.manage"));
+
+  web_.put("/api/v1/storage/volumes/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t volume_id = 0;
+                 if (!ParseIntParam(id_param, &volume_id) || volume_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid volume id");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 const std::string label = JsonString(body, "label", "Volume");
+                 const std::string mode = JsonString(body, "mode", "loop");
+                 const int64_t max_usage = JsonInt(body, "maxUsagePct", 90);
+                 const int64_t reserve = JsonInt(body, "reserveGb", 5);
+                 const int64_t retention = JsonInt(body, "retentionDays", 30);
+                 const bool enabled = JsonBool(body, "enabled", true);
+                 if ((mode != "loop" && mode != "alert") || max_usage < 50 || max_usage > 99 ||
+                     reserve < 0 || reserve > 1000 || retention < 1 || retention > 3650) {
+                   SendError(resp, 400, "invalid_volume", "invalid volume settings");
+                   next();
+                   return;
+                 }
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, volume_id, label, mode, max_usage, reserve, retention, enabled, actor,
+                      ip, ua, body, op] {
+                       uvcpp::uvcpp_db_params params;
+                       params.add(label);
+                       params.add(mode);
+                       params.add(max_usage);
+                       params.add(reserve);
+                       params.add(retention);
+                       params.add(enabled ? 1 : 0);
+                       params.add(volume_id);
+                       std::string error;
+                       if (!Exec("UPDATE storage_volumes SET label=?, mode=?, max_usage_pct=?, "
+                                 "reserve_gb=?, "
+                                 "retention_days=?, enabled=? WHERE id=?",
+                                 params, nullptr, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = "the volume could not be updated";
+                         return;
+                       }
+                       Audit("storage", "info", actor.username, ip, ua, "volume",
+                             std::to_string(volume_id), "update", "success", "", body.dump());
+                       op->data = json{{"ok", true}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "storage.manage"));
+
+  web_.del(
+      "/api/v1/storage/volumes/:id",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string* id_param = req.param("id");
+            int64_t volume_id = 0;
+            if (!ParseIntParam(id_param, &volume_id) || volume_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid volume id");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, volume_id, actor, ip, ua, op] {
+                  uvcpp::uvcpp_db_table table;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(volume_id);
+                  std::string error;
+                  if (!Query("SELECT COUNT(*) AS n FROM recordings WHERE volume_id = ?", params,
+                             &table, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the volume could not be checked";
+                    return;
+                  }
+                  if (!table.empty() && TableInt(table, 0, "n") > 0) {
+                    op->ok = false;
+                    op->status = 409;
+                    op->code = "volume_in_use";
+                    op->message = "the volume still contains recordings";
+                    return;
+                  }
+                  if (!Exec("DELETE FROM storage_volumes WHERE id = ?", params, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the volume could not be deleted";
+                    return;
+                  }
+                  Audit("storage", "warning", actor.username, ip, ua, "volume",
+                        std::to_string(volume_id), "delete", "success", "", "{}");
+                  op->data = json{{"ok", true}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "storage.manage"));
+}
+
+void App::RegisterRecordingRoutes() {
+  web_.get("/api/v1/recordings",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 int64_t channel_id = 0;
+                 int64_t from_ms = 0;
+                 int64_t to_ms = 0;
+                 if (const std::string* value = req.query("channelId"))
+                   ParseIntParam(value, &channel_id);
+                 if (const std::string* value = req.query("from"))
+                   ParseIntParam(value, &from_ms);
+                 if (const std::string* value = req.query("to"))
+                   ParseIntParam(value, &to_ms);
+                 const std::string stream = req.query("stream") ? *req.query("stream") : "";
+                 auto items = std::make_shared<json>(json::array());
+                 RunWork(
+                     [this, channel_id, from_ms, to_ms, stream, items] {
+                       std::string where = " WHERE 1=1";
+                       uvcpp::uvcpp_db_params params;
+                       if (channel_id > 0) {
+                         where += " AND channel_id = ?";
+                         params.add(channel_id);
+                       }
+                       if (!stream.empty()) {
+                         where += " AND stream = ?";
+                         params.add(stream);
+                       }
+                       if (to_ms > 0) {
+                         where += " AND start_ms < ?";
+                         params.add(to_ms);
+                       }
+                       if (from_ms > 0) {
+                         where += " AND end_ms > ?";
+                         params.add(from_ms);
+                       }
+                       uvcpp::uvcpp_db_table table;
+                       std::string error;
+                       if (!Query("SELECT id, channel_id, stream, start_ms, end_ms, duration_ms, "
+                                  "size_bytes, "
+                                  "record_type FROM recordings" +
+                                      where + " ORDER BY start_ms ASC LIMIT 2000",
+                                  params, &table, &error)) {
+                         return;
+                       }
+                       for (size_t i = 0; i < table.rows().size(); ++i) {
+                         items->push_back(json{
+                             {"id", TableInt(table, i, "id")},
+                             {"channelId", TableInt(table, i, "channel_id")},
+                             {"stream", TableText(table, i, "stream")},
+                             {"startMs", TableInt(table, i, "start_ms")},
+                             {"endMs", TableInt(table, i, "end_ms")},
+                             {"durationMs", TableInt(table, i, "duration_ms")},
+                             {"sizeBytes", TableInt(table, i, "size_bytes")},
+                             {"recordType", TableText(table, i, "record_type")},
+                         });
+                       }
+                     },
+                     [items, &resp, next] {
+                       SendJson(resp, 200, *items);
+                       next();
+                     });
+               },
+               "playback.view"));
+
+  web_.get(
+      "/api/v1/recordings/:id/download",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string* id_param = req.param("id");
+            int64_t recording_id = 0;
+            if (!ParseIntParam(id_param, &recording_id) || recording_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid recording id");
+              next();
+              return;
+            }
+            auto payload = std::make_shared<std::string>();
+            auto status = std::make_shared<int>(200);
+            auto message = std::make_shared<std::string>();
+            RunWork(
+                [this, recording_id, payload, status, message] {
+                  uvcpp::uvcpp_db_table table;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(recording_id);
+                  std::string error;
+                  if (!Query("SELECT path FROM recordings WHERE id = ?", params, &table, &error) ||
+                      table.empty()) {
+                    *status = 404;
+                    *message = "recording not found";
+                    return;
+                  }
+                  const std::string path = TableText(table, 0, "path");
+                  std::ifstream file(path, std::ios::binary);
+                  if (!file) {
+                    *status = 404;
+                    *message = "recording file is missing";
+                    return;
+                  }
+                  file.seekg(0, std::ios::end);
+                  const auto size = file.tellg();
+                  if (size < 0 || size > 512LL * 1024 * 1024) {
+                    *status = 413;
+                    *message = "recording is too large to download in one response";
+                    return;
+                  }
+                  file.seekg(0, std::ios::beg);
+                  payload->assign(std::istreambuf_iterator<char>(file),
+                                  std::istreambuf_iterator<char>());
+                },
+                [payload, status, message, recording_id, &resp, next] {
+                  if (*status != 200) {
+                    SendError(resp, *status, "download_failed", *message);
+                    next();
+                    return;
+                  }
+                  resp.set_header("Content-Type", "video/mp2t");
+                  resp.set_header("Content-Disposition", "attachment; filename=\"uvnvr-" +
+                                                             std::to_string(recording_id) +
+                                                             ".ts\"");
+                  resp.status(200).body(*payload, "video/mp2t");
+                  resp.end();
+                  next();
+                });
+          },
+          "playback.download"));
 }
 
 } // namespace uvnvr

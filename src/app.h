@@ -1,5 +1,10 @@
 #pragma once
 
+#include "media.h"
+#include "playback.h"
+#include "recording.h"
+
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <db/uvcpp_db_pool.h>
@@ -9,6 +14,8 @@
 #include <nlohmann/json.hpp>
 #include <req/uvcpp_work.h>
 #include <string>
+#include <unordered_map>
+#include <uv.h>
 #include <vector>
 #include <webapp/uvcpp_web_app.h>
 
@@ -24,6 +31,39 @@ struct Config {
   std::string tls_cert;
   std::string tls_key;
   bool maintenance = false;
+};
+
+struct ChannelRow {
+  int64_t id = 0;
+  std::string name;
+  std::string protocol;
+  std::string host;
+  int port = 554;
+  std::string username;
+  std::string password_enc;
+  std::string main_url;
+  std::string sub_url;
+  bool sub_enabled = false;
+  bool enabled = true;
+  std::string brand;
+  std::string media_json = "{}";
+  std::string watermark_json = "{}";
+  std::string last_status = "unknown";
+  std::string last_error;
+  int64_t last_online_at = 0;
+  int64_t last_offline_at = 0;
+  int64_t created_at = 0;
+  int64_t updated_at = 0;
+};
+
+struct StreamTicket {
+  int64_t user_id = 0;
+  int64_t channel_id = 0;
+  std::string stream;
+  int64_t expires_at = 0;
+  bool playback = false;
+  int64_t start_ms = 0;
+  int64_t end_ms = 0;
 };
 
 struct UserContext {
@@ -64,7 +104,30 @@ private:
   bool Init(std::string* error);
   bool Migrate(std::string* error);
   bool EnsureSerial(std::string* error);
+  bool EnsureSecretKey(std::string* error);
   void EnsureDefaults();
+  std::string EncryptSecret(const std::string& plain, std::string* error);
+  std::string DecryptSecret(const std::string& encoded, std::string* error);
+  bool LoadChannel(int64_t id, ChannelRow* out, std::string* error);
+  std::vector<ChannelRow> LoadChannels(std::string* error);
+  json ChannelJson(const ChannelRow& channel) const;
+  std::string BuildChannelUrl(const ChannelRow& channel, bool sub, std::string* error);
+  void SyncMediaChannel(int64_t id);
+  void SyncAllMedia();
+  void RegisterChannelRoutes();
+  void RegisterOnvifRoutes();
+  void RegisterStreamRoutes();
+  void RegisterRecordingRoutes();
+  void RegisterStorageRoutes();
+  void RegisterPlanRoutes();
+  bool CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
+                          std::string* token, int64_t* expires_at, std::string* error);
+  bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
+  bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
+                            int64_t start_ms, int64_t end_ms, std::string* token,
+                            int64_t* expires_at, std::string* error);
+  static void OnSignal(uv_signal_t* handle, int signum);
+  void Shutdown();
   void RegisterMiddleware();
   void RegisterPublicRoutes();
   void RegisterCoreRoutes();
@@ -135,6 +198,13 @@ private:
   Config config_;
   uvcpp::uvcpp_web_app web_;
   uvcpp::uvcpp_db_pool db_;
+  std::unique_ptr<MediaService> media_;
+  std::unique_ptr<RecordingService> recording_;
+  std::unique_ptr<PlaybackService> playback_;
+  std::array<uv_signal_t*, 2> signal_handles_{nullptr, nullptr};
+  std::vector<unsigned char> secret_key_;
+  std::mutex tickets_mutex_;
+  std::unordered_map<std::string, StreamTicket> tickets_;
   std::atomic<bool> setup_required_{true};
   std::string serial_;
 

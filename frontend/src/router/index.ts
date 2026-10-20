@@ -30,6 +30,30 @@ const router = createRouter({
       meta: { titleKey: 'nav.preview' },
     },
     {
+      path: '/channels',
+      name: 'ChannelsView',
+      component: () => import('@/views/ChannelsView.vue'),
+      meta: { titleKey: 'nav.channels', permission: 'channel.view' },
+    },
+    {
+      path: '/playback',
+      name: 'PlaybackView',
+      component: () => import('@/views/PlaybackView.vue'),
+      meta: { titleKey: 'nav.playback', permission: 'playback.view' },
+    },
+    {
+      path: '/plans',
+      name: 'PlansView',
+      component: () => import('@/views/PlansView.vue'),
+      meta: { titleKey: 'nav.plans', permission: 'plan.view' },
+    },
+    {
+      path: '/storage',
+      name: 'StorageView',
+      component: () => import('@/views/StorageView.vue'),
+      meta: { titleKey: 'nav.storage', permission: 'storage.view' },
+    },
+    {
       path: '/users',
       name: 'UsersView',
       component: () => import('@/views/UsersView.vue'),

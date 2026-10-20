@@ -80,6 +80,10 @@ configure_file(cmake/version.h.in
 add_executable(uvnvr
   src/main.cpp
   src/app.cpp
+  src/media.cpp
+  src/onvif.cpp
+  src/recording.cpp
+  src/playback.cpp
 )
 
 target_include_directories(uvnvr PRIVATE
