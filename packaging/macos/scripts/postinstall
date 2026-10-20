@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+mkdir -p "/Library/Application Support/UvNVR"
+mkdir -p /var/log
+chmod 0755 "/Library/Application Support/UvNVR"
+launchctl load -w /Library/LaunchDaemons/com.antruly.uvnvr.plist >/dev/null 2>&1 || launchctl bootstrap system /Library/LaunchDaemons/com.antruly.uvnvr.plist >/dev/null 2>&1 || true
+echo "UvNVR installed. Open http://<host>:8080 to complete setup."
+exit 0

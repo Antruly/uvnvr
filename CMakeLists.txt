@@ -106,9 +106,12 @@ target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL:
 
 # The release archive is a shared library outside the normal loader path.
 if(UVNVR_LIBUVCPP_ROOT)
-  set_target_properties(uvnvr PROPERTIES
-    BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib"
-    INSTALL_RPATH "$ORIGIN/../lib")
+  set_target_properties(uvnvr PROPERTIES BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+endif()
+if(APPLE)
+  set_target_properties(uvnvr PROPERTIES INSTALL_RPATH "@loader_path/../lib")
+elseif(NOT WIN32)
+  set_target_properties(uvnvr PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
 endif()
 
 if(MSVC)

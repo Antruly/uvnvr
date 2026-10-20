@@ -174,10 +174,77 @@ jobs:
             dist-packages/*.exe
           if-no-files-found: error
 
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja pkg-config openssl@3 libuv nghttp2 sqlite3 zlib dylibbundler nasm
+
+      - name: Build libuvcpp 1.8.1
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/uvcpp.tar.gz"             https://github.com/Antruly/libuvcpp/archive/refs/tags/v1.8.1.tar.gz
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/uvcpp.tar.gz"
+          cmake -S "$RUNNER_TEMP/libuvcpp-1.8.1" -B "$RUNNER_TEMP/uvcpp-build" -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp-install"             -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3);$(brew --prefix libuv);$(brew --prefix nghttp2)"             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_DB=ON             -DUVCPP_ENABLE_NGHTTP2=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
+          cmake --build "$RUNNER_TEMP/uvcpp-build" --parallel
+          cmake --install "$RUNNER_TEMP/uvcpp-build"
+
+      - name: Build static LGPL FFmpeg
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg.tar.xz"             https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/ffmpeg.tar.xz"
+          cd "$RUNNER_TEMP/ffmpeg-7.1.1"
+          ./configure --prefix="$RUNNER_TEMP/ffmpeg" --disable-debug --disable-doc             --disable-gpl --disable-nonfree --disable-shared --enable-static             --enable-videotoolbox --enable-audiotoolbox             --enable-protocol=file,pipe,rtsp,tcp,udp,http,https             --enable-demuxer=rtsp,mpegts,h264,hevc,mjpeg,rawvideo,mov             --enable-muxer=mpegts,mp4,mjpeg,rawvideo             --enable-decoder=h264,hevc,mjpeg,rawvideo,aac             --enable-encoder=mjpeg,rawvideo,aac             --enable-parser=h264,hevc,mjpeg             --enable-filter=scale,format,fps --enable-indev=lavfi             --disable-ffplay --disable-ffprobe
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
+      - name: Build backend
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp-install;$(brew --prefix openssl@3);$(brew --prefix libuv);$(brew --prefix nghttp2)"             -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --build build --parallel
+
+      - name: Package
+        run: |
+          chmod +x packaging/macos/build-macos.sh
+          packaging/macos/build-macos.sh             --build build --version "${GITHUB_REF_NAME#v}" --arch "${{ matrix.arch }}"             --out dist-packages --ffmpeg "$RUNNER_TEMP/ffmpeg/bin/ffmpeg"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-macos-${{ matrix.arch }}
+          path: |
+            dist-packages/*.pkg
+            dist-packages/*.dmg
+            dist-packages/*.zip
+          if-no-files-found: error
+
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows-x64]
+    needs: [linux, windows-x64, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
