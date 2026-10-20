@@ -99,7 +99,15 @@ function onSeek(targetMs: number) {
 }
 
 function onSpeedChange(value: number) {
+  const current = playerRef.value?.positionMs() ?? playStartMs.value
+  const target = Math.max(dayStart.value, Math.min(dayEnd.value - 1000, current))
   speed.value = value
+  if (target === playStartMs.value) {
+    // Paused at the start (or a seek in progress): restart with the new rate.
+    void playerRef.value?.reload()
+  } else {
+    playStartMs.value = target
+  }
 }
 
 function onPosition(value: number) {
