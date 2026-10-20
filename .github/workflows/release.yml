@@ -1,0 +1,195 @@
+name: Build packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            libuvcpp: linux-x64
+            ffmpeg: linux64
+            deb_arch: amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            libuvcpp: linux-arm64
+            ffmpeg: linuxarm64
+            deb_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Fetch libuvcpp
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/uvcpp.zip" \
+            "https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-${{ matrix.libuvcpp }}.zip"
+          unzip -q "$RUNNER_TEMP/uvcpp.zip" -d "$RUNNER_TEMP/uvcpp"
+
+      - name: Fetch static LGPL FFmpeg
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg.tar.xz" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-${{ matrix.ffmpeg }}-lgpl-8.1.tar.xz"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -C "$RUNNER_TEMP/ffmpeg" -xf "$RUNNER_TEMP/ffmpeg.tar.xz"
+
+      - name: Install build tools
+        run: sudo apt-get install -y --no-install-recommends ninja-build pkg-config unzip libuv1-dev libssl-dev rpm
+
+      - name: Build backend
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-${{ matrix.libuvcpp }}"
+          cmake --build build --parallel
+
+      - name: Package
+        run: |
+          FFMPEG_BIN="$(find "$RUNNER_TEMP/ffmpeg" -type f -name ffmpeg | head -1)"
+          chmod +x packaging/linux/build-package.sh
+          packaging/linux/build-package.sh \
+            --build build \
+            --libuvcpp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-${{ matrix.libuvcpp }}" \
+            --ffmpeg "$FFMPEG_BIN" \
+            --arch "${{ matrix.arch }}" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --out dist-packages
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-linux-${{ matrix.arch }}
+          path: |
+            dist-packages/*.deb
+            dist-packages/*.rpm
+            dist-packages/*.tar.gz
+          if-no-files-found: error
+
+  windows-x64:
+    name: Windows x64 (MinGW)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-libuv
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-nsis
+            unzip
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Fetch dependencies
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/uvcpp.zip" \
+            "https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip"
+          unzip -q "$RUNNER_TEMP/uvcpp.zip" -d "$RUNNER_TEMP/uvcpp"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg.zip" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-8.1.zip"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          unzip -q "$RUNNER_TEMP/ffmpeg.zip" -d "$RUNNER_TEMP/ffmpeg"
+
+      - name: Build backend
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64"
+          cmake --build build --parallel
+
+      - name: Stage portable tree
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == "refs/heads"* || -z "$VERSION" ]]; then VERSION="0.1.0-dev"; fi
+          ROOT="$(pwd)"
+          OUT="$ROOT/dist-packages/uvnvr-${VERSION}-windows-x64"
+          mkdir -p "$OUT/bin" "$OUT/share/uvnvr/frontend/dist"
+          cp build/uvnvr.exe "$OUT/bin/"
+          cp "$(find "$RUNNER_TEMP/ffmpeg" -type f -name ffmpeg.exe | head -1)" "$OUT/bin/ffmpeg.exe"
+          cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/dist/"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$OUT/"
+          cp /mingw64/bin/libuvcpp.dll "$OUT/bin/" 2>/dev/null || true
+          for dll in libuv.dll libssl-3-x64.dll libcrypto-3-x64.dll libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll zlib1.dll; do
+            if [ -f "/mingw64/bin/$dll" ]; then cp "/mingw64/bin/$dll" "$OUT/bin/"; fi
+          done
+          if [ -f "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64/bin/libuvcpp.dll" ]; then
+            cp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64/bin/libuvcpp.dll" "$OUT/bin/"
+          fi
+          # Copy every MinGW runtime DLL the executable actually links.
+          ldd build/uvnvr.exe | awk '/=> \/mingw64/ {print $3}' | while read -r dll; do
+            [ -n "$dll" ] && cp -L "$dll" "$OUT/bin/"
+          done
+          cd dist-packages
+          zip -qr "uvnvr-${VERSION}-windows-x64.zip" "uvnvr-${VERSION}-windows-x64"
+          makensis -V2 -DVERSION="$VERSION" -DSOURCE="$(cygpath -w "$OUT")" -DROOT="$(cygpath -w "$ROOT")" "$ROOT/packaging/windows/uvnvr.nsi"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-windows-x64
+          path: |
+            dist-packages/*.zip
+            dist-packages/*.exe
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows-x64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find artifacts -type f -maxdepth 3 -print
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "UvNVR ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) -print)
