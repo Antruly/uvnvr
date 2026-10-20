@@ -56,6 +56,14 @@ interface TokenRow {
   lastUsedAt: number
 }
 
+interface StartupConfig {
+  http: { port: number; host: string }
+  rtsp: { port: number }
+  dataDir: string
+  maintenance: boolean
+  config: { path: string; loaded: boolean }
+}
+
 const { t } = useI18n()
 const auth = useAuthStore()
 
@@ -87,6 +95,7 @@ const settings = reactive<Settings>({
 })
 const smtpPassword = ref('')
 const summary = ref<Summary | null>(null)
+const startup = ref<StartupConfig | null>(null)
 const tokens = ref<TokenRow[]>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -116,10 +125,11 @@ function formatTime(seconds: number) {
 async function load() {
   error.value = ''
   try {
-    const [settingsResponse, summaryResponse, tokensResponse] = await Promise.all([
+    const [settingsResponse, summaryResponse, tokensResponse, startupResponse] = await Promise.all([
       api<Settings>('/api/v1/settings'),
       api<Summary>('/api/v1/system/overview'),
       canUseApi() ? api<TokenRow[]>('/api/v1/tokens') : Promise.resolve([]),
+      api<StartupConfig>('/api/v1/system/config'),
     ])
     Object.assign(settings.security, settingsResponse.security)
     Object.assign(settings.audit, settingsResponse.audit)
@@ -127,6 +137,7 @@ async function load() {
     Object.assign(settings.smtp, settingsResponse.smtp)
     summary.value = summaryResponse
     tokens.value = tokensResponse
+    startup.value = startupResponse
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -404,6 +415,24 @@ onMounted(load)
           <div v-if="summary.performance"><dt>{{ t('system.performance') }}</dt><dd>{{ summary.performance.tier }}</dd></div>
           <div v-if="summary.performance"><dt>{{ t('system.gpu') }}</dt><dd>{{ summary.performance.gpu.available ? summary.performance.gpu.vendor : t('common.none') }}</dd></div>
         </dl>
+      </article>
+
+      <article v-if="startup" class="panel settings-card">
+        <div class="section-title">
+          <AppIcon name="settings" :size="20" />
+          <h3>{{ t('system.startupConfig') }}</h3>
+        </div>
+        <dl class="meta-list">
+          <div><dt>{{ t('system.httpPort') }}</dt><dd>{{ startup.http.port }}</dd></div>
+          <div><dt>{{ t('system.rtspPort') }}</dt><dd>{{ startup.rtsp.port }}</dd></div>
+          <div><dt>{{ t('system.httpHost') }}</dt><dd>{{ startup.http.host }}</dd></div>
+          <div><dt>{{ t('system.dataDir') }}</dt><dd>{{ startup.dataDir }}</dd></div>
+          <div>
+            <dt>{{ t('system.configPath') }}</dt>
+            <dd>{{ startup.config.loaded ? startup.config.path : t('system.configDefaults') }}</dd>
+          </div>
+        </dl>
+        <p class="small-note">{{ t('system.startupConfigHint') }}</p>
       </article>
     </div>
 

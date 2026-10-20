@@ -28,6 +28,15 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       ],
     },
     {
+      id: 'config',
+      title: 'Startup configuration',
+      body: [
+        'Ports, bind address, the data directory and TLS are read from uvnvr.json at startup. Command-line flags override environment variables, which override the file.',
+        'Windows installer: choose the HTTP and RTSP ports on the Service ports page; the file is %ProgramData%\\UvNVR\\uvnvr.json. Linux: /etc/uvnvr/uvnvr.json. macOS: /Library/Application Support/UvNVR/uvnvr.json.',
+        'Run uvnvr --print-config to see the merged settings, then restart the service after editing the file.',
+      ],
+    },
+    {
       id: 'camera',
       title: 'Camera protocols',
       body: [
@@ -52,7 +61,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: 'Playback and preload',
       body: [
         'The playback player streams recorded segments over a WebSocket; it can cross file boundaries without a gap.',
-        'Seeking starts a new ticket at the selected segment. The server reads ahead while the current file is still playing.',
+        'Seeking starts a new ticket at the target time. Click the timeline or use the −30s / −10s / +10s / +30s buttons.',
+        'Use the speed selector for 0.5×–8× playback. The server paces the stream to the selected rate; rewind is implemented as repeated backward seeks.',
         'Use Download segment to fetch a single MPEG-TS file. It can be opened in VLC or remuxed to MP4.',
       ],
     },
@@ -110,6 +120,15 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       ],
     },
     {
+      id: 'config',
+      title: '启动配置',
+      body: [
+        '端口、绑定地址、数据目录与 TLS 在启动时从 uvnvr.json 读取。命令行参数优先于环境变量，环境变量优先于配置文件。',
+        'Windows 安装包在“服务端口”页设置 HTTP/RTSP 端口，写入 %ProgramData%\\UvNVR\\uvnvr.json；Linux 为 /etc/uvnvr/uvnvr.json；macOS 为 /Library/Application Support/UvNVR/uvnvr.json。',
+        '使用 uvnvr --print-config 查看最终配置；修改文件后重启服务生效。',
+      ],
+    },
+    {
       id: 'camera',
       title: '摄像头协议',
       body: [
@@ -134,7 +153,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: '回放与预读',
       body: [
         '回放通过 WebSocket 顺序发送录像切片，可以跨文件无缝播放。',
-        '拖动进度条会从目标切片创建新的播放票据；当前文件播放未完时服务端会提前读取下一片。',
+        '跳转会从目标时间创建新的播放票据；可点击时间轴或使用 −30s / −10s / +10s / +30s 按钮。',
+        '倍速支持 0.5×–8×，服务端按所选速率控制发送节奏；快退通过连续向后跳转实现。',
         '“下载切片”返回单个 MPEG-TS 文件，可用 VLC 打开或转封装为 MP4。',
       ],
     },

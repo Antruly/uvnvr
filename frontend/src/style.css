@@ -2566,8 +2566,45 @@ select.input {
 
 .playback-controls {
   position: absolute;
+  left: 10px;
   right: 10px;
   bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(2, 6, 12, 0.72);
+  backdrop-filter: blur(4px);
+  color: #e6eef8;
+}
+
+.transport-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.transport-clock {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.transport-speed {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.transport-speed select {
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(10, 18, 30, 0.9);
+  color: inherit;
 }
 
 .timeline-panel {
@@ -2635,6 +2672,18 @@ select.input {
 .timeline-block.active {
   opacity: 1;
   box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.4);
+}
+
+.timeline-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #f97316;
+  box-shadow: 0 0 6px rgba(249, 115, 22, 0.9);
+  pointer-events: none;
+  z-index: 2;
 }
 
 @media (max-width: 700px) {

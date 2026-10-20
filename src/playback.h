@@ -19,8 +19,11 @@ public:
   PlaybackService(const PlaybackService&) = delete;
   PlaybackService& operator=(const PlaybackService&) = delete;
 
+  // `speed` is a positive playback rate (1.0 = real time). The stream is paced
+  // by the segment's average bitrate so the client does not buffer the whole
+  // requested range at once.
   void Open(uvcpp::uvcpp_ws_connection* connection, int64_t channel_id, const std::string& stream,
-            int64_t start_ms, int64_t end_ms);
+            int64_t start_ms, int64_t end_ms, double speed);
 
 private:
   struct Impl;

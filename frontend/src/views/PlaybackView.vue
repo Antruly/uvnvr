@@ -35,6 +35,9 @@ function localDay(date: Date) {
 const day = ref(localDay(new Date()))
 const recordings = ref<Recording[]>([])
 const selected = ref<Recording | null>(null)
+const playStartMs = ref(0)
+const speed = ref(1)
+const positionMs = ref(0)
 const loading = ref(false)
 const error = ref('')
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
@@ -45,6 +48,12 @@ const dayEnd = computed(() => dayStart.value + 24 * 60 * 60 * 1000)
 const channelName = computed(
   () => channels.value.find((channel) => channel.id === channelId.value)?.name ?? '—',
 )
+
+const positionPercent = computed(() => {
+  const span = dayEnd.value - dayStart.value
+  if (span <= 0) return 0
+  return Math.max(0, Math.min(100, ((positionMs.value - dayStart.value) / span) * 100))
+})
 
 function formatTime(ms: number) {
   return new Intl.DateTimeFormat(undefined, {
@@ -72,11 +81,43 @@ function blockStyle(recording: Recording) {
 
 function selectSegment(recording: Recording) {
   selected.value = recording
+  playStartMs.value = recording.startMs
+  positionMs.value = recording.startMs
 }
 
 function playFrom(recording: Recording) {
   selected.value = recording
+  playStartMs.value = recording.startMs
+  positionMs.value = recording.startMs
   if (playerRef.value) void playerRef.value.reload()
+}
+
+function onSeek(targetMs: number) {
+  const target = Math.max(dayStart.value, Math.min(dayEnd.value - 1000, targetMs))
+  playStartMs.value = target
+  positionMs.value = target
+}
+
+function onSpeedChange(value: number) {
+  speed.value = value
+}
+
+function onPosition(value: number) {
+  positionMs.value = value
+}
+
+function seekTimeline(event: MouseEvent) {
+  const track = event.currentTarget as HTMLElement
+  const rect = track.getBoundingClientRect()
+  if (rect.width <= 0) return
+  const target =
+    dayStart.value + ((event.clientX - rect.left) / rect.width) * (dayEnd.value - dayStart.value)
+  const hit = recordings.value.find(
+    (recording) => target >= recording.startMs && target <= recording.endMs,
+  )
+  if (!hit) return
+  selected.value = hit
+  onSeek(target)
 }
 
 async function loadRecordings() {
@@ -93,8 +134,12 @@ async function loadRecordings() {
     recordings.value = await api<Recording[]>(`/api/v1/recordings?${params.toString()}`)
     if (recordings.value.length > 0) {
       selected.value = recordings.value[0]
+      playStartMs.value = recordings.value[0].startMs
+      positionMs.value = recordings.value[0].startMs
     } else {
       selected.value = null
+      playStartMs.value = 0
+      positionMs.value = 0
     }
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
@@ -190,9 +235,13 @@ onMounted(async () => {
         ref="playerRef"
         :channel-id="channelId"
         :stream="stream"
-        :start-ms="selected.startMs"
+        :start-ms="playStartMs"
         :end-ms="dayEnd"
-        :title="`${channelName} · ${formatTime(selected.startMs)}`"
+        :speed="speed"
+        :title="`${channelName} · ${formatTime(positionMs)}`"
+        @seek="onSeek"
+        @speed-change="onSpeedChange"
+        @position="onPosition"
       />
       <div v-else class="empty-state">
         <AppIcon name="playback" :size="28" />
@@ -211,7 +260,7 @@ onMounted(async () => {
             {{ String(hour - 1).padStart(2, '0') }}
           </span>
         </div>
-        <div class="timeline-track">
+        <div class="timeline-track" @click="seekTimeline">
           <button
             v-for="recording in recordings"
             :key="recording.id"
@@ -219,9 +268,15 @@ onMounted(async () => {
             :class="{ active: selected?.id === recording.id }"
             :style="blockStyle(recording)"
             :title="`${formatTime(recording.startMs)} – ${formatTime(recording.endMs)} · ${formatBytes(recording.sizeBytes)}`"
-            @click="selectSegment(recording)"
+            @click.stop="selectSegment(recording)"
             @dblclick="playFrom(recording)"
           ></button>
+          <div
+            v-if="selected"
+            class="timeline-cursor"
+            :style="{ left: `${positionPercent}%` }"
+            :title="formatTime(positionMs)"
+          ></div>
         </div>
       </div>
     </section>
