@@ -84,6 +84,7 @@ add_executable(uvnvr
   src/onvif.cpp
   src/recording.cpp
   src/playback.cpp
+  src/rtsp.cpp
 )
 
 target_include_directories(uvnvr PRIVATE
@@ -101,7 +102,7 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 
-target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto PkgConfig::LIBUV)
+target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL PkgConfig::LIBUV)
 
 # The release archive is a shared library outside the normal loader path.
 if(UVNVR_LIBUVCPP_ROOT)
@@ -117,6 +118,7 @@ else()
 endif()
 
 install(TARGETS uvnvr RUNTIME DESTINATION bin)
+install(DIRECTORY frontend/dist/ DESTINATION share/uvnvr/frontend/dist OPTIONAL)
 
 if(UVNVR_BUILD_TESTS)
   enable_testing()

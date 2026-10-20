@@ -3,12 +3,14 @@
 #include "media.h"
 #include "playback.h"
 #include "recording.h"
+#include "rtsp.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <db/uvcpp_db_pool.h>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -27,6 +29,7 @@ struct Config {
   std::string data_dir = "./data";
   std::string db_path;
   int port = 8080;
+  int rtsp_port = 554;
   bool tls_self_signed = false;
   std::string tls_cert;
   std::string tls_key;
@@ -98,6 +101,7 @@ struct LoginResult {
 class App {
 public:
   explicit App(Config config);
+  ~App();
   int Run();
 
 private:
@@ -114,6 +118,13 @@ private:
   std::string BuildChannelUrl(const ChannelRow& channel, bool sub, std::string* error);
   void SyncMediaChannel(int64_t id);
   void SyncAllMedia();
+  void StartMonitors();
+  void StopMonitors();
+  void MonitorRun();
+  void RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
+                  const std::string& message, const std::string& snapshot_path);
+  void RegisterAlertRoutes();
+  void RegisterSystemRoutes();
   void RegisterChannelRoutes();
   void RegisterOnvifRoutes();
   void RegisterStreamRoutes();
@@ -123,6 +134,7 @@ private:
   bool CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                           std::string* token, int64_t* expires_at, std::string* error);
   bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
+  bool VerifyRtspCredentials(const std::string& username, const std::string& password);
   bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                             int64_t start_ms, int64_t end_ms, std::string* token,
                             int64_t* expires_at, std::string* error);
@@ -201,6 +213,13 @@ private:
   std::unique_ptr<MediaService> media_;
   std::unique_ptr<RecordingService> recording_;
   std::unique_ptr<PlaybackService> playback_;
+  std::unique_ptr<RtspServer> rtsp_;
+  std::thread monitor_thread_;
+  std::atomic<bool> monitor_stop_{false};
+  std::map<int64_t, std::string> last_channel_state_;
+  std::map<int64_t, std::vector<uint8_t>> last_motion_frame_;
+  std::map<int64_t, int64_t> motion_cooldown_;
+  int64_t last_storage_alert_ms_ = 0;
   std::array<uv_signal_t*, 2> signal_handles_{nullptr, nullptr};
   std::vector<unsigned char> secret_key_;
   std::mutex tickets_mutex_;

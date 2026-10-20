@@ -103,6 +103,70 @@ int64_t NoiseSleep(std::atomic<bool>& stop, int64_t ms) {
   return slept;
 }
 
+#ifndef _WIN32
+bool CapturePosix(const std::string& executable, const std::vector<std::string>& args,
+                  std::string* output, std::string* error) {
+  int fds[2];
+  if (pipe(fds) != 0) {
+    if (error)
+      *error = std::string("pipe failed: ") + std::strerror(errno);
+    return false;
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    close(fds[0]);
+    close(fds[1]);
+    if (error)
+      *error = "fork failed";
+    return false;
+  }
+  if (pid == 0) {
+    dup2(fds[1], STDOUT_FILENO);
+    const int null_fd = open("/dev/null", O_WRONLY);
+    if (null_fd >= 0)
+      dup2(null_fd, STDERR_FILENO);
+    close(fds[0]);
+    close(fds[1]);
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(executable.c_str()));
+    for (const auto& arg : args)
+      argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+    execv(executable.c_str(), argv.data());
+    _exit(127);
+  }
+  close(fds[1]);
+  output->clear();
+  char buffer[16384];
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (std::chrono::steady_clock::now() < deadline) {
+    struct pollfd pfd {
+      fds[0], POLLIN, 0
+    };
+    const int ready = poll(&pfd, 1, 200);
+    if (ready < 0)
+      break;
+    if (ready == 0)
+      continue;
+    const ssize_t n = read(fds[0], buffer, sizeof(buffer));
+    if (n <= 0)
+      break;
+    output->append(buffer, static_cast<size_t>(n));
+    if (output->size() > 16 * 1024 * 1024)
+      break;
+  }
+  close(fds[0]);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  if (output->empty()) {
+    if (error)
+      *error = "ffmpeg capture returned no data";
+    return false;
+  }
+  return true;
+}
+#endif
+
 } // namespace
 
 struct MediaService::Impl {
@@ -119,6 +183,11 @@ struct MediaService::Impl {
     std::atomic<bool> alive{true};
     std::atomic<bool> pending{false};
     std::atomic<bool> skipping{false};
+  };
+
+  struct RawSubscriber {
+    uint64_t id = 0;
+    RawSink sink;
   };
 
   struct TSDemux {
@@ -261,7 +330,9 @@ struct MediaService::Impl {
     mutable std::mutex mutex;
     TSDemux demux;
     std::unordered_map<uint64_t, std::shared_ptr<Subscriber>> subscribers;
+    std::unordered_map<uint64_t, std::shared_ptr<RawSubscriber>> raw_subscribers;
     uint64_t next_subscriber_id = 1;
+    uint64_t next_raw_subscriber_id = 1;
 
     Stream(Impl* owner_in, int64_t channel, std::string stream_kind, std::string stream_url)
         : owner(owner_in), channel_id(channel), kind(std::move(stream_kind)),
@@ -327,6 +398,7 @@ struct MediaService::Impl {
       std::vector<size_t> keyframes;
       uint64_t chunk_start = 0;
       std::vector<std::shared_ptr<Subscriber>> subscriber_list;
+      std::vector<std::shared_ptr<RawSubscriber>> raw_list;
       std::vector<uint8_t> initial;
       {
         std::lock_guard<std::mutex> lock(mutex);
@@ -336,7 +408,15 @@ struct MediaService::Impl {
           (void)id;
           subscriber_list.push_back(sub);
         }
+        for (const auto& [id, sub] : raw_subscribers) {
+          (void)id;
+          raw_list.push_back(sub);
+        }
         status.has_keyframe = demux.keyframe_offset != UINT64_MAX;
+      }
+      for (const auto& sub : raw_list) {
+        if (sub->sink)
+          sub->sink(data, len);
       }
       for (const auto& sub : subscriber_list) {
         if (!sub->alive.load())
@@ -393,6 +473,21 @@ struct MediaService::Impl {
       });
       SendInitial(sub, initial);
       return true;
+    }
+
+    uint64_t AddRawSubscriber(RawSink sink, std::vector<uint8_t>* initial) {
+      auto sub = std::make_shared<RawSubscriber>();
+      sub->sink = std::move(sink);
+      std::lock_guard<std::mutex> lock(mutex);
+      sub->id = next_raw_subscriber_id++;
+      raw_subscribers[sub->id] = sub;
+      *initial = demux.Snapshot();
+      return sub->id;
+    }
+
+    void RemoveRawSubscriber(uint64_t id) {
+      std::lock_guard<std::mutex> lock(mutex);
+      raw_subscribers.erase(id);
     }
 
     void Start() {
@@ -862,6 +957,46 @@ void MediaService::Remove(int64_t channel_id) {
     channel->sub->Stop();
 }
 
+bool MediaService::CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error) {
+  std::vector<std::string> args = {
+      "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
+      "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1",
+      "-q:v",         "2",         "-f",    "mjpeg",    "pipe:1"};
+#ifdef _WIN32
+  if (error)
+    *error = "snapshot capture is not wired on Windows yet";
+  return false;
+#else
+  return CapturePosix(impl_->ffmpeg_path, args, jpeg, error);
+#endif
+}
+
+bool MediaService::CaptureGray(const std::string& url, int width, int height,
+                               std::vector<uint8_t>* frame, std::string* error) {
+  const std::string filter =
+      "scale=" + std::to_string(width) + ":" + std::to_string(height) + ",format=gray";
+  std::vector<std::string> args = {
+      "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
+      "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1",
+      "-vf",          filter,      "-f",    "rawvideo", "pipe:1"};
+#ifdef _WIN32
+  if (error)
+    *error = "motion capture is not wired on Windows yet";
+  return false;
+#else
+  std::string raw;
+  if (!CapturePosix(impl_->ffmpeg_path, args, &raw, error))
+    return false;
+  if (raw.size() < static_cast<size_t>(width * height)) {
+    if (error)
+      *error = "short raw frame from ffmpeg";
+    return false;
+  }
+  frame->assign(raw.begin(), raw.begin() + width * height);
+  return true;
+#endif
+}
+
 void MediaService::SetDataSink(
     std::function<void(int64_t, const std::string&, const uint8_t*, size_t)> sink) {
   impl_->data_sink = std::move(sink);
@@ -888,6 +1023,28 @@ void MediaService::Reconnect(int64_t channel_id) {
         std::make_shared<Impl::Stream>(impl_.get(), channel_id, "sub", channel->spec.sub_url);
     channel->sub->Start();
   }
+}
+
+uint64_t MediaService::AddRawSubscriber(int64_t channel_id, const std::string& stream, RawSink sink,
+                                        std::string* error) {
+  auto runtime = impl_->FindStream(channel_id, stream);
+  if (!runtime) {
+    if (error)
+      *error = "stream is not running";
+    return 0;
+  }
+  std::vector<uint8_t> initial;
+  RawSink initial_sink = sink;
+  const uint64_t id = runtime->AddRawSubscriber(std::move(sink), &initial);
+  if (!initial.empty() && initial_sink)
+    initial_sink(initial.data(), initial.size());
+  return id;
+}
+
+void MediaService::RemoveRawSubscriber(int64_t channel_id, const std::string& stream, uint64_t id) {
+  auto runtime = impl_->FindStream(channel_id, stream);
+  if (runtime)
+    runtime->RemoveRawSubscriber(id);
 }
 
 bool MediaService::Subscribe(int64_t channel_id, const std::string& stream,

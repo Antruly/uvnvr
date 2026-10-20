@@ -8,6 +8,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <db/uvcpp_db.h>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <openssl/ssl.h>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -33,6 +35,7 @@
 #include <windows.h>
 #else
 #include <sys/statvfs.h>
+#include <sys/time.h>
 #endif
 
 namespace uvnvr {
@@ -170,6 +173,125 @@ std::string Join(const std::vector<std::string>& values, const std::string& sepa
     out += values[i];
   }
   return out;
+}
+
+std::string Base64Encode(const std::string& input) {
+  if (input.empty())
+    return {};
+  std::string out(4 * ((input.size() + 2) / 3), '\0');
+  const int written = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(out.data()),
+                                      reinterpret_cast<const unsigned char*>(input.data()),
+                                      static_cast<int>(input.size()));
+  if (written <= 0)
+    return {};
+  out.resize(static_cast<size_t>(written));
+  return out;
+}
+
+bool SmtpRead(BIO* bio, int expected, std::string* error) {
+  char line[1024];
+  int code = 0;
+  do {
+    const int n = BIO_gets(bio, line, sizeof(line));
+    if (n <= 0) {
+      if (error)
+        *error = "SMTP connection closed";
+      return false;
+    }
+    code = std::atoi(line);
+    if (std::strlen(line) < 4 || line[3] != '-')
+      break;
+  } while (true);
+  if (code / 100 != expected / 100) {
+    if (error)
+      *error = "SMTP error: " + std::string(line);
+    return false;
+  }
+  return true;
+}
+
+bool SmtpCommand(BIO* bio, const std::string& command, int expected, std::string* error) {
+  const std::string line = command + "\r\n";
+  if (BIO_write(bio, line.data(), static_cast<int>(line.size())) <= 0) {
+    if (error)
+      *error = "SMTP write failed";
+    return false;
+  }
+  return SmtpRead(bio, expected, error);
+}
+
+bool SendSmtpMail(const std::string& host, int port, const std::string& username,
+                  const std::string& password, const std::string& from, const std::string& to,
+                  const std::string& subject, const std::string& body, bool use_ssl,
+                  std::string* error) {
+  SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+  if (ctx == nullptr) {
+    if (error)
+      *error = "cannot create the TLS context";
+    return false;
+  }
+  SSL_CTX_set_default_verify_paths(ctx);
+  BIO* bio = BIO_new_ssl_connect(ctx);
+  if (bio == nullptr) {
+    SSL_CTX_free(ctx);
+    if (error)
+      *error = "cannot create the SMTP connection";
+    return false;
+  }
+  SSL* ssl = nullptr;
+  BIO_get_ssl(bio, &ssl);
+  if (ssl != nullptr)
+    SSL_set_tlsext_host_name(ssl, host.c_str());
+  const std::string host_port = host + ":" + std::to_string(port);
+  BIO_set_conn_hostname(bio, host_port.c_str());
+  if (BIO_do_connect(bio) <= 0 || BIO_do_handshake(bio) <= 0) {
+    if (error)
+      *error = "cannot connect to the SMTP server";
+    BIO_free_all(bio);
+    SSL_CTX_free(ctx);
+    return false;
+  }
+  if (ssl != nullptr && SSL_get_verify_result(ssl) != X509_V_OK) {
+    if (error)
+      *error = "SMTP TLS certificate verification failed";
+    BIO_free_all(bio);
+    SSL_CTX_free(ctx);
+    return false;
+  }
+  bool ok = SmtpRead(bio, 220, error);
+  if (ok)
+    ok = SmtpCommand(bio, "EHLO uvnvr", 250, error);
+  if (ok)
+    ok = SmtpCommand(bio, "AUTH LOGIN", 334, error);
+  if (ok)
+    ok = SmtpCommand(bio, Base64Encode(username), 334, error);
+  if (ok)
+    ok = SmtpCommand(bio, Base64Encode(password), 235, error);
+  if (ok)
+    ok = SmtpCommand(bio, "MAIL FROM:<" + from + ">", 250, error);
+  if (ok)
+    ok = SmtpCommand(bio, "RCPT TO:<" + to + ">", 250, error);
+  if (ok)
+    ok = SmtpCommand(bio, "DATA", 354, error);
+  if (ok) {
+    std::string message = "From: " + from + "\r\nTo: " + to + "\r\nSubject: " + subject +
+                          "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n"
+                          "Content-Transfer-Encoding: 8bit\r\n\r\n" +
+                          body + "\r\n.\r\n";
+    if (BIO_write(bio, message.data(), static_cast<int>(message.size())) <= 0) {
+      if (error)
+        *error = "SMTP message write failed";
+      ok = false;
+    } else {
+      ok = SmtpRead(bio, 250, error);
+    }
+  }
+  if (ok)
+    SmtpCommand(bio, "QUIT", 221, error);
+  BIO_free_all(bio);
+  SSL_CTX_free(ctx);
+  (void)use_ssl;
+  return ok;
 }
 
 std::string PercentEncode(const std::string& input) {
@@ -478,6 +600,17 @@ bool App::Migrate(std::string* error) {
       "state TEXT NOT NULL,"
       "reason TEXT NOT NULL DEFAULT '',"
       "at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS alerts ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL DEFAULT 0,"
+      "type TEXT NOT NULL,"
+      "level TEXT NOT NULL DEFAULT 'warning',"
+      "message TEXT NOT NULL,"
+      "snapshot_path TEXT NOT NULL DEFAULT '',"
+      "acknowledged INTEGER NOT NULL DEFAULT 0,"
+      "created_at INTEGER NOT NULL)",
+      "CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged, created_at)",
       "CREATE INDEX IF NOT EXISTS idx_channels_enabled ON channels(enabled)",
       "CREATE INDEX IF NOT EXISTS idx_plans_channel ON record_plans(channel_id, weekday)",
       "CREATE INDEX IF NOT EXISTS idx_recordings_channel ON recordings(channel_id, start_ms)",
@@ -524,6 +657,15 @@ bool App::Migrate(std::string* error) {
       {"audit.retention_days", "180"},
       {"system.timezone", "UTC"},
       {"system.language", "auto"},
+      {"system.gpu_enabled", "1"},
+      {"smtp.enabled", "0"},
+      {"smtp.host", "smtp.qq.com"},
+      {"smtp.port", "465"},
+      {"smtp.username", ""},
+      {"smtp.password_enc", ""},
+      {"smtp.from", ""},
+      {"smtp.to", ""},
+      {"smtp.ssl", "1"},
       {"live.cache_mb", "8"},
       {"recording.segment_minutes", "5"},
       {"recording.segment_size_mb", "256"},
@@ -1239,6 +1381,45 @@ json App::BuildSummary() {
   Query("SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?", session_params, &sessions,
         &error);
   Query("SELECT COUNT(*) AS n FROM audit_log", {}, &audit, &error);
+  uvcpp::uvcpp_db_table alert_count;
+  uvcpp::uvcpp_db_params alert_params;
+  alert_params.add(1);
+  Query("SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = ?", alert_params, &alert_count,
+        &error);
+
+  const double memory_gb = static_cast<double>(total_memory) / (1024.0 * 1024.0 * 1024.0);
+  const int tier_cores =
+      cpu_count > 0 ? cpu_count : static_cast<int>(std::thread::hardware_concurrency());
+  std::string tier = "high";
+  if (tier_cores <= 4 || memory_gb <= 8.0) {
+    tier = "low";
+  } else if (tier_cores <= 8 || memory_gb <= 16.0) {
+    tier = "medium";
+  }
+  bool gpu_available = false;
+  std::string gpu_vendor = "none";
+#ifdef _WIN32
+  {
+    std::error_code gpu_ec;
+    if (std::filesystem::exists("C:\\Program Files\\NVIDIA Corporation", gpu_ec)) {
+      gpu_available = true;
+      gpu_vendor = "nvidia";
+    }
+  }
+#else
+  {
+    std::error_code gpu_ec;
+    if (std::filesystem::exists("/dev/nvidia0", gpu_ec) ||
+        std::getenv("CUDA_VISIBLE_DEVICES") != nullptr) {
+      gpu_available = true;
+      gpu_vendor = "nvidia";
+    } else if (std::filesystem::exists("/dev/dri", gpu_ec)) {
+      gpu_available = true;
+      gpu_vendor = "intel/amd";
+    }
+  }
+#endif
+  const bool gpu_enabled = GetSettingInt("system.gpu_enabled", 1) != 0;
 
   result["version"] = UVNVR_VERSION;
   result["commit"] = UVNVR_GIT_SHA;
@@ -1248,6 +1429,10 @@ json App::BuildSummary() {
   result["uptimeSeconds"] = static_cast<int64_t>(uptime);
   result["setupRequired"] = setup_required_.load();
   result["maintenance"] = config_.maintenance;
+  result["performance"] =
+      json{{"tier", tier},
+           {"gpu",
+            json{{"available", gpu_available}, {"vendor", gpu_vendor}, {"enabled", gpu_enabled}}}};
   result["cpu"] = json{
       {"cores", cpu_count > 0 ? cpu_count : static_cast<int>(std::thread::hardware_concurrency())},
       {"usagePercent", cpu_percent}};
@@ -1263,6 +1448,7 @@ json App::BuildSummary() {
   result["counts"] = json{{"users", users.empty() ? 0 : TableInt(users, 0, "n")},
                           {"sessions", sessions.empty() ? 0 : TableInt(sessions, 0, "n")},
                           {"audit", audit.empty() ? 0 : TableInt(audit, 0, "n")},
+                          {"alerts", alert_count.empty() ? 0 : TableInt(alert_count, 0, "n")},
                           {"channels", 0},
                           {"recordings", 0}};
   return result;
@@ -1288,11 +1474,30 @@ void App::RegisterMiddleware() {
 }
 
 void App::RegisterStatic() {
-  std::ifstream entry("./frontend/dist/index.html");
+  std::string web_root = "./frontend/dist";
+  char exe[4096] = {0};
+  size_t exe_len = sizeof(exe);
+  if (uv_exepath(exe, &exe_len) == 0) {
+    const std::filesystem::path dir =
+        std::filesystem::path(std::string(exe, exe_len)).parent_path();
+    const std::vector<std::filesystem::path> candidates = {
+        dir / ".." / "share" / "uvnvr" / "frontend" / "dist",
+        dir / ".." / "share" / "uvnvr" / "web",
+        dir / "frontend" / "dist",
+    };
+    for (const auto& candidate : candidates) {
+      std::error_code ec;
+      if (std::filesystem::exists(candidate / "index.html", ec) && !ec) {
+        web_root = candidate.lexically_normal().string();
+        break;
+      }
+    }
+  }
+  std::ifstream entry(web_root + "/index.html");
   if (entry.good()) {
     uvcpp::uvcpp_web_static_options options;
     options.spa_fallback = true;
-    web_.serve_static("/", "./frontend/dist", options);
+    web_.serve_static("/", web_root, options);
   } else {
     web_.get("/",
              [](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp, uvcpp::uvcpp_web_next) {
@@ -1450,6 +1655,26 @@ int App::Run() {
       });
   recording_->Start();
   playback_ = std::make_unique<PlaybackService>(&web_, &db_);
+  rtsp_ = std::make_unique<RtspServer>(
+      [this](const std::string& user, const std::string& password) {
+        return VerifyRtspCredentials(user, password);
+      },
+      [this](int64_t channel, const std::string& stream, MediaService::RawSink sink,
+             std::string* error) {
+        return media_ ? media_->AddRawSubscriber(channel, stream, std::move(sink), error) : 0;
+      },
+      [this](int64_t channel, const std::string& stream, uint64_t id) {
+        if (media_)
+          media_->RemoveRawSubscriber(channel, stream, id);
+      },
+      config_.rtsp_port);
+  std::string rtsp_error;
+  if (!rtsp_->Start(&rtsp_error)) {
+    std::fprintf(stderr, "RTSP server unavailable: %s\n", rtsp_error.c_str());
+  } else {
+    std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
+  }
+  StartMonitors();
 
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
   std::printf("ffmpeg: %s (%s)\n", media_->FfmpegPath().c_str(),
@@ -1771,6 +1996,14 @@ void App::RegisterCoreRoutes() {
                              return;
                            }
                          }
+                         if (system.contains("gpuEnabled")) {
+                           const bool enabled = JsonBool(system, "gpuEnabled", true);
+                           std::string db_error;
+                           if (!SetSetting("system.gpu_enabled", enabled ? "1" : "0", &db_error)) {
+                             *error = db_error;
+                             return;
+                           }
+                         }
                          if (system.contains("language")) {
                            const std::string language = system["language"].is_string()
                                                             ? system["language"].get<std::string>()
@@ -1784,6 +2017,57 @@ void App::RegisterCoreRoutes() {
                              *error = db_error;
                              return;
                            }
+                         }
+                       }
+                       if (body.contains("smtp") && body["smtp"].is_object()) {
+                         const auto& smtp = body["smtp"];
+                         auto set_string = [&](const char* key, const std::string& value) -> bool {
+                           std::string db_error;
+                           if (!SetSetting(std::string("smtp.") + key, value, &db_error)) {
+                             *error = db_error;
+                             return false;
+                           }
+                           return true;
+                         };
+                         if (smtp.contains("enabled") &&
+                             !set_string("enabled", JsonBool(smtp, "enabled", false) ? "1" : "0"))
+                           return;
+                         if (smtp.contains("host")) {
+                           const std::string host = JsonString(smtp, "host", "smtp.qq.com");
+                           if (host.empty() || host.size() > 255) {
+                             *error = "SMTP host is invalid";
+                             return;
+                           }
+                           if (!set_string("host", host))
+                             return;
+                         }
+                         if (smtp.contains("port")) {
+                           const int64_t port = JsonInt(smtp, "port", 465);
+                           if (port < 1 || port > 65535) {
+                             *error = "SMTP port is invalid";
+                             return;
+                           }
+                           if (!set_string("port", std::to_string(port)))
+                             return;
+                         }
+                         if (smtp.contains("username") &&
+                             !set_string("username", JsonString(smtp, "username")))
+                           return;
+                         if (smtp.contains("from") && !set_string("from", JsonString(smtp, "from")))
+                           return;
+                         if (smtp.contains("to") && !set_string("to", JsonString(smtp, "to")))
+                           return;
+                         if (smtp.contains("password") && smtp["password"].is_string() &&
+                             !smtp["password"].get<std::string>().empty()) {
+                           std::string encrypt_error;
+                           const std::string encrypted =
+                               EncryptSecret(smtp["password"].get<std::string>(), &encrypt_error);
+                           if (encrypted.empty()) {
+                             *error = encrypt_error;
+                             return;
+                           }
+                           if (!set_string("password_enc", encrypted))
+                             return;
                          }
                        }
                        *settings = SettingsJson();
@@ -1810,7 +2094,15 @@ json App::SettingsJson() {
                         {"apiLockMinutes", GetSettingInt("security.api_lock_minutes", 10)}}},
       {"audit", json{{"retentionDays", GetSettingInt("audit.retention_days", 180)}}},
       {"system", json{{"timezone", GetSetting("system.timezone", "UTC")},
-                      {"language", GetSetting("system.language", "auto")}}}};
+                      {"language", GetSetting("system.language", "auto")},
+                      {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0}}},
+      {"smtp", json{{"enabled", GetSettingInt("smtp.enabled", 0) != 0},
+                    {"host", GetSetting("smtp.host", "smtp.qq.com")},
+                    {"port", GetSettingInt("smtp.port", 465)},
+                    {"username", GetSetting("smtp.username", "")},
+                    {"from", GetSetting("smtp.from", "")},
+                    {"to", GetSetting("smtp.to", "")},
+                    {"hasPassword", !GetSetting("smtp.password_enc", "").empty()}}}};
 }
 
 namespace {
@@ -1841,6 +2133,8 @@ void App::RegisterProtectedRoutes() {
   RegisterRecordingRoutes();
   RegisterStorageRoutes();
   RegisterPlanRoutes();
+  RegisterAlertRoutes();
+  RegisterSystemRoutes();
 
   // Users -----------------------------------------------------------------
   web_.get(
@@ -3068,6 +3362,24 @@ bool App::CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::str
   return true;
 }
 
+bool App::VerifyRtspCredentials(const std::string& username, const std::string& password) {
+  uvcpp::uvcpp_db_table table;
+  uvcpp::uvcpp_db_params params;
+  params.add(username);
+  std::string error;
+  if (!Query("SELECT u.password_hash, u.enabled, r.permissions FROM users u "
+             "JOIN roles r ON r.id = u.role_id WHERE u.username = ? COLLATE NOCASE",
+             params, &table, &error) ||
+      table.empty() || TableInt(table, 0, "enabled") == 0) {
+    return false;
+  }
+  if (!VerifyPassword(password, TableText(table, 0, "password_hash")))
+    return false;
+  UserContext user;
+  user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
+  return HasPermission(user, "rtsp.access");
+}
+
 bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                                int64_t start_ms, int64_t end_ms, std::string* token,
                                int64_t* expires_at, std::string* error) {
@@ -3452,6 +3764,54 @@ void App::RegisterChannelRoutes() {
                      });
                },
                "channel.manage"));
+
+  web_.get("/api/v1/channels/:id/snapshot",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 auto payload = std::make_shared<std::string>();
+                 auto status = std::make_shared<int>(200);
+                 auto message = std::make_shared<std::string>();
+                 RunWork(
+                     [this, channel_id, payload, status, message] {
+                       ChannelRow channel;
+                       std::string error;
+                       if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                         *status = 404;
+                         *message = "channel not found or disabled";
+                         return;
+                       }
+                       const std::string url =
+                           BuildChannelUrl(channel, channel.sub_enabled, &error);
+                       if (url.empty()) {
+                         *status = 400;
+                         *message = error;
+                         return;
+                       }
+                       if (!media_ || !media_->CaptureJpeg(url, payload.get(), &error)) {
+                         *status = 502;
+                         *message = error.empty() ? "camera snapshot failed" : error;
+                       }
+                     },
+                     [payload, status, message, &resp, next] {
+                       if (*status != 200) {
+                         SendError(resp, *status, "snapshot_failed", *message);
+                       } else {
+                         resp.set_header("Content-Type", "image/jpeg");
+                         resp.status(200).body(*payload, "image/jpeg");
+                         resp.end();
+                       }
+                       next();
+                     });
+               },
+               "api.snapshot"));
 
   web_.post("/api/v1/channels/:id/reconnect",
             Protected(
@@ -4389,6 +4749,429 @@ void App::RegisterRecordingRoutes() {
                 });
           },
           "playback.download"));
+}
+
+App::~App() {
+  StopMonitors();
+}
+
+void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
+                     const std::string& message, const std::string& snapshot_path) {
+  uvcpp::uvcpp_db_params params;
+  params.add(channel_id);
+  params.add(type);
+  params.add(level);
+  params.add(message);
+  params.add(snapshot_path);
+  params.add(0);
+  params.add(NowSeconds());
+  std::string error;
+  if (!Exec("INSERT INTO alerts(channel_id, type, level, message, snapshot_path, acknowledged, "
+            "created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            params, nullptr, &error)) {
+    std::fprintf(stderr, "alert insert failed: %s\n", error.c_str());
+  }
+  if (level != "info" && GetSettingInt("smtp.enabled", 0) != 0) {
+    const std::string host = GetSetting("smtp.host", "smtp.qq.com");
+    const int64_t port = GetSettingInt("smtp.port", 465);
+    const std::string username = GetSetting("smtp.username", "");
+    const std::string from = GetSetting("smtp.from", username);
+    const std::string to = GetSetting("smtp.to", "");
+    std::string decrypt_error;
+    const std::string password = DecryptSecret(GetSetting("smtp.password_enc", ""), &decrypt_error);
+    if (!to.empty() && !from.empty() && !password.empty()) {
+      std::thread([host, port, username, password, from, to, type, message] {
+        std::string smtp_error;
+        if (!SendSmtpMail(host, static_cast<int>(port), username, password, from, to,
+                          "UvNVR alert: " + type, message, true, &smtp_error)) {
+          std::fprintf(stderr, "alert email failed: %s\n", smtp_error.c_str());
+        }
+      }).detach();
+    }
+  }
+}
+
+void App::StartMonitors() {
+  if (monitor_thread_.joinable())
+    return;
+  monitor_stop_ = false;
+  monitor_thread_ = std::thread([this] { MonitorRun(); });
+}
+
+void App::StopMonitors() {
+  monitor_stop_ = true;
+  if (monitor_thread_.joinable())
+    monitor_thread_.join();
+}
+
+void App::MonitorRun() {
+  const std::filesystem::path alert_dir = std::filesystem::path(config_.data_dir) / "alerts";
+  std::error_code ec;
+  std::filesystem::create_directories(alert_dir, ec);
+  while (!monitor_stop_.load()) {
+    int motion_channels = 0;
+    std::string error;
+    const auto channels = LoadChannels(&error);
+    int64_t now = NowSeconds();
+    for (const auto& channel : channels) {
+      if (!channel.enabled)
+        continue;
+      const StreamStatus status = media_ ? media_->Status(channel.id, "main") : StreamStatus{};
+      const std::string state = status.state;
+      const auto previous = last_channel_state_.find(channel.id);
+      if (state == "offline" || state == "error") {
+        if (previous == last_channel_state_.end() || previous->second != state) {
+          RaiseAlert(channel.id, "channel_offline", "warning",
+                     "Channel " + channel.name + " is offline: " + status.error, "");
+        }
+      } else if (state == "online") {
+        if (previous != last_channel_state_.end() &&
+            (previous->second == "offline" || previous->second == "error")) {
+          RaiseAlert(channel.id, "channel_online", "info",
+                     "Channel " + channel.name + " is back online", "");
+        }
+      }
+      last_channel_state_[channel.id] = state;
+
+      if (state != "online" || motion_channels >= 4)
+        continue;
+      std::string url_error;
+      const bool use_sub = channel.sub_enabled;
+      const std::string url = BuildChannelUrl(channel, use_sub, &url_error);
+      if (url.empty())
+        continue;
+      const int width = 64;
+      const int height = 36;
+      std::vector<uint8_t> frame;
+      if (!media_->CaptureGray(url, width, height, &frame, &url_error))
+        continue;
+      motion_channels += 1;
+      auto previous_frame = last_motion_frame_.find(channel.id);
+      if (previous_frame != last_motion_frame_.end() &&
+          previous_frame->second.size() == frame.size()) {
+        int64_t diff = 0;
+        for (size_t i = 0; i < frame.size(); ++i) {
+          diff +=
+              std::abs(static_cast<int>(frame[i]) - static_cast<int>(previous_frame->second[i]));
+        }
+        const double mean = static_cast<double>(diff) / frame.size();
+        const int64_t last = motion_cooldown_[channel.id];
+        if (mean > 6.0 && now - last > 60) {
+          std::string jpeg;
+          std::string jpeg_error;
+          std::string snapshot_path;
+          if (media_->CaptureJpeg(url, &jpeg, &jpeg_error) && !jpeg.empty()) {
+            snapshot_path =
+                (alert_dir / (std::to_string(channel.id) + "_" + std::to_string(now) + ".jpg"))
+                    .string();
+            std::ofstream output(snapshot_path, std::ios::binary);
+            output.write(jpeg.data(), static_cast<std::streamsize>(jpeg.size()));
+          }
+          RaiseAlert(channel.id, "motion", "warning", "Motion detected on channel " + channel.name,
+                     snapshot_path);
+          motion_cooldown_[channel.id] = now;
+        }
+      }
+      last_motion_frame_[channel.id] = std::move(frame);
+      if (motion_channels >= 4)
+        break;
+    }
+
+    if (now - last_storage_alert_ms_ > 3600) {
+      uvcpp::uvcpp_db_table volumes;
+      if (Query("SELECT id, path, mode, max_usage_pct FROM storage_volumes WHERE enabled = 1", {},
+                &volumes, &error)) {
+        for (size_t i = 0; i < volumes.rows().size(); ++i) {
+          const std::string path = TableText(volumes, i, "path");
+          const int64_t max_pct = TableInt(volumes, i, "max_usage_pct");
+#ifdef _WIN32
+          ULARGE_INTEGER free_bytes{};
+          ULARGE_INTEGER total_bytes{};
+          if (!GetDiskFreeSpaceExA(path.c_str(), &free_bytes, &total_bytes, nullptr))
+            continue;
+          const uint64_t total = total_bytes.QuadPart;
+          const uint64_t free = free_bytes.QuadPart;
+#else
+          struct statvfs stat {};
+          if (statvfs(path.c_str(), &stat) != 0)
+            continue;
+          const uint64_t total = static_cast<uint64_t>(stat.f_blocks) * stat.f_frsize;
+          const uint64_t free = static_cast<uint64_t>(stat.f_bavail) * stat.f_frsize;
+#endif
+          if (total == 0)
+            continue;
+          const double used = 100.0 * (1.0 - static_cast<double>(free) / total);
+          if (used >= static_cast<double>(max_pct)) {
+            RaiseAlert(0, "storage_full", "warning",
+                       "Storage volume " + path + " is " + std::to_string(static_cast<int>(used)) +
+                           "% full",
+                       "");
+          }
+        }
+      }
+      last_storage_alert_ms_ = now;
+    }
+
+    for (int i = 0; i < 30 && !monitor_stop_.load(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
+}
+
+void App::RegisterAlertRoutes() {
+  web_.post("/api/v1/system/email/test",
+            Protected(
+                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, op] {
+                        const std::string host = GetSetting("smtp.host", "smtp.qq.com");
+                        const int64_t port = GetSettingInt("smtp.port", 465);
+                        const std::string username = GetSetting("smtp.username", "");
+                        const std::string from = GetSetting("smtp.from", username);
+                        const std::string to = GetSetting("smtp.to", "");
+                        std::string error;
+                        const std::string password =
+                            DecryptSecret(GetSetting("smtp.password_enc", ""), &error);
+                        if (host.empty() || from.empty() || to.empty() || password.empty()) {
+                          op->ok = false;
+                          op->status = 400;
+                          op->code = "smtp_not_configured";
+                          op->message = "SMTP host, sender, recipient and password are required";
+                          return;
+                        }
+                        if (!SendSmtpMail(host, static_cast<int>(port), username, password, from,
+                                          to, "UvNVR test email",
+                                          "This is a test message from UvNVR.", true, &error)) {
+                          op->ok = false;
+                          op->status = 502;
+                          op->code = "smtp_failed";
+                          op->message = error;
+                          return;
+                        }
+                        op->data = json{{"ok", true}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "system.manage"));
+
+  web_.get(
+      "/api/v1/alerts",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string level = req.query("level") ? *req.query("level") : "";
+            const std::string acknowledged =
+                req.query("acknowledged") ? *req.query("acknowledged") : "";
+            auto items = std::make_shared<json>(json::array());
+            RunWork(
+                [this, level, acknowledged, items] {
+                  std::string where = " WHERE 1=1";
+                  uvcpp::uvcpp_db_params params;
+                  if (!level.empty()) {
+                    where += " AND a.level = ?";
+                    params.add(level);
+                  }
+                  if (acknowledged == "1" || acknowledged == "0") {
+                    where += " AND a.acknowledged = ?";
+                    params.add(acknowledged == "1" ? 1 : 0);
+                  }
+                  uvcpp::uvcpp_db_table table;
+                  std::string error;
+                  if (!Query(
+                          "SELECT a.id, a.channel_id, c.name AS channel_name, a.type, a.level, "
+                          "a.message, a.snapshot_path, a.acknowledged, a.created_at FROM alerts a "
+                          "LEFT JOIN channels c ON c.id = a.channel_id" +
+                              where + " ORDER BY a.created_at DESC LIMIT 300",
+                          params, &table, &error)) {
+                    return;
+                  }
+                  for (size_t i = 0; i < table.rows().size(); ++i) {
+                    items->push_back(json{
+                        {"id", TableInt(table, i, "id")},
+                        {"channelId", TableInt(table, i, "channel_id")},
+                        {"channelName", TableText(table, i, "channel_name")},
+                        {"type", TableText(table, i, "type")},
+                        {"level", TableText(table, i, "level")},
+                        {"message", TableText(table, i, "message")},
+                        {"snapshotPath", TableText(table, i, "snapshot_path")},
+                        {"acknowledged", TableInt(table, i, "acknowledged") != 0},
+                        {"createdAt", TableInt(table, i, "created_at")},
+                    });
+                  }
+                },
+                [items, &resp, next] {
+                  SendJson(resp, 200, *items);
+                  next();
+                });
+          },
+          "alert.view"));
+
+  web_.post("/api/v1/alerts/:id/ack",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const std::string* id_param = req.param("id");
+                  int64_t alert_id = 0;
+                  if (!ParseIntParam(id_param, &alert_id) || alert_id <= 0) {
+                    SendError(resp, 400, "invalid_id", "invalid alert id");
+                    next();
+                    return;
+                  }
+                  const UserContext actor = UserFromRequest(req);
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, alert_id, actor, op] {
+                        uvcpp::uvcpp_db_params params;
+                        params.add(NowSeconds());
+                        params.add(alert_id);
+                        std::string error;
+                        if (!Exec("UPDATE alerts SET acknowledged = 1 WHERE id = ?", params,
+                                  nullptr, &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = "the alert could not be acknowledged";
+                          return;
+                        }
+                        Audit("alert", "info", actor.username, "", "", "alert",
+                              std::to_string(alert_id), "acknowledge", "success", "", "{}");
+                        op->data = json{{"ok", true}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "alert.manage"));
+
+  web_.get("/api/v1/alerts/:id/snapshot",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t alert_id = 0;
+                 if (!ParseIntParam(id_param, &alert_id) || alert_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid alert id");
+                   next();
+                   return;
+                 }
+                 auto payload = std::make_shared<std::string>();
+                 auto status = std::make_shared<int>(200);
+                 auto message = std::make_shared<std::string>();
+                 RunWork(
+                     [this, alert_id, payload, status, message] {
+                       uvcpp::uvcpp_db_table table;
+                       uvcpp::uvcpp_db_params params;
+                       params.add(alert_id);
+                       std::string error;
+                       if (!Query("SELECT snapshot_path FROM alerts WHERE id = ?", params, &table,
+                                  &error) ||
+                           table.empty()) {
+                         *status = 404;
+                         *message = "alert not found";
+                         return;
+                       }
+                       const std::string path = TableText(table, 0, "snapshot_path");
+                       if (path.empty()) {
+                         *status = 404;
+                         *message = "alert has no snapshot";
+                         return;
+                       }
+                       std::ifstream file(path, std::ios::binary);
+                       if (!file) {
+                         *status = 404;
+                         *message = "snapshot file is missing";
+                         return;
+                       }
+                       payload->assign(std::istreambuf_iterator<char>(file),
+                                       std::istreambuf_iterator<char>());
+                     },
+                     [payload, status, message, &resp, next] {
+                       if (*status != 200) {
+                         SendError(resp, *status, "not_found", *message);
+                       } else {
+                         resp.status(200).body(*payload, "image/jpeg");
+                         resp.end();
+                       }
+                       next();
+                     });
+               },
+               "alert.view"));
+}
+
+void App::RegisterSystemRoutes() {
+  web_.get("/api/v1/system/time",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 SendJson(resp, 200,
+                          json{{"serverMs", NowSeconds() * 1000},
+                               {"timezone", GetSetting("system.timezone", "UTC")}});
+                 next();
+               },
+               "system.view"));
+
+  web_.post(
+      "/api/v1/system/time/sync",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            const int64_t epoch_ms = body.is_object() ? JsonInt(body, "epochMs", 0) : 0;
+            const int64_t now_ms = NowSeconds() * 1000;
+            if (epoch_ms <= 0 || std::llabs(epoch_ms - now_ms) > 366LL * 24 * 3600 * 1000) {
+              SendError(resp, 400, "invalid_time", "epochMs must be a plausible current time");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, epoch_ms, actor, op] {
+                  std::string error;
+#ifdef _WIN32
+                  FILETIME file_time;
+                  ULARGE_INTEGER value;
+                  value.QuadPart =
+                      static_cast<ULONGLONG>(epoch_ms) * 10000ULL + 116444736000000000ULL;
+                  file_time.dwLowDateTime = value.LowPart;
+                  file_time.dwHighDateTime = value.HighPart;
+                  SYSTEMTIME system_time;
+                  if (!FileTimeToSystemTime(&file_time, &system_time) ||
+                      !SetSystemTime(&system_time)) {
+                    error = "SetSystemTime failed; run the service with sufficient privileges";
+                  }
+#else
+                  struct timeval tv {};
+                  tv.tv_sec = static_cast<time_t>(epoch_ms / 1000);
+                  tv.tv_usec = static_cast<suseconds_t>((epoch_ms % 1000) * 1000);
+                  if (settimeofday(&tv, nullptr) != 0) {
+                    error = std::string("settimeofday failed: ") + std::strerror(errno) +
+                            " (CAP_SYS_TIME is required)";
+                  }
+#endif
+                  if (!error.empty()) {
+                    op->ok = false;
+                    op->status = 403;
+                    op->code = "time_sync_failed";
+                    op->message = error;
+                    return;
+                  }
+                  Audit("system", "warning", actor.username, "", "", "system", "", "time_sync",
+                        "success", "", json{{"epochMs", epoch_ms}}.dump());
+                  op->data = json{{"ok", true}, {"serverMs", epoch_ms}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "system.manage"));
 }
 
 } // namespace uvnvr

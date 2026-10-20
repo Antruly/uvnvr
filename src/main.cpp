@@ -21,6 +21,7 @@ void PrintUsage(const char* argv0) {
             << "Usage: " << argv0 << " [options]\n\n"
             << "Options:\n"
             << "  --port <port>      HTTP/HTTPS listen port (default: 8080)\n"
+            << "  --rtsp-port <port> RTSP listen port (default: 554; falls back to 8554)\n"
             << "  --data-dir <path>  Data directory (default: ./data)\n"
             << "  --tls-self-signed  Serve HTTPS with a generated localhost certificate\n"
             << "  --maintenance      Enable maintenance mode\n"
@@ -48,6 +49,11 @@ Options ParseOptions(int argc, char** argv) {
     options.config.tls_cert = cert;
   if (const char* key = std::getenv("UVNVR_TLS_KEY"))
     options.config.tls_key = key;
+  if (const char* rtsp = std::getenv("UVNVR_RTSP_PORT")) {
+    int port = 0;
+    if (ParsePort(rtsp, &port))
+      options.config.rtsp_port = port;
+  }
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg(argv[i]);
@@ -55,6 +61,14 @@ Options ParseOptions(int argc, char** argv) {
       options.help = true;
     } else if (arg == "--version" || arg == "-v") {
       options.version = true;
+    } else if (arg == "--rtsp-port") {
+      if (i + 1 >= argc) {
+        std::cerr << "--rtsp-port requires a value\n";
+        options.help = true;
+      } else if (!ParsePort(argv[++i], &options.config.rtsp_port)) {
+        std::cerr << "invalid RTSP port: " << argv[i] << "\n";
+        options.help = true;
+      }
     } else if (arg == "--tls-self-signed") {
       options.config.tls_self_signed = true;
     } else if (arg == "--maintenance") {

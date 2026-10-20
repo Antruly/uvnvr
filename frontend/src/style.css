@@ -2876,3 +2876,153 @@ select.input {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* --------------------------------------------------------------------------
+   Alerts
+   -------------------------------------------------------------------------- */
+
+.filter-select {
+  width: auto;
+  min-width: 120px;
+}
+
+.alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.alert-card {
+  display: flex;
+  gap: 14px;
+  padding: 16px 18px;
+  border-left: 3px solid var(--line-strong);
+}
+
+.alert-card.warning {
+  border-left-color: var(--warn);
+}
+
+.alert-card.error {
+  border-left-color: var(--danger);
+}
+
+.alert-card.info {
+  border-left-color: var(--accent);
+}
+
+.alert-card.ack {
+  opacity: 0.62;
+}
+
+.alert-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(56, 189, 248, 0.08);
+  color: var(--accent-2);
+  flex: 0 0 auto;
+}
+
+.alert-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.alert-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  font-size: 13px;
+}
+
+.alert-body p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.alert-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Help manual
+   -------------------------------------------------------------------------- */
+
+.help-search {
+  padding: 16px 18px;
+}
+
+.help-search .field {
+  max-width: 640px;
+}
+
+.help-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.help-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px;
+  position: sticky;
+  top: 130px;
+}
+
+.help-nav a {
+  padding: 7px 9px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.help-nav a:hover {
+  color: var(--text);
+  background: rgba(56, 189, 248, 0.07);
+}
+
+.help-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.help-section {
+  padding: 22px 24px;
+}
+
+.help-section h3 {
+  margin-bottom: 10px;
+  font-size: 17px;
+}
+
+.help-section p {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+@media (max-width: 900px) {
+  .help-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .help-nav {
+    position: static;
+  }
+}

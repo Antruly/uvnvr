@@ -54,6 +54,12 @@ const router = createRouter({
       meta: { titleKey: 'nav.storage', permission: 'storage.view' },
     },
     {
+      path: '/alerts',
+      name: 'AlertsView',
+      component: () => import('@/views/AlertsView.vue'),
+      meta: { titleKey: 'nav.alerts', permission: 'alert.view' },
+    },
+    {
       path: '/users',
       name: 'UsersView',
       component: () => import('@/views/UsersView.vue'),
@@ -70,6 +76,12 @@ const router = createRouter({
       name: 'SystemView',
       component: () => import('@/views/SystemView.vue'),
       meta: { titleKey: 'nav.settings', permission: 'system.view' },
+    },
+    {
+      path: '/help',
+      name: 'HelpView',
+      component: () => import('@/views/HelpView.vue'),
+      meta: { titleKey: 'help.title' },
     },
     {
       path: '/about',

@@ -16,6 +16,7 @@ const app = useAppStore()
       <span class="pill accent">{{ t('nav.about') }}</span>
       <h2>{{ t('about.title') }}</h2>
       <p>{{ t('about.subtitle') }}</p>
+      <RouterLink class="inline-link" to="/help">{{ t('help.openManual') }}</RouterLink>
     </div>
     <RouterLink class="button" to="/">
       <AppIcon name="arrow" :size="16" />

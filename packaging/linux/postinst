@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+if ! getent group uvnvr >/dev/null 2>&1; then
+  groupadd --system uvnvr
+fi
+if ! id -u uvnvr >/dev/null 2>&1; then
+  useradd --system --gid uvnvr --home /var/lib/uvnvr --shell /usr/sbin/nologin uvnvr
+fi
+mkdir -p /var/lib/uvnvr
+chown -R uvnvr:uvnvr /var/lib/uvnvr
+chmod 0750 /var/lib/uvnvr
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable uvnvr >/dev/null 2>&1 || true
+  systemctl restart uvnvr >/dev/null 2>&1 || true
+fi
+echo "UvNVR installed. Open http://<host>:8080 to complete setup."
+exit 0

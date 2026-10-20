@@ -56,6 +56,15 @@ public:
   bool Subscribe(int64_t channel_id, const std::string& stream,
                  uvcpp::uvcpp_ws_connection* connection, std::string* error);
 
+  using RawSink = std::function<void(const uint8_t*, size_t)>;
+  uint64_t AddRawSubscriber(int64_t channel_id, const std::string& stream, RawSink sink,
+                            std::string* error);
+  void RemoveRawSubscriber(int64_t channel_id, const std::string& stream, uint64_t id);
+
+  bool CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error);
+  bool CaptureGray(const std::string& url, int width, int height, std::vector<uint8_t>* frame,
+                   std::string* error);
+
   StreamStatus Status(int64_t channel_id, const std::string& stream) const;
   json StatusJson() const;
 

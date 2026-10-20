@@ -15,7 +15,16 @@ interface Settings {
     apiLockMinutes: number
   }
   audit: { retentionDays: number }
-  system: { timezone: string; language: string }
+  system: { timezone: string; language: string; gpuEnabled: boolean }
+  smtp: {
+    enabled: boolean
+    host: string
+    port: number
+    username: string
+    from: string
+    to: string
+    hasPassword: boolean
+  }
 }
 
 interface Summary {
@@ -29,6 +38,7 @@ interface Summary {
   setupRequired: boolean
   disk: { path: string; usagePercent: number; usedBytes: number; totalBytes: number }
   counts: { users: number; sessions: number; audit: number }
+  performance?: { tier: string; gpu: { available: boolean; vendor: string; enabled: boolean } }
 }
 
 interface TokenRow {
@@ -50,8 +60,18 @@ const settings = reactive<Settings>({
     apiLockMinutes: 10,
   },
   audit: { retentionDays: 180 },
-  system: { timezone: 'UTC', language: 'auto' },
+  system: { timezone: 'UTC', language: 'auto', gpuEnabled: true },
+  smtp: {
+    enabled: false,
+    host: 'smtp.qq.com',
+    port: 465,
+    username: '',
+    from: '',
+    to: '',
+    hasPassword: false,
+  },
 })
+const smtpPassword = ref('')
 const summary = ref<Summary | null>(null)
 const tokens = ref<TokenRow[]>([])
 const loading = ref(true)
@@ -90,6 +110,7 @@ async function load() {
     Object.assign(settings.security, settingsResponse.security)
     Object.assign(settings.audit, settingsResponse.audit)
     Object.assign(settings.system, settingsResponse.system)
+    Object.assign(settings.smtp, settingsResponse.smtp)
     summary.value = summaryResponse
     tokens.value = tokensResponse
   } catch (caught) {
@@ -110,11 +131,22 @@ async function save() {
         security: settings.security,
         audit: settings.audit,
         system: settings.system,
+        smtp: {
+          enabled: settings.smtp.enabled,
+          host: settings.smtp.host,
+          port: Number(settings.smtp.port),
+          username: settings.smtp.username,
+          from: settings.smtp.from,
+          to: settings.smtp.to,
+          password: smtpPassword.value || undefined,
+        },
       }),
     })
     Object.assign(settings.security, updated.security)
     Object.assign(settings.audit, updated.audit)
     Object.assign(settings.system, updated.system)
+    Object.assign(settings.smtp, updated.smtp)
+    smtpPassword.value = ''
     flash(t('system.saved'))
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -161,6 +193,16 @@ async function copyToken() {
     flash(t('system.copy'))
   } catch {
     /* Clipboard may be blocked; the token remains visible for manual copy. */
+  }
+}
+
+async function testEmail() {
+  error.value = ''
+  try {
+    await api('/api/v1/system/email/test', { method: 'POST' })
+    flash(t('system.emailTestSent'))
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
 }
 
@@ -228,11 +270,69 @@ onMounted(load)
               <option value="en-US">English</option>
             </select>
           </label>
+          <label class="check-row">
+            <input v-model="settings.system.gpuEnabled" type="checkbox" />
+            <span>{{ t('system.gpuEnabled') }}</span>
+          </label>
         </div>
         <div class="modal-actions">
           <button class="button primary" type="submit" :disabled="saving || !canManage()">
             <AppIcon name="save" :size="16" />
             {{ saving ? t('common.loading') : t('system.save') }}
+          </button>
+        </div>
+      </form>
+
+      <form class="panel settings-card" @submit.prevent="save">
+        <div class="section-title">
+          <AppIcon name="bell" :size="20" />
+          <h3>{{ t('system.email') }}</h3>
+        </div>
+        <label class="check-row">
+          <input v-model="settings.smtp.enabled" type="checkbox" />
+          <span>{{ t('system.emailEnabled') }}</span>
+        </label>
+        <div class="form-grid">
+          <label class="field">
+            <span>{{ t('system.emailHost') }}</span>
+            <input v-model="settings.smtp.host" class="input" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.emailPort') }}</span>
+            <input v-model.number="settings.smtp.port" class="input" type="number" min="1" max="65535" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.emailUsername') }}</span>
+            <input v-model="settings.smtp.username" class="input" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.emailPassword') }}</span>
+            <input
+              v-model="smtpPassword"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="settings.smtp.hasPassword ? t('system.emailKeepPassword') : ''"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.emailFrom') }}</span>
+            <input v-model="settings.smtp.from" class="input" type="email" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.emailTo') }}</span>
+            <input v-model="settings.smtp.to" class="input" type="email" />
+          </label>
+        </div>
+        <p class="small-note">{{ t('system.emailQQHint') }}</p>
+        <div class="modal-actions">
+          <button type="button" class="button" @click="testEmail">
+            <AppIcon name="bell" :size="15" />
+            {{ t('system.emailTest') }}
+          </button>
+          <button class="button primary" type="submit" :disabled="saving || !canManage()">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.save') }}
           </button>
         </div>
       </form>
@@ -252,6 +352,8 @@ onMounted(load)
           <div><dt>{{ t('dashboard.users') }}</dt><dd>{{ summary.counts.users }}</dd></div>
           <div><dt>{{ t('dashboard.auditEvents') }}</dt><dd>{{ summary.counts.audit }}</dd></div>
           <div><dt>{{ t('system.maintenance') }}</dt><dd>{{ summary.maintenance ? t('common.yes') : t('common.no') }}</dd></div>
+          <div v-if="summary.performance"><dt>{{ t('system.performance') }}</dt><dd>{{ summary.performance.tier }}</dd></div>
+          <div v-if="summary.performance"><dt>{{ t('system.gpu') }}</dt><dd>{{ summary.performance.gpu.available ? summary.performance.gpu.vendor : t('common.none') }}</dd></div>
         </dl>
       </article>
     </div>
