@@ -92,6 +92,14 @@ endif()
 configure_file(cmake/version.h.in
                "${CMAKE_BINARY_DIR}/generated/uvnvr/version.h" @ONLY)
 
+# Homebrew prefixes are added to CMAKE_PREFIX_PATH in CI; adding their lib
+# directories lets imported targets that spell -luv/-lnghttp2 resolve.
+foreach(_uvnvr_prefix IN LISTS CMAKE_PREFIX_PATH)
+  if(IS_DIRECTORY "${_uvnvr_prefix}/lib")
+    link_directories("${_uvnvr_prefix}/lib")
+  endif()
+endforeach()
+
 add_executable(uvnvr
   src/main.cpp
   src/app.cpp
