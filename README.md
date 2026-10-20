@@ -175,7 +175,7 @@ distributed package carries LGPL FFmpeg, provided the LGPL conditions are met.
 > If you build or bundle **x264, x265**, or any other GPL/patent-bearing component, the
 > resulting distribution is subject to GPL obligations and to whatever patent licenses apply.
 > Obtaining those licenses is your responsibility. Official UvNVR release builds do **not**
-> include x264/x265; they use an LGPL FFmpeg build and load its shared libraries at runtime.
+> include x264/x265; they bundle an LGPL FFmpeg CLI and run it as a separate process.
 
 ## Repository layout
 

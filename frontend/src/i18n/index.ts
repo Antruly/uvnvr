@@ -110,7 +110,7 @@ const messages = {
         'MPEG-TS segments, SQLite index, ring-buffer writes, io_uring on Linux, LRU cache and read-ahead.',
       license: 'License',
       licenseBody:
-        'MIT for UvNVR code. Official builds load LGPL FFmpeg dynamically and bundle no GPL codecs.',
+        'MIT for UvNVR code. Official builds bundle an LGPL FFmpeg CLI subprocess and no GPL codecs.',
       m0: 'Milestone 1',
       m0Body: 'Authentication, roles, audit, persistence and the first real dashboard are in place.',
       next: 'What comes next',
@@ -539,7 +539,7 @@ const messages = {
       storage: '录像设计',
       storageBody: 'MPEG-TS 切片、SQLite 索引、环形缓存写入、Linux io_uring、LRU 缓存与预读。',
       license: '许可证',
-      licenseBody: 'UvNVR 代码使用 MIT；官方构建动态加载 LGPL FFmpeg，不打包 GPL 编解码器。',
+      licenseBody: 'UvNVR 代码使用 MIT；官方构建内置 LGPL FFmpeg 子进程，不打包 GPL 编解码器。',
       m0: '里程碑 1',
       m0Body: '已完成初始化、登录鉴权、角色权限、审计日志、SQLite 持久化与真实仪表盘。',
       next: '下一步',
