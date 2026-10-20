@@ -19,6 +19,10 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -x "${BUILD_DIR}/uvnvr" ]] || { echo "missing ${BUILD_DIR}/uvnvr" >&2; exit 1; }
 [[ -n "${FFMPEG_BIN}" && -x "${FFMPEG_BIN}" ]] || { echo "missing ffmpeg" >&2; exit 1; }
+if "${FFMPEG_BIN}" -buildconf 2>/dev/null | grep -q -- '--enable-gpl'; then
+  echo "refusing to package a GPL FFmpeg build" >&2
+  exit 1
+fi
 mkdir -p "${OUT}" "${OUT}/../.macos-stage"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT

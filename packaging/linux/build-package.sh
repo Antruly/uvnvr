@@ -34,6 +34,10 @@ done
 
 [[ -x "${BUILD_DIR}/uvnvr" ]] || { echo "missing ${BUILD_DIR}/uvnvr" >&2; exit 1; }
 [[ -n "${FFMPEG_BIN}" && -x "${FFMPEG_BIN}" ]] || { echo "missing static ffmpeg" >&2; exit 1; }
+if "${FFMPEG_BIN}" -buildconf 2>/dev/null | grep -q -- '--enable-gpl'; then
+  echo "refusing to package a GPL FFmpeg build" >&2
+  exit 1
+fi
 
 case "${ARCH}" in
   x64) DEB_ARCH="amd64"; RPM_ARCH="x86_64" ;;

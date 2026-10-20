@@ -164,7 +164,12 @@ jobs:
           OUT="$ROOT/dist-packages/uvnvr-${VERSION}-windows-x64"
           mkdir -p "$OUT/bin" "$OUT/share/uvnvr/frontend/dist"
           cp build/uvnvr.exe "$OUT/bin/"
-          cp "$(find "$RUNNER_TEMP/ffmpeg" -type f -name ffmpeg.exe | head -1)" "$OUT/bin/ffmpeg.exe"
+          FFMPEG_EXE="$(find "$RUNNER_TEMP/ffmpeg" -type f -name ffmpeg.exe | head -1)"
+          if "$FFMPEG_EXE" -buildconf 2>/dev/null | grep -q -- '--enable-gpl'; then
+            echo "refusing to package a GPL FFmpeg build" >&2
+            exit 1
+          fi
+          cp "$FFMPEG_EXE" "$OUT/bin/ffmpeg.exe"
           cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/dist/"
           cp LICENSE THIRD_PARTY_NOTICES.md "$OUT/"
           cp /mingw64/bin/libuvcpp.dll "$OUT/bin/" 2>/dev/null || true
