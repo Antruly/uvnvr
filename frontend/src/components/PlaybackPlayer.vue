@@ -233,7 +233,7 @@ onBeforeUnmount(() => {
         <span class="transport-label">«10</span>
       </button>
       <button class="icon-button small" :title="t('playback.playPause')" @click="togglePlay">
-        <AppIcon :name="state === 'playing' ? 'playback' : 'arrow'" :size="15" />
+        <AppIcon :name="state === 'playing' ? 'pause' : 'playback'" :size="15" />
       </button>
       <button class="icon-button small" :title="t('playback.forward10')" @click="skip(10)">
         <span class="transport-label">10»</span>
