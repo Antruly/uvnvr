@@ -9,6 +9,11 @@ updates:
       frontend:
         patterns:
           - '*'
+    ignore:
+      # vue-tsc 3.x does not support the TypeScript 6/7 exports layout yet.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
