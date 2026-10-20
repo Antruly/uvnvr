@@ -490,6 +490,11 @@ bool App::Init(std::string* error) {
 }
 
 void App::CleanupAudit() {
+  std::lock_guard<std::mutex> lock(audit_cleanup_mutex_);
+  CleanupAuditLocked();
+}
+
+void App::CleanupAuditLocked() {
   const int64_t retention_days = std::max<int64_t>(1, GetSettingInt("audit.retention_days", 180));
   const int64_t cutoff = NowSeconds() - retention_days * 86400;
   uvcpp::uvcpp_db_params params;
@@ -498,6 +503,7 @@ void App::CleanupAudit() {
   if (!Exec("DELETE FROM audit_log WHERE ts < ?", params, nullptr, &error)) {
     std::fprintf(stderr, "audit cleanup failed: %s\n", error.c_str());
   }
+  last_audit_cleanup_ = NowSeconds();
 }
 
 void App::Audit(const std::string& category, const std::string& level, const std::string& actor,
@@ -524,6 +530,10 @@ void App::Audit(const std::string& category, const std::string& level, const std
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params, nullptr, &error)) {
     std::fprintf(stderr, "audit write failed: %s\n", error.c_str());
+    return;
+  }
+  if (NowSeconds() - last_audit_cleanup_.load() > 86400) {
+    CleanupAudit();
   }
 }
 

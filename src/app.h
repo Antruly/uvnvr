@@ -88,6 +88,7 @@ private:
              const std::string& object_id, const std::string& action, const std::string& result,
              const std::string& error_code, const std::string& detail);
   void CleanupAudit();
+  void CleanupAuditLocked();
 
   LoginResult Login(const std::string& username, const std::string& password, const std::string& ip,
                     const std::string& ua);
@@ -138,6 +139,8 @@ private:
   std::string serial_;
 
   std::mutex metrics_mutex_;
+  std::mutex audit_cleanup_mutex_;
+  std::atomic<int64_t> last_audit_cleanup_{0};
   uint64_t last_cpu_total_ = 0;
   uint64_t last_cpu_idle_ = 0;
 };
