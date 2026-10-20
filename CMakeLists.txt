@@ -98,6 +98,9 @@ foreach(_uvnvr_prefix IN LISTS CMAKE_PREFIX_PATH)
   if(IS_DIRECTORY "${_uvnvr_prefix}/lib")
     link_directories("${_uvnvr_prefix}/lib")
   endif()
+  if(IS_DIRECTORY "${_uvnvr_prefix}/include")
+    include_directories("${_uvnvr_prefix}/include")
+  endif()
 endforeach()
 
 add_executable(uvnvr
