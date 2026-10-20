@@ -9,7 +9,7 @@
 | 平台 | 安装包 | 默认数据目录 |
 |---|---|---|
 | Linux | `.deb`、`.rpm`、`.tar.gz` | `/var/lib/uvnvr` |
-| Windows | NSIS 安装包或便携 `.zip` | `%ProgramData%\UvNVR` |
+| Windows | NSIS 安装包或便携 `.zip` | `Program Files` 下运行 `%ProgramData%\UvNVR`；其他位置的便携版 `.\data` |
 | macOS | `.pkg`、`.dmg`、`.zip` | `/Library/Application Support/UvNVR` |
 
 Linux 安装包会安装并启动 systemd 服务。浏览器打开 `http://<主机>:8080`。
@@ -26,7 +26,13 @@ Linux 安装包会安装并启动 systemd 服务。浏览器打开 `http://<主�
 uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
 
-常用参数：`--version`、`--help`、`--tls-self-signed`、`--maintenance`。服务用户、防火墙与备份见 [`deployment.md`](deployment.md)（英文）。
+常用参数：`--version`、`--help`、`--tls-self-signed`、`--maintenance`。安装版在 `Program Files` 下运行时默认使用 `%ProgramData%\UvNVR`；若数据目录仍无法创建，可显式指定：
+
+```bat
+uvnvr.exe --data-dir "%ProgramData%\UvNVR"
+```
+
+服务用户、防火墙与备份见 [`deployment.md`](deployment.md)（英文）。
 
 ## 2. 首次初始化
 

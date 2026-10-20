@@ -10,7 +10,7 @@ A Chinese version is available at [`user-guide.zh-CN.md`](user-guide.zh-CN.md).
 | Platform | Package | Default data directory |
 |---|---|---|
 | Linux | `.deb`, `.rpm`, `.tar.gz` | `/var/lib/uvnvr` |
-| Windows | NSIS setup or portable `.zip` | `%ProgramData%\UvNVR` |
+| Windows | NSIS setup or portable `.zip` | `%ProgramData%\UvNVR` (under Program Files); `.\data` (portable elsewhere) |
 | macOS | `.pkg`, `.dmg`, `.zip` | `/Library/Application Support/UvNVR` |
 
 Linux packages install a systemd unit and start it automatically. Open
@@ -29,6 +29,12 @@ uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
 
 Useful options are `--version`, `--help`, `--tls-self-signed` and `--maintenance`.
+If the data directory cannot be created, pass a writable location explicitly:
+
+```bat
+uvnvr.exe --data-dir "%ProgramData%\UvNVR"
+```
+
 See [`deployment.md`](deployment.md) for service users, firewall and backup notes.
 
 ## 2. First-run setup

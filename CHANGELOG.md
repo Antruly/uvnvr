@@ -33,8 +33,13 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Fixed
 
+- Windows: an installed build under `Program Files` now defaults to
+  `%ProgramData%\UvNVR` instead of trying to create `.\data` in a read-only
+  directory; data-directory failures report the absolute path and the
+  `--data-dir` remedy.
 - Windows arm64 (MSVC): `NOMINMAX` keeps the Windows `min`/`max` macros from breaking
-  `std::min`/`std::max` in the RTSP server.
+  `std::min`/`std::max` in the RTSP server; packaging looks for the executable in
+  the build root as well as `build\Release`.
 - Release automation now publishes only when the complete six-platform matrix succeeds,
   is idempotent on re-runs, and attaches `SHA256SUMS`.
 - macOS packaging reports each stage and bounds `dylibbundler`, `zip`, `pkgbuild` and

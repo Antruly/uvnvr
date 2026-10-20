@@ -14,7 +14,7 @@ The systemd unit runs as `uvnvr`, stores data in `/var/lib/uvnvr`, binds HTTP 80
 
 ### Windows
 
-The NSIS installer installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR`, adds a firewall rule and a startup scheduled task. The portable zip can be run directly with `bin\uvnvr.exe --data-dir <dir>`; `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
+The NSIS installer installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR`, adds a firewall rule and a startup scheduled task. When the executable is installed under Program Files and no `--data-dir` is given, UvNVR defaults to `%ProgramData%\UvNVR`; a portable copy extracted outside Program Files keeps the historical `.\data` default. Run a portable copy with `bin\uvnvr.exe --data-dir <dir>` (extracting under Program Files is not writable for normal users). `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
 
 ### macOS
 
