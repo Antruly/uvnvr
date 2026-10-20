@@ -129,6 +129,9 @@ endforeach()
 
 target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
 if(WIN32)
+  # uvcpp's Windows headers pull in <windows.h>; keep its min/max macros from
+  # breaking std::min/std::max in this project (MSVC sees C2589 otherwise).
+  target_compile_definitions(uvnvr PRIVATE NOMINMAX)
   target_link_libraries(uvnvr PRIVATE ws2_32)
 endif()
 
