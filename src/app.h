@@ -1,5 +1,6 @@
 #pragma once
 
+#include "config.h"
 #include "media.h"
 #include "ntp.h"
 #include "playback.h"
@@ -24,17 +25,6 @@
 namespace uvnvr {
 
 using json = nlohmann::json;
-
-struct Config {
-  std::string data_dir = "./data";
-  std::string db_path;
-  int port = 8080;
-  int rtsp_port = 554;
-  bool tls_self_signed = false;
-  std::string tls_cert;
-  std::string tls_key;
-  bool maintenance = false;
-};
 
 struct ChannelRow {
   int64_t id = 0;
@@ -67,6 +57,7 @@ struct StreamTicket {
   bool playback = false;
   int64_t start_ms = 0;
   int64_t end_ms = 0;
+  double speed = 1.0;
 };
 
 struct UserContext {
@@ -136,7 +127,7 @@ private:
   bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
   bool VerifyRtspCredentials(const std::string& username, const std::string& password);
   bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
-                            int64_t start_ms, int64_t end_ms, std::string* token,
+                            int64_t start_ms, int64_t end_ms, double speed, std::string* token,
                             int64_t* expires_at, std::string* error);
   void RegisterMiddleware();
   void RegisterPublicRoutes();

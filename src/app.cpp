@@ -1583,6 +1583,18 @@ int App::Run() {
   }
 
   web_.set_port(config_.port);
+  if (!config_.host.empty())
+    web_.set_host(config_.host);
+  if (config_.log_level == "trace")
+    web_.set_log_level(uvcpp::log_level::TRACE);
+  else if (config_.log_level == "debug")
+    web_.set_log_level(uvcpp::log_level::DEBUG);
+  else if (config_.log_level == "warn")
+    web_.set_log_level(uvcpp::log_level::WARN);
+  else if (config_.log_level == "error")
+    web_.set_log_level(uvcpp::log_level::ERR);
+  else
+    web_.set_log_level(uvcpp::log_level::INFO);
   web_.set_h2c_enabled(true);
   bool tls_enabled = false;
   if (!config_.tls_cert.empty() && !config_.tls_key.empty()) {
@@ -1613,9 +1625,17 @@ int App::Run() {
     return 1;
   }
 
-  std::printf("UvNVR %s (%s) listening on %s://127.0.0.1:%d\n", UVNVR_VERSION, UVNVR_GIT_SHA,
-              tls_enabled ? "https" : "http", web_.bound_port());
+  const std::string display_host =
+      config_.host.empty() || config_.host == "0.0.0.0" || config_.host == "::"
+          ? "127.0.0.1"
+          : config_.host;
+  std::printf("UvNVR %s (%s) listening on %s://%s:%d\n", UVNVR_VERSION, UVNVR_GIT_SHA,
+              tls_enabled ? "https" : "http", display_host.c_str(), web_.bound_port());
+  std::printf("config: %s\n",
+              config_.config_loaded ? config_.config_path.c_str() : "(built-in defaults)");
   media_ = std::make_unique<MediaService>(&web_);
+  if (!config_.ffmpeg_path.empty())
+    media_->SetFfmpegPath(config_.ffmpeg_path);
   if (const char* ffmpeg = std::getenv("UVNVR_FFMPEG"); ffmpeg != nullptr && ffmpeg[0] != '\0') {
     media_->SetFfmpegPath(ffmpeg);
   }
@@ -3383,7 +3403,7 @@ bool App::VerifyRtspCredentials(const std::string& username, const std::string& 
 }
 
 bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
-                               int64_t start_ms, int64_t end_ms, std::string* token,
+                               int64_t start_ms, int64_t end_ms, double speed, std::string* token,
                                int64_t* expires_at, std::string* error) {
   if (stream != "main" && stream != "sub") {
     if (error)
@@ -3414,6 +3434,7 @@ bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::s
   ticket.playback = true;
   ticket.start_ms = start_ms;
   ticket.end_ms = end_ms;
+  ticket.speed = speed;
   tickets_[*token] = ticket;
   return true;
 }
@@ -4048,16 +4069,30 @@ void App::RegisterStreamRoutes() {
                   const std::string stream = JsonString(body, "stream", "main");
                   const int64_t start_ms = JsonInt(body, "startMs", 0);
                   const int64_t end_ms = JsonInt(body, "endMs", 0);
+                  double speed = 1.0;
+                  if (body.contains("speed")) {
+                    if (!body["speed"].is_number()) {
+                      SendError(resp, 400, "invalid_speed", "speed must be a number");
+                      next();
+                      return;
+                    }
+                    speed = body["speed"].get<double>();
+                  }
                   if (channel_id <= 0 || (stream != "main" && stream != "sub")) {
                     SendError(resp, 400, "invalid_stream",
                               "channelId and stream (main/sub) are required");
                     next();
                     return;
                   }
+                  if (speed < 0.25 || speed > 8.0) {
+                    SendError(resp, 400, "invalid_speed", "speed must be between 0.25 and 8");
+                    next();
+                    return;
+                  }
                   const UserContext user = UserFromRequest(req);
                   auto result = std::make_shared<OpResult>();
                   RunWork(
-                      [this, user, channel_id, stream, start_ms, end_ms, result] {
+                      [this, user, channel_id, stream, start_ms, end_ms, speed, result] {
                         ChannelRow channel;
                         std::string error;
                         if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
@@ -4070,7 +4105,7 @@ void App::RegisterStreamRoutes() {
                         std::string token;
                         int64_t expires_at = 0;
                         if (!CreatePlaybackTicket(user.id, channel_id, stream, start_ms, end_ms,
-                                                  &token, &expires_at, &error)) {
+                                                  speed, &token, &expires_at, &error)) {
                           result->ok = false;
                           result->status = 500;
                           result->code = "ticket_failed";
@@ -4133,7 +4168,7 @@ void App::RegisterStreamRoutes() {
       return;
     }
     playback_->Open(ws.connection(), ticket.channel_id, ticket.stream, ticket.start_ms,
-                    ticket.end_ms);
+                    ticket.end_ms, ticket.speed);
   });
 }
 
@@ -5125,6 +5160,15 @@ void App::RegisterAlertRoutes() {
 }
 
 void App::RegisterSystemRoutes() {
+  web_.get("/api/v1/system/config",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 SendJson(resp, 200, ConfigToJson(config_));
+                 next();
+               },
+               "system.view"));
+
   web_.get("/api/v1/system/time",
            Protected(
                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,

@@ -37,7 +37,7 @@ jobs:
           npm run build
 
       - name: Install build tools
-        run: sudo apt-get install -y --no-install-recommends ninja-build pkg-config unzip libuv1-dev libssl-dev
+        run: sudo apt-get install -y --no-install-recommends ninja-build pkg-config unzip libuv1-dev libssl-dev python3-websockets
 
       - name: Fetch libuvcpp 1.8.1
         run: |
@@ -70,12 +70,18 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.1.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.2.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 
       - name: M1 integration test
         run: bash tests/integration/m1_auth.sh ./build/uvnvr 18090
+
+      - name: Configuration integration test
+        run: bash tests/integration/config.sh ./build/uvnvr 18200
+
+      - name: Playback integration test
+        run: python3 tests/integration/playback.py ./build/uvnvr 18300
 
       - name: Upload server log on failure
         if: failure()
