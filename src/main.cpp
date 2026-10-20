@@ -1,4 +1,5 @@
 #include "app.h"
+#include "platform.h"
 
 #include <charconv>
 #include <cstdlib>
@@ -14,7 +15,49 @@ struct Options {
   uvnvr::Config config;
   bool help = false;
   bool version = false;
+  bool data_dir_set = false;
 };
+
+#ifdef _WIN32
+std::string NormalizePathForCompare(std::string value) {
+  for (char& c : value) {
+    if (c >= 'A' && c <= 'Z')
+      c = static_cast<char>(c - 'A' + 'a');
+    if (c == '/')
+      c = '\\';
+  }
+  while (!value.empty() && value.back() == '\\')
+    value.pop_back();
+  return value;
+}
+
+bool IsUnderDirectory(const std::string& path, const char* directory) {
+  if (directory == nullptr || directory[0] == '\0')
+    return false;
+  const std::string root = NormalizePathForCompare(directory);
+  const std::string candidate = NormalizePathForCompare(path);
+  return candidate.size() > root.size() && candidate.compare(0, root.size(), root) == 0 &&
+         candidate[root.size()] == '\\';
+}
+#endif
+
+// Installed Windows builds live under Program Files, which is read-only for
+// normal users. Their writable state belongs in ProgramData, matching the
+// directory used by the installer's boot task. Portable and development runs
+// keep the historical ./data default.
+std::string DefaultDataDir() {
+#ifdef _WIN32
+  const std::string executable = uvnvr::platform::ExecutablePath();
+  if (IsUnderDirectory(executable, std::getenv("ProgramFiles")) ||
+      IsUnderDirectory(executable, std::getenv("ProgramFiles(x86)"))) {
+    if (const char* program_data = std::getenv("ProgramData");
+        program_data != nullptr && program_data[0] != '\0') {
+      return std::string(program_data) + "\\UvNVR";
+    }
+  }
+#endif
+  return "./data";
+}
 
 void PrintUsage(const char* argv0) {
   std::cout << "UvNVR " << UVNVR_VERSION << " (" << UVNVR_GIT_SHA << ")\n\n"
@@ -22,7 +65,7 @@ void PrintUsage(const char* argv0) {
             << "Options:\n"
             << "  --port <port>      HTTP/HTTPS listen port (default: 8080)\n"
             << "  --rtsp-port <port> RTSP listen port (default: 554; falls back to 8554)\n"
-            << "  --data-dir <path>  Data directory (default: ./data)\n"
+            << "  --data-dir <path>  Data directory (default: " << DefaultDataDir() << ")\n"
             << "  --tls-self-signed  Serve HTTPS with a generated localhost certificate\n"
             << "  --maintenance      Enable maintenance mode\n"
             << "  --version          Print version and exit\n"
@@ -87,6 +130,7 @@ Options ParseOptions(int argc, char** argv) {
         options.help = true;
       } else {
         options.config.data_dir = argv[++i];
+        options.data_dir_set = true;
       }
     } else {
       std::cerr << "unknown option: " << arg << "\n";
@@ -100,6 +144,8 @@ Options ParseOptions(int argc, char** argv) {
     std::cerr << "UVNVR_TLS_CERT and UVNVR_TLS_KEY must be set together\n";
     options.help = true;
   }
+  if (!options.data_dir_set)
+    options.config.data_dir = DefaultDataDir();
   return options;
 }
 

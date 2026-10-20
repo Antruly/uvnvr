@@ -719,8 +719,14 @@ bool App::Init(std::string* error) {
   std::error_code ec;
   std::filesystem::create_directories(config_.data_dir, ec);
   if (ec) {
-    if (error != nullptr)
-      *error = "cannot create data directory: " + ec.message();
+    if (error != nullptr) {
+      std::error_code absolute_ec;
+      const std::filesystem::path absolute =
+          std::filesystem::absolute(config_.data_dir, absolute_ec);
+      const std::string location = absolute_ec ? config_.data_dir : absolute.string();
+      *error = "cannot create data directory '" + location + "': " + ec.message() +
+               "; pass --data-dir with a writable path";
+    }
     return false;
   }
 
@@ -1645,6 +1651,10 @@ int App::Run() {
   StartMonitors();
 
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
+  std::error_code data_ec;
+  const std::filesystem::path data_path =
+      std::filesystem::absolute(config_.data_dir, data_ec);
+  std::printf("data: %s\n", (data_ec ? config_.data_dir : data_path.string()).c_str());
   std::printf("ffmpeg: %s (%s)\n", media_->FfmpegPath().c_str(),
               media_->Available() ? "available" : "not found");
   std::fflush(stdout);
