@@ -4,14 +4,14 @@
 #
 #   packaging/linux/build-package.sh \
 #     --build build --libuvcpp /path/to/libuvcpp-1.8.1-linux-x64 \
-#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.1.0 --out dist-packages
+#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.2.0 --out dist-packages
 set -euo pipefail
 
 BUILD_DIR="build"
 LIBUVCPP_ROOT=""
 FFMPEG_BIN=""
 ARCH="x64"
-VERSION="0.1.0"
+VERSION="0.2.0"
 OUT="dist-packages"
 STAGE=""
 
@@ -134,8 +134,11 @@ tar -C %{buildroot} -xf %{SOURCE0}
 getent group uvnvr >/dev/null || groupadd -r uvnvr
 getent passwd uvnvr >/dev/null || useradd -r -g uvnvr -d /var/lib/uvnvr -s /sbin/nologin uvnvr
 %post
-mkdir -p /var/lib/uvnvr
+mkdir -p /var/lib/uvnvr /etc/uvnvr
 chown -R uvnvr:uvnvr /var/lib/uvnvr
+if [ ! -f /etc/uvnvr/uvnvr.json ]; then
+  printf '%s\n' '{' '  "http": { "port": 8080, "host": "0.0.0.0" },' '  "rtsp": { "port": 554 },' '  "dataDir": "/var/lib/uvnvr"' '}' > /etc/uvnvr/uvnvr.json
+fi
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable uvnvr >/dev/null 2>&1 || true
 %preun

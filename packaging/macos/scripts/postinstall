@@ -3,6 +3,15 @@ set -e
 mkdir -p "/Library/Application Support/UvNVR"
 mkdir -p /var/log
 chmod 0755 "/Library/Application Support/UvNVR"
+if [ ! -f "/Library/Application Support/UvNVR/uvnvr.json" ]; then
+  cat > "/Library/Application Support/UvNVR/uvnvr.json" <<'EOF'
+{
+  "http": { "port": 8080, "host": "0.0.0.0" },
+  "rtsp": { "port": 554 },
+  "dataDir": "/Library/Application Support/UvNVR"
+}
+EOF
+fi
 launchctl load -w /Library/LaunchDaemons/com.antruly.uvnvr.plist >/dev/null 2>&1 || launchctl bootstrap system /Library/LaunchDaemons/com.antruly.uvnvr.plist >/dev/null 2>&1 || true
 echo "UvNVR installed. Open http://<host>:8080 to complete setup."
 exit 0

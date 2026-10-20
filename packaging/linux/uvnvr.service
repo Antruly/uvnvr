@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/uvnvr/bin/uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
+ExecStart=/opt/uvnvr/bin/uvnvr --config /etc/uvnvr/uvnvr.json
 WorkingDirectory=/var/lib/uvnvr
 User=uvnvr
 Group=uvnvr

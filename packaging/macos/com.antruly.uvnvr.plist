@@ -6,9 +6,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/uvnvr/bin/uvnvr</string>
-    <string>--port</string><string>8080</string>
-    <string>--rtsp-port</string><string>554</string>
-    <string>--data-dir</string><string>/Library/Application Support/UvNVR</string>
+    <string>--config</string><string>/Library/Application Support/UvNVR/uvnvr.json</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

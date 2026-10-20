@@ -9,10 +9,23 @@ fi
 mkdir -p /var/lib/uvnvr
 chown -R uvnvr:uvnvr /var/lib/uvnvr
 chmod 0750 /var/lib/uvnvr
+mkdir -p /etc/uvnvr
+if [ ! -f /etc/uvnvr/uvnvr.json ]; then
+  cat > /etc/uvnvr/uvnvr.json <<'EOF'
+{
+  "http": { "port": 8080, "host": "0.0.0.0" },
+  "rtsp": { "port": 554 },
+  "dataDir": "/var/lib/uvnvr"
+}
+EOF
+fi
+chmod 0640 /etc/uvnvr/uvnvr.json
+chown root:uvnvr /etc/uvnvr/uvnvr.json 2>/dev/null || true
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl enable uvnvr >/dev/null 2>&1 || true
   systemctl restart uvnvr >/dev/null 2>&1 || true
 fi
 echo "UvNVR installed. Open http://<host>:8080 to complete setup."
+echo "Startup configuration: /etc/uvnvr/uvnvr.json (edit and restart uvnvr to change ports)."
 exit 0
