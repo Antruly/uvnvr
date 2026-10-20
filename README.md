@@ -177,6 +177,21 @@ distributed package carries LGPL FFmpeg, provided the LGPL conditions are met.
 > Obtaining those licenses is your responsibility. Official UvNVR release builds do **not**
 > include x264/x265; they bundle an LGPL FFmpeg CLI and run it as a separate process.
 
+## Install packages
+
+Download the artifacts from the [latest release](https://github.com/Antruly/uvnvr/releases/latest):
+
+| Platform | Packages |
+|---|---|
+| Windows x64 | NSIS `setup.exe`, portable `.zip` |
+| Windows arm64 | NSIS `setup.exe`, portable `.zip` |
+| Linux x64 / arm64 | `.deb`, `.rpm`, `.tar.gz` |
+| macOS x64 / arm64 | `.pkg`, `.dmg`, `.zip` |
+
+Linux packages install under `/opt/uvnvr`; the systemd unit runs as `uvnvr` and uses `/var/lib/uvnvr`.
+The web UI listens on port 8080 by default; complete first-run setup in the browser.
+See [`docs/deployment.md`](docs/deployment.md) for ports, data directories and service details.
+
 ## Repository layout
 
 ```

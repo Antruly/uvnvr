@@ -168,6 +168,21 @@ configure 参数与许可证声明，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PAR
 > 专利许可责任由你自行承担。官方 UvNVR 发布包**不包含** x264/x265，只使用 LGPL FFmpeg
 > 并以独立进程运行。
 
+## 安装包
+
+请从 [最新 Release](https://github.com/Antruly/uvnvr/releases/latest) 下载：
+
+| 平台 | 安装包 |
+|---|---|
+| Windows x64 | NSIS `setup.exe`、便携 `.zip` |
+| Windows arm64 | NSIS `setup.exe`、便携 `.zip` |
+| Linux x64 / arm64 | `.deb`、`.rpm`、`.tar.gz` |
+| macOS x64 / arm64 | `.pkg`、`.dmg`、`.zip` |
+
+Linux 安装到 `/opt/uvnvr`，systemd 服务以 `uvnvr` 用户运行并使用 `/var/lib/uvnvr`。
+Web 默认端口 8080，首次访问完成初始化。端口、数据目录与服务细节见
+[`docs/deployment.md`](docs/deployment.md)。
+
 ## 仓库结构
 
 ```
