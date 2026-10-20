@@ -23,6 +23,7 @@ frontend/.vite/
 logs/
 
 # Local configuration and secrets
+/uvnvr.json
 .env
 .env.*
 !.env.example
