@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.1.0--rc-fbbf24)](#status)
+[![Status](https://img.shields.io/badge/status-0.1.0-fbbf24)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,7 +22,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.1.0 release candidate — core NVR loop implemented.** The recorder now supports ONVIF
+**0.1.0 — core NVR loop implemented.** The recorder now supports ONVIF
 discovery/probing, channel management, RTSP ingest with automatic reconnects, live
 multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback, RTSP output,
 snapshots, alerts, email notifications, users/roles, audit logging and a bilingual web UI.

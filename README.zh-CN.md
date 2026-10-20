@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.1.0--rc-fbbf24)](#状态)
+[![Status](https://img.shields.io/badge/status-0.1.0-fbbf24)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,7 +22,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.1.0 候选版本 — 核心 NVR 闭环已实现。** 目前支持 ONVIF 发现/探测、通道管理、RTSP
+**0.1.0 — 核心 NVR 闭环已实现。** 目前支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。WebRTC、云平台与高级
 分析不在 0.1.0 范围内。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
