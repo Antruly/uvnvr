@@ -23,8 +23,10 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
-#include <sys/prctl.h>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <unistd.h>
 #endif
 
