@@ -15,7 +15,14 @@ interface Settings {
     apiLockMinutes: number
   }
   audit: { retentionDays: number }
-  system: { timezone: string; language: string; gpuEnabled: boolean }
+  system: {
+    timezone: string
+    language: string
+    gpuEnabled: boolean
+    ntpEnabled: boolean
+    ntpServer: string
+    ntpOffsetMs: number
+  }
   smtp: {
     enabled: boolean
     host: string
@@ -60,7 +67,14 @@ const settings = reactive<Settings>({
     apiLockMinutes: 10,
   },
   audit: { retentionDays: 180 },
-  system: { timezone: 'UTC', language: 'auto', gpuEnabled: true },
+  system: {
+    timezone: 'UTC',
+    language: 'auto',
+    gpuEnabled: true,
+    ntpEnabled: false,
+    ntpServer: 'pool.ntp.org',
+    ntpOffsetMs: 0,
+  },
   smtp: {
     enabled: false,
     host: 'smtp.qq.com',
@@ -196,6 +210,24 @@ async function copyToken() {
   }
 }
 
+async function syncNtp() {
+  error.value = ''
+  try {
+    const result = await api<{ offsetMs: number; applied: boolean; applyError?: string }>(
+      '/api/v1/system/ntp/sync',
+      { method: 'POST' },
+    )
+    settings.system.ntpOffsetMs = result.offsetMs
+    flash(
+      result.applied
+        ? t('system.ntpSynced')
+        : `${t('system.ntpOffset')}: ${result.offsetMs} ms${result.applyError ? ` (${result.applyError})` : ''}`,
+    )
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
 async function testEmail() {
   error.value = ''
   try {
@@ -273,6 +305,23 @@ onMounted(load)
           <label class="check-row">
             <input v-model="settings.system.gpuEnabled" type="checkbox" />
             <span>{{ t('system.gpuEnabled') }}</span>
+          </label>
+          <label class="check-row">
+            <input v-model="settings.system.ntpEnabled" type="checkbox" />
+            <span>{{ t('system.ntpEnabled') }}</span>
+          </label>
+          <label class="field">
+            <span>{{ t('system.ntpServer') }}</span>
+            <input v-model="settings.system.ntpServer" class="input" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.ntpOffset') }}</span>
+            <div class="date-nav">
+              <input :value="`${settings.system.ntpOffsetMs} ms`" class="input" readonly />
+              <button type="button" class="button small" @click="syncNtp">
+                {{ t('system.ntpSync') }}
+              </button>
+            </div>
           </label>
         </div>
         <div class="modal-actions">

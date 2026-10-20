@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-M1%20foundation-38bdf8)](#status)
+[![Status](https://img.shields.io/badge/status-0.1.0--rc-fbbf24)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,11 +22,12 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**M1 — authentication, roles, audit and persistence.** The recorder now has first-run
-setup, session authentication, CSRF protection, users/roles/permissions, API tokens, audit
-logging, SQLite migrations and a live dashboard. Camera, recording and playback features
-arrive in M2/M3. Track the milestones in
-[`docs/development-plan.md`](docs/development-plan.md).
+**0.1.0 release candidate — core NVR loop implemented.** The recorder now supports ONVIF
+discovery/probing, channel management, RTSP ingest with automatic reconnects, live
+multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback, RTSP output,
+snapshots, alerts, email notifications, users/roles, audit logging and a bilingual web UI.
+Peer-to-peer/WebRTC, cloud access and advanced analytics are out of scope for 0.1.0. Track
+the milestones in [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
 
@@ -35,16 +36,19 @@ ONVIF cameras, pulls their RTSP streams once, fans them out to many browser clie
 keyframe-aligned MPEG-TS segments with a SQLite index, and serves seamless playback and RTSP
 output.
 
-### Implemented in M1
+### Implemented now
 
-- First-run setup and the default `admin` account; scrypt password hashing.
-- Session cookies (HttpOnly/SameSite), CSRF protection and API bearer tokens.
-- Users, roles and granular Web/API permissions; built-in admin/operator/viewer roles.
-- Web and API failure lockouts with configurable thresholds.
-- Audit log with categories, filters, pagination and 180-day retention cleanup.
-- SQLite schema migrations, system metadata, serial number and system metrics.
-- Dashboard with CPU, memory, disk, users, sessions and audit counters.
-- Chinese/English UI, cached workspace tabs and a responsive admin shell.
+- First-run setup, scrypt passwords, sessions, CSRF, users/roles and API tokens.
+- ONVIF WS-Discovery/probe and manual RTSP; Hikvision/Dahua path presets.
+- Channel tree, main/sub streams, credentials encrypted with AES-256-GCM.
+- Live preview grid (1/4/8/16/32 + custom), saved layouts, watermarks, offline overlays.
+- One FFmpeg ingest process per channel stream; shared TS fan-out to WebSocket clients.
+- Plan-driven recording, keyframe-aligned segments, time/size slicing, loop/alert volumes.
+- Playback timeline, WebSocket streaming across segments, read-ahead and segment download.
+- RTSP output (`/live/{channel}/{main|sub}`, RTP/MP2T over TCP/UDP) with Basic auth.
+- Snapshots, motion/offline/storage alerts, SMTP email (QQ preset), audit log.
+- Performance tier, GPU detection and explicit GPU toggle; system time API.
+- Chinese/English UI, cached tabs, dashboard, help manual and API tokens.
 
 ### Planned 0.1.0 scope
 
@@ -95,8 +99,9 @@ RTSP ingest, demuxing, snapshots, optional compatibility transcoding and MP4 exp
   archive bundles most dependencies; these are needed for UvNVR's OpenSSL/libuv calls and if
   you build libuvcpp from source)
 
-FFmpeg development libraries are not required for M1. They will be added with the media
-core in M2.
+FFmpeg development libraries are **not** linked into UvNVR. The service runs an FFmpeg
+executable as an isolated child process. Point `UVNVR_FFMPEG` at a compatible binary, or
+place `ffmpeg` next to the executable. Release packages bundle a static LGPL FFmpeg build.
 
 ### Linux x64 quick start
 
@@ -121,7 +126,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DUVNVR_LIBUVCPP_ROOT="$HOME/.local/uvcpp-1.8.1/libuvcpp-1.8.1-linux-x64"
 cmake --build build -j
 
-./build/uvnvr --port 8080
+UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 ```
 
 Open <http://127.0.0.1:8080>. On first launch you are redirected to `/setup` to create the
@@ -142,14 +147,23 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
+## Known limitations (0.1.0)
+
+- ONVIF probing currently supports `http://` device services only.
+- Motion detection is an experimental low-resolution frame-difference detector, not AI.
+- Browser playback uses MSE; H.265 depends on the browser/hardware. Prefer an H.264 sub stream.
+- RTSP output uses RTP/MP2T (payload type 33). Some clients expect H.264 RTP; VLC/ffplay work.
+- Windows ARM64, macOS signing/notarization and some installer polish are release-matrix tasks.
+- Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
+
 ## License
 
 UvNVR source code is released under the [MIT License](LICENSE).
 
-Official builds use **FFmpeg shared libraries under LGPL-2.1-or-later**, loaded dynamically.
-The build must not enable `--enable-gpl` or `--enable-nonfree`. Every release that ships
-FFmpeg includes the corresponding FFmpeg source, the configure line and license notices; see
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Your own code can remain MIT while the
+Official builds bundle an **LGPL FFmpeg CLI binary**; UvNVR runs it as a separate process and
+does not link FFmpeg code. The build must not enable `--enable-gpl` or `--enable-nonfree`.
+Every release that ships FFmpeg includes the corresponding FFmpeg source, configure line and
+license notices; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Your own code can remain MIT while the
 distributed package carries LGPL FFmpeg, provided the LGPL conditions are met.
 
 > [!WARNING]
@@ -182,9 +196,9 @@ tests/             unit/integration/e2e tests
 |---|---|
 | M0 | Repository, rules, service scaffold, frontend shell, icons, CI smoke test |
 | M1 | ✅ Config, SQLite, first-run setup, auth/RBAC, lockout, audit, dashboard |
-| M2 | Channels, ONVIF discovery, RTSP ingest, live view, snapshots |
-| M3 | Recording, segments, index, storage policies, playback, read-ahead |
-| M4 | RTSP server, API, alerts, GPU/perf, system settings |
+| M2 | ✅ Channels, ONVIF discovery, RTSP ingest, live view, snapshots |
+| M3 | ✅ Recording, segments, index, storage policies, playback, read-ahead |
+| M4 | ✅ RTSP server, API, alerts, GPU/perf, system settings |
 | M5 | Six-platform installers and CI matrix |
 | M6 | Soak/security hardening, docs, `v0.1.0` release |
 
@@ -199,7 +213,7 @@ tests/             unit/integration/e2e tests
 
 - [libuvcpp](https://github.com/Antruly/libuvcpp) — MIT, event-driven C++ web framework.
 - [uvp](https://github.com/Antruly/uvp) — MIT, scaffolding and verification for libuvcpp services.
-- [FFmpeg](https://ffmpeg.org/) — LGPL-2.1-or-later, media toolkit.
+- [FFmpeg](https://ffmpeg.org/) — LGPL media toolkit, invoked as a separate process.
 - [Vue 3](https://vuejs.org/), [Vite](https://vite.dev/), [Naive UI](https://www.naiveui.com/),
   [ECharts](https://echarts.apache.org/) — frontend stack.
 - [Desk2ONVIF](https://github.com/Antruly/Desk2ONVIF) — a useful reference for ONVIF Profile S

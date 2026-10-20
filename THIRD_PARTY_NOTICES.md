@@ -10,7 +10,7 @@ ship the exact license texts and source offer for the versions it bundles.
 |---|---|---|
 | [libuvcpp](https://github.com/Antruly/libuvcpp) | MIT | Web/file framework; shared library |
 | [libuv](https://github.com/libuv/libuv) | MIT | Event loop (through libuvcpp) |
-| [FFmpeg](https://ffmpeg.org/) | LGPL-2.1-or-later (official builds) | Shared libraries, loaded dynamically at runtime |
+| [FFmpeg](https://ffmpeg.org/) | LGPL-2.1-or-later; bundled builds use the LGPLv3 option | CLI subprocess, not linked into UvNVR |
 | [SQLite](https://sqlite.org/) | Public domain | Configuration, index, audit database |
 | [OpenSSL](https://www.openssl.org/) | Apache-2.0 | TLS and cryptography |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | JSON |
@@ -30,25 +30,26 @@ The authoritative list for a given release is the SBOM attached to that release.
 
 ## FFmpeg policy
 
-Official UvNVR release builds follow the FFmpeg project's LGPL compliance checklist:
+UvNVR does not link FFmpeg into its own binary. It executes a bundled FFmpeg CLI as a
+separate process. Release builds follow these rules:
 
 1. FFmpeg is configured **without** `--enable-gpl` and **without** `--enable-nonfree`.
-2. FFmpeg libraries are linked **dynamically** (`.dll` / `.so` / `.dylib`); UvNVR does not
-   statically link FFmpeg and does not prevent users from replacing the shared libraries.
+2. The FFmpeg executable is a separate program, not a linked library. Users can replace it
+   with another compatible LGPL build.
 3. The complete corresponding FFmpeg source, including any modifications, is distributed
    with the release, together with the exact `configure` line.
 4. The source is hosted alongside the binary release (GitHub release assets or an equivalent
    stable URL), and the download page links to it.
-5. The About page and this notice state: *This software uses libraries from the FFmpeg
-   project under the LGPLv2.1.*
+5. The About page and this notice state: *This software uses a program from the FFmpeg
+   project under the LGPL.*
 6. FFmpeg's own license text is included in the release package.
 
-When UvNVR starts shipping FFmpeg, CI will fail the release if `ffmpeg -buildconf` contains
-`--enable-gpl` or `--enable-nonfree`, or if the source/SBOM assets are missing.
+CI fails the release if `ffmpeg -buildconf` contains `--enable-gpl` or `--enable-nonfree`, or
+if the FFmpeg source and license assets are missing.
 
-If you prefer not to distribute FFmpeg at all, remove the bundled shared libraries and
-require the operator to install a compatible LGPL FFmpeg build. Document that requirement
-clearly for your users.
+If you prefer not to distribute FFmpeg at all, remove the bundled executable and require
+the operator to install a compatible LGPL FFmpeg build. Document that requirement clearly
+for your users.
 
 ## Patent notice
 

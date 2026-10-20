@@ -274,6 +274,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Attach FFmpeg source offer
+        run: |
+          curl -fL --retry 3 -o artifacts/ffmpeg-source-46d899d7a0.tar.gz             https://github.com/FFmpeg/FFmpeg/archive/46d899d7a0.tar.gz
+          curl -fL --retry 3 -o artifacts/FFmpeg-LGPLv3.txt             https://raw.githubusercontent.com/FFmpeg/FFmpeg/46d899d7a0/COPYING.LGPLv3
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -283,4 +288,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "UvNVR ${GITHUB_REF_NAME}" \
             --generate-notes \
-            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) -print)
+            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name 'FFmpeg-LGPLv3.txt' \) -print)

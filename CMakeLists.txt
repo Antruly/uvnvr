@@ -85,6 +85,7 @@ add_executable(uvnvr
   src/recording.cpp
   src/playback.cpp
   src/rtsp.cpp
+  src/ntp.cpp
 )
 
 target_include_directories(uvnvr PRIVATE

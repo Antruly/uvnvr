@@ -658,6 +658,10 @@ bool App::Migrate(std::string* error) {
       {"system.timezone", "UTC"},
       {"system.language", "auto"},
       {"system.gpu_enabled", "1"},
+      {"system.ntp_enabled", "0"},
+      {"system.ntp_server", "pool.ntp.org"},
+      {"system.ntp_last_offset_ms", "0"},
+      {"system.ntp_last_sync", "0"},
       {"smtp.enabled", "0"},
       {"smtp.host", "smtp.qq.com"},
       {"smtp.port", "465"},
@@ -1996,6 +2000,27 @@ void App::RegisterCoreRoutes() {
                              return;
                            }
                          }
+                         if (system.contains("ntpEnabled")) {
+                           const bool enabled = JsonBool(system, "ntpEnabled", false);
+                           std::string db_error;
+                           if (!SetSetting("system.ntp_enabled", enabled ? "1" : "0", &db_error)) {
+                             *error = db_error;
+                             return;
+                           }
+                         }
+                         if (system.contains("ntpServer")) {
+                           const std::string server =
+                               JsonString(system, "ntpServer", "pool.ntp.org");
+                           if (server.empty() || server.size() > 255) {
+                             *error = "NTP server is invalid";
+                             return;
+                           }
+                           std::string db_error;
+                           if (!SetSetting("system.ntp_server", server, &db_error)) {
+                             *error = db_error;
+                             return;
+                           }
+                         }
                          if (system.contains("gpuEnabled")) {
                            const bool enabled = JsonBool(system, "gpuEnabled", true);
                            std::string db_error;
@@ -2095,7 +2120,10 @@ json App::SettingsJson() {
       {"audit", json{{"retentionDays", GetSettingInt("audit.retention_days", 180)}}},
       {"system", json{{"timezone", GetSetting("system.timezone", "UTC")},
                       {"language", GetSetting("system.language", "auto")},
-                      {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0}}},
+                      {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0},
+                      {"ntpEnabled", GetSettingInt("system.ntp_enabled", 0) != 0},
+                      {"ntpServer", GetSetting("system.ntp_server", "pool.ntp.org")},
+                      {"ntpOffsetMs", GetSettingInt("system.ntp_last_offset_ms", 0)}}},
       {"smtp", json{{"enabled", GetSettingInt("smtp.enabled", 0) != 0},
                     {"host", GetSetting("smtp.host", "smtp.qq.com")},
                     {"port", GetSettingInt("smtp.port", 465)},
@@ -4808,6 +4836,7 @@ void App::MonitorRun() {
   const std::filesystem::path alert_dir = std::filesystem::path(config_.data_dir) / "alerts";
   std::error_code ec;
   std::filesystem::create_directories(alert_dir, ec);
+  int64_t last_ntp_sync = 0;
   while (!monitor_stop_.load()) {
     int motion_channels = 0;
     std::string error;
@@ -4910,6 +4939,22 @@ void App::MonitorRun() {
         }
       }
       last_storage_alert_ms_ = now;
+    }
+
+    if (GetSettingInt("system.ntp_enabled", 0) != 0 &&
+        NowSeconds() - last_ntp_sync > 6 * 3600) {
+      const std::string server = GetSetting("system.ntp_server", "pool.ntp.org");
+      int64_t offset = 0;
+      std::string ntp_error;
+      if (QueryNtpOffset(server, &offset, &ntp_error)) {
+        std::string db_error;
+        SetSetting("system.ntp_last_offset_ms", std::to_string(offset), &db_error);
+        SetSetting("system.ntp_last_sync", std::to_string(NowSeconds()), &db_error);
+        if (std::llabs(offset) >= 500) ApplyTimeOffset(offset, &ntp_error);
+      } else {
+        std::fprintf(stderr, "NTP sync failed: %s\n", ntp_error.c_str());
+      }
+      last_ntp_sync = NowSeconds();
     }
 
     for (int i = 0; i < 30 && !monitor_stop_.load(); ++i) {

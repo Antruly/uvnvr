@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media.h"
+#include "ntp.h"
 #include "playback.h"
 #include "recording.h"
 #include "rtsp.h"

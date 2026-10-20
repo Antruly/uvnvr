@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-M1%20foundation-38bdf8)](#状态)
+[![Status](https://img.shields.io/badge/status-0.1.0--rc-fbbf24)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,25 +22,29 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**M1 — 鉴权、角色、审计与持久化。** 录像机现已具备首次初始化、会话鉴权、CSRF 防护、
-用户/角色/权限、API Token、审计日志、SQLite 迁移与实时仪表盘。摄像头、录像与回放功能
-将在 M2/M3 接入。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
+**0.1.0 候选版本 — 核心 NVR 闭环已实现。** 目前支持 ONVIF 发现/探测、通道管理、RTSP
+接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
+输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。WebRTC、云平台与高级
+分析不在 0.1.0 范围内。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
 UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 ONVIF 发现、RTSP 拉流、一路摄像头
 向多客户端分发、关键帧对齐的 MPEG-TS 切片录像、SQLite 索引、无缝回放以及 RTSP 对外输出。
 
-### M1 已实现
+### 当前已实现
 
-- 首次初始化与默认 `admin` 账户；scrypt 密码哈希。
-- 会话 Cookie（HttpOnly/SameSite）、CSRF 防护与 API Bearer Token。
-- 用户、角色与细粒度 Web/API 权限；内置 admin/operator/viewer 角色。
-- Web 与 API 失败锁定，阈值可配置。
-- 审计日志分类、筛选、分页与 180 天保留清理。
-- SQLite 迁移、系统元数据、序列号与系统指标。
-- 仪表盘展示 CPU、内存、磁盘、用户、会话与审计计数。
-- 中英文界面、多标签缓存工作区与响应式管理端。
+- 首次初始化、scrypt 密码、会话、CSRF、用户/角色与 API Token。
+- ONVIF WS-Discovery/探测与手动 RTSP；海康/大华路径模板。
+- 通道树、主/子码流、AES-256-GCM 摄像头凭据加密。
+- 1/4/8/16/32 与自定义预览网格、布局保存、水印、离线覆盖。
+- 每通道每码流一个 FFmpeg 拉流进程；TS 共享分发给 WebSocket 客户端。
+- 计划录像、关键帧对齐切片、按时间/大小切片、循环/预警存储卷。
+- 回放时间轴、跨切片 WebSocket 播放、预读与切片下载。
+- RTSP 输出（`/live/{channel}/{main|sub}`，RTP/MP2T，TCP/UDP）与 Basic 鉴权。
+- 抓拍、移动/离线/存储预警、SMTP 邮件（QQ 预设）、审计日志。
+- 性能档位、GPU 探测与开关、系统时间 API。
+- 中英文界面、多标签缓存、仪表盘、帮助手册与 API Token。
 
 ### 0.1.0 规划范围
 
@@ -90,7 +94,8 @@ SQLite（WAL）
   归档已自带大部分依赖；UvNVR 自身调用 OpenSSL/libuv 时需要这些开发包，从源码构建
   libuvcpp 时也需要）
 
-M1 暂不需要 FFmpeg 开发库，M2 接入媒体核心时再加入。
+UvNVR **不链接** FFmpeg 开发库，而是把 FFmpeg 可执行文件作为隔离子进程运行。通过
+`UVNVR_FFMPEG` 指定二进制，或把 `ffmpeg` 放在可执行文件旁边。发布包内置 LGPL 静态 FFmpeg。
 
 ### Linux x64 快速开始
 
@@ -115,7 +120,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DUVNVR_LIBUVCPP_ROOT="$HOME/.local/uvcpp-1.8.1/libuvcpp-1.8.1-linux-x64"
 cmake --build build -j
 
-./build/uvnvr --port 8080
+UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 ```
 
 浏览器打开 <http://127.0.0.1:8080>。首次启动会跳转到 `/setup` 创建管理员账户。
@@ -135,11 +140,20 @@ cmake --build build -j
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
+## 0.1.0 已知限制
+
+- ONVIF 探测目前只支持 `http://` 设备服务。
+- 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
+- 浏览器回放使用 MSE；H.265 依赖浏览器/硬件，建议使用 H.264 子码流。
+- RTSP 输出使用 RTP/MP2T（payload type 33），部分客户端可能只接受 H.264 RTP；VLC/ffplay 可用。
+- Windows ARM64、macOS 签名/公证与部分安装包细节仍在发布矩阵中完善。
+- 审计日志与录像共用数据盘；独立审计路径为后续增强。
+
 ## 许可证
 
 UvNVR 源代码使用 [MIT License](LICENSE)。
 
-官方构建动态加载 **LGPL-2.1-or-later 的 FFmpeg 共享库**。FFmpeg 不得使用
+官方构建内置 **LGPL FFmpeg 命令行程序**，以独立进程调用，不把 FFmpeg 代码链接进 UvNVR 二进制。FFmpeg 不得使用
 `--enable-gpl` 或 `--enable-nonfree` 构建。所有随包分发 FFmpeg 的版本都会附带对应源码、
 configure 参数与许可证声明，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 在满足 LGPL 条件的前提下，你的应用代码可以继续保持 MIT，分发包中同时包含 LGPL 的 FFmpeg。
@@ -173,9 +187,9 @@ tests/             单元/集成/E2E 测试
 |---|---|
 | M0 | 仓库与规则、服务脚手架、前端壳层、图标、CI 冒烟测试 |
 | M1 | ✅ 配置、SQLite、首次安装、鉴权/RBAC、锁定、审计、仪表盘 |
-| M2 | 通道、ONVIF 发现、RTSP 拉流、实时预览、抓拍 |
-| M3 | 录像、切片、索引、存储策略、回放、预读 |
-| M4 | RTSP Server、API、预警、GPU/性能、系统设置 |
+| M2 | ✅ 通道、ONVIF 发现、RTSP 拉流、实时预览、抓拍 |
+| M3 | ✅ 录像、切片、索引、存储策略、回放、预读 |
+| M4 | ✅ RTSP Server、API、预警、GPU/性能、系统设置 |
 | M5 | 六平台安装包与 CI 矩阵 |
 | M6 | 稳定性/安全加固、文档、发布 `v0.1.0` |
 
@@ -190,7 +204,7 @@ tests/             单元/集成/E2E 测试
 
 - [libuvcpp](https://github.com/Antruly/libuvcpp) — MIT，事件驱动 C++ Web 框架。
 - [uvp](https://github.com/Antruly/uvp) — MIT，libuvcpp 服务脚手架与验证工具。
-- [FFmpeg](https://ffmpeg.org/) — LGPL-2.1-or-later，媒体工具链。
+- [FFmpeg](https://ffmpeg.org/) — LGPL 媒体工具链，以独立进程调用。
 - [Vue 3](https://vuejs.org/)、[Vite](https://vite.dev/)、[Naive UI](https://www.naiveui.com/)、
   [ECharts](https://echarts.apache.org/) — 前端技术栈。
 - [Desk2ONVIF](https://github.com/Antruly/Desk2ONVIF) — ONVIF Profile S 行为与虚拟摄像头测试的

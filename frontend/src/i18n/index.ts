@@ -403,6 +403,11 @@ const messages = {
       gpuEnabled: 'Enable GPU acceleration when available',
       performance: 'Performance tier',
       gpu: 'GPU',
+      ntpEnabled: 'Sync the clock with NTP',
+      ntpServer: 'NTP server',
+      ntpOffset: 'NTP offset',
+      ntpSync: 'Sync now',
+      ntpSynced: 'NTP offset applied.',
     },
     help: {
       title: 'Help',
@@ -419,10 +424,10 @@ const messages = {
       source: 'Open-source repository',
       licenseTitle: 'License',
       licenseBody:
-        'UvNVR source code is released under the MIT License. Official builds use FFmpeg shared libraries under LGPL-2.1-or-later, loaded dynamically.',
+        'UvNVR source code is released under the MIT License. Official builds bundle an LGPL FFmpeg CLI and run it as a separate process; no FFmpeg code is linked into UvNVR.',
       ffmpegTitle: 'FFmpeg and codec components',
       ffmpegBody:
-        'Official release builds must use an LGPL FFmpeg build configured without --enable-gpl and without --enable-nonfree. FFmpeg source, build configuration and license notices are distributed with every release. Do not ship a GPL FFmpeg build as part of an MIT-labeled binary package.',
+        'Official release builds use an LGPL FFmpeg CLI configured without --enable-gpl and without --enable-nonfree. UvNVR invokes it as a separate process; FFmpeg source, build configuration and license notices are distributed with every release. Do not ship a GPL FFmpeg build as part of an MIT-labeled binary package.',
       patentTitle: 'Patent notice',
       patentBody:
         'This project grants no patent license for H.264, H.265/HEVC, AAC or any other codec. If you build or bundle x264, x265 or another GPL/patent-bearing component, you are responsible for the resulting GPL obligations and for any patent licensing. The MIT license covers copyright only and does not grant patent rights.',
@@ -824,6 +829,11 @@ const messages = {
       gpuEnabled: '可用时启用 GPU 加速',
       performance: '性能档位',
       gpu: 'GPU',
+      ntpEnabled: '使用 NTP 自动同步时间',
+      ntpServer: 'NTP 服务器',
+      ntpOffset: 'NTP 偏差',
+      ntpSync: '立即同步',
+      ntpSynced: 'NTP 偏差已应用。',
     },
     help: {
       title: '帮助手册',
@@ -840,10 +850,10 @@ const messages = {
       source: '开源仓库',
       licenseTitle: '许可证',
       licenseBody:
-        'UvNVR 源代码采用 MIT 许可证。官方构建动态加载 LGPL-2.1-or-later 的 FFmpeg 共享库。',
+        'UvNVR 源代码采用 MIT 许可证。官方构建内置 LGPL FFmpeg 命令行程序，并以独立进程调用；UvNVR 不链接 FFmpeg 代码。',
       ffmpegTitle: 'FFmpeg 与编解码组件',
       ffmpegBody:
-        '官方发布包必须使用 LGPL FFmpeg（不带 --enable-gpl、不带 --enable-nonfree）。每次发布都会附带 FFmpeg 对应源码、编译参数与许可证声明。不要把 GPL 构建的 FFmpeg 作为 MIT 二进制包的一部分分发。',
+        '官方发布包使用 LGPL FFmpeg 命令行程序（不带 --enable-gpl、不带 --enable-nonfree），并以独立进程调用。每次发布都会附带 FFmpeg 对应源码、编译参数与许可证声明。不要把 GPL 构建的 FFmpeg 作为 MIT 二进制包的一部分分发。',
       patentTitle: '专利声明',
       patentBody:
         '本项目不授予 H.264、H.265/HEVC、AAC 或其他编解码格式的任何专利许可。如果你自行构建或打包 x264、x265 或其他 GPL/涉及专利的组件，由此产生的 GPL 义务与专利许可责任由你自行承担。MIT 许可证仅覆盖版权，不授予专利权。',

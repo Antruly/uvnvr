@@ -22,10 +22,19 @@ All notable changes to UvNVR are documented here. The format follows
 - Unified brand icon for web, Windows and macOS packaging.
 - Linux x64 CI build, HTTP smoke test and M1 integration test.
 
+- ONVIF discovery/probe, RTSP ingest, channel tree and encrypted credentials.
+- Live preview grid with saved layouts, main/sub streams and watermark overlays.
+- Keyframe-aligned MPEG-TS recording, plan scheduling, SQLite index and loop cleanup.
+- Playback over WebSocket across segments with read-ahead and downloads.
+- RTSP output with RTP/MP2T (TCP/UDP) and Basic authentication.
+- Snapshots, motion/offline/storage alerts, SMTP email and alert UI.
+- Performance tier, GPU detection/toggle, time API and help manual.
+- Linux deb/tar.gz packaging and Windows portable/NSIS packaging workflow.
+
 ### Notes
 
-- Camera, recording, playback and RTSP output are not implemented yet. See
-  `docs/development-plan.md` for the milestone plan.
+- 0.1.0 is a release candidate. WebRTC, cloud access, face/plate recognition and advanced
+  analytics are outside this release. See `docs/development-plan.md` for details.
 
 ## [0.1.0] - Not released
 
