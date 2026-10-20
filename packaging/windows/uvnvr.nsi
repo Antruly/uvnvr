@@ -61,8 +61,13 @@ Var RtspPort
 Var HttpPortEdit
 Var RtspPortEdit
 Var PortsExisting
+Var ProgramDataDir
 
 Function .onInit
+  ReadEnvStr $ProgramDataDir "PROGRAMDATA"
+  ${If} $ProgramDataDir == ""
+    StrCpy $ProgramDataDir "C:\ProgramData"
+  ${EndIf}
   StrCpy $HttpPort "8080"
   StrCpy $RtspPort "554"
   ReadRegStr $0 HKLM "Software\UvNVR" "HttpPort"
@@ -74,7 +79,7 @@ Function .onInit
     StrCpy $RtspPort $0
   ${EndIf}
   StrCpy $PortsExisting "0"
-  ${If} ${FileExists} "$PROGRAMDATA\UvNVR\uvnvr.json"
+  ${If} ${FileExists} "$ProgramDataDir\UvNVR\uvnvr.json"
     StrCpy $PortsExisting "1"
   ${EndIf}
 FunctionEnd
@@ -132,10 +137,10 @@ Section "UvNVR" SecMain
   ; %ProgramData%\UvNVR\uvnvr.json so upgrades cannot shadow it.
   File /r /x uvnvr.json "${SOURCE}\*.*"
 
-  CreateDirectory "$PROGRAMDATA\UvNVR"
-  ${IfNot} ${FileExists} "$PROGRAMDATA\UvNVR\uvnvr.json"
-    ${StrRep} $0 "$PROGRAMDATA" "\" "/"
-    FileOpen $1 "$PROGRAMDATA\UvNVR\uvnvr.json" w
+  CreateDirectory "$ProgramDataDir\UvNVR"
+  ${IfNot} ${FileExists} "$ProgramDataDir\UvNVR\uvnvr.json"
+    ${StrRep} $0 "$ProgramDataDir" "\" "/"
+    FileOpen $1 "$ProgramDataDir\UvNVR\uvnvr.json" w
     FileWrite $1 "{$\r$\n"
     FileWrite $1 '  "http": { "port": $HttpPort, "host": "0.0.0.0" },$\r$\n'
     FileWrite $1 '  "rtsp": { "port": $RtspPort },$\r$\n'
@@ -146,7 +151,7 @@ Section "UvNVR" SecMain
 
   CreateDirectory "$SMPROGRAMS\UvNVR"
   CreateShortCut "$SMPROGRAMS\UvNVR\UvNVR Web UI.lnk" "http://127.0.0.1:$HttpPort/"
-  CreateShortCut "$SMPROGRAMS\UvNVR\UvNVR Configuration.lnk" "$WINDIR\notepad.exe" '"$PROGRAMDATA\UvNVR\uvnvr.json"'
+  CreateShortCut "$SMPROGRAMS\UvNVR\UvNVR Configuration.lnk" "$WINDIR\notepad.exe" '"$ProgramDataDir\UvNVR\uvnvr.json"'
   CreateShortCut "$SMPROGRAMS\UvNVR\Uninstall.lnk" "$INSTDIR\uninstall.exe"
 
   WriteRegStr HKLM "Software\UvNVR" "InstallDir" "$INSTDIR"
@@ -163,7 +168,7 @@ Section "UvNVR" SecMain
 
   ; Run the recorder at boot. The JSON file carries the selected ports; editing
   ; it later applies on the next service start.
-  nsExec::ExecToLog 'schtasks /Create /TN UvNVR /TR "\"$INSTDIR\bin\uvnvr.exe\" --config \"$PROGRAMDATA\UvNVR\uvnvr.json\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F'
+  nsExec::ExecToLog 'schtasks /Create /TN UvNVR /TR "\"$INSTDIR\bin\uvnvr.exe\" --config \"$ProgramDataDir\UvNVR\uvnvr.json\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UvNVR"'
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UvNVR" dir=in action=allow program="$INSTDIR\bin\uvnvr.exe" enable=yes'
 SectionEnd
@@ -178,5 +183,5 @@ Section "Uninstall"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\UvNVR"
   DeleteRegKey HKLM "Software\UvNVR"
-  ; $PROGRAMDATA\UvNVR is intentionally preserved, including uvnvr.json.
+  ; $ProgramDataDir\UvNVR is intentionally preserved, including uvnvr.json.
 SectionEnd

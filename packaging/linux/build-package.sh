@@ -137,7 +137,13 @@ getent passwd uvnvr >/dev/null || useradd -r -g uvnvr -d /var/lib/uvnvr -s /sbin
 mkdir -p /var/lib/uvnvr /etc/uvnvr
 chown -R uvnvr:uvnvr /var/lib/uvnvr
 if [ ! -f /etc/uvnvr/uvnvr.json ]; then
-  printf '%s\n' '{' '  "http": { "port": 8080, "host": "0.0.0.0" },' '  "rtsp": { "port": 554 },' '  "dataDir": "/var/lib/uvnvr"' '}' > /etc/uvnvr/uvnvr.json
+  cat > /etc/uvnvr/uvnvr.json <<'JSON'
+{
+  "http": { "port": 8080, "host": "0.0.0.0" },
+  "rtsp": { "port": 554 },
+  "dataDir": "/var/lib/uvnvr"
+}
+JSON
 fi
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable uvnvr >/dev/null 2>&1 || true
