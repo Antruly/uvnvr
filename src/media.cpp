@@ -16,7 +16,6 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <uv.h>
 #include <vector>
 
 #ifdef _WIN32
