@@ -327,22 +327,35 @@ jobs:
 
   release:
     name: GitHub release
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    # Publish only when every platform job produced its artifacts; a failed
+    # matrix must not leave a release with a partial asset set.
+    if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
     needs: [linux, windows-x64, windows-arm64, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' \
+               -o -name '*.exe' -o -name '*.pkg' -o -name '*.dmg' -o -name '*.tar.xz' \) \
+            -exec cp -v {} release-assets/ \;
+
       - name: Attach FFmpeg source offer
         run: |
-          curl -fL --retry 3 -o artifacts/ffmpeg-source-46d899d7a0.tar.gz             https://github.com/FFmpeg/FFmpeg/archive/46d899d7a0.tar.gz
-          curl -fL --retry 3 -o artifacts/FFmpeg-LGPLv3.txt             https://raw.githubusercontent.com/FFmpeg/FFmpeg/46d899d7a0/COPYING.LGPLv3
+          curl -fL --retry 3 -o release-assets/ffmpeg-source-46d899d7a0.tar.gz \
+            https://github.com/FFmpeg/FFmpeg/archive/46d899d7a0.tar.gz
+          curl -fL --retry 3 -o release-assets/FFmpeg-LGPLv3.txt \
+            https://raw.githubusercontent.com/FFmpeg/FFmpeg/46d899d7a0/COPYING.LGPLv3
 
       - name: Generate SBOM
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          cat > "artifacts/uvnvr-${VERSION}-sbom.spdx.json" <<EOF
+          cat > "release-assets/uvnvr-${VERSION}-sbom.spdx.json" <<EOF
           {
             "spdxVersion": "SPDX-2.3",
             "dataLicense": "CC0-1.0",
@@ -358,13 +371,24 @@ jobs:
           }
           EOF
 
-      - name: Create release
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          find artifacts -type f -maxdepth 3 -print
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "UvNVR ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            $(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' -o -name '*.dmg' -o -name '*.tar.xz' -o -name 'FFmpeg-LGPLv3.txt' -o -name '*sbom*' \) -print)
+          ls -lh release-assets
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --clobber release-assets/*
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "UvNVR ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              release-assets/*
+          fi
