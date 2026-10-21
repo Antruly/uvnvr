@@ -4,6 +4,30 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-21
+
+### Added
+
+- HTTP Range support for recording downloads (`206`, `Content-Range`,
+  suffix/open ranges, `416` for unsatisfiable ranges) with streaming file
+  delivery instead of buffering the whole segment in memory.
+- `POST /api/v1/playback/export`: remuxes a channel/time range to a fast-start
+  MP4 with the bundled FFmpeg, limited to six hours / 4 GiB, with temporary
+  files cleaned up after the response. The Playback page has an **Export MP4**
+  button.
+- Shared 64 KiB-block LRU cache for playback with next-segment read-ahead
+  (`storage.cacheMb`, `storage.readaheadMb`, `UVNVR_CACHE_MB`,
+  `UVNVR_READAHEAD_MB`), plus cache hit/miss/usage statistics in the System page.
+- Portable Windows packages keep the default `uvnvr.json`; `0.3.0` version
+  metadata across packages and the UI.
+
+### Fixed
+
+- Recording downloads no longer fail with `413` above 512 MiB and no longer
+  allocate the entire file in memory.
+- Playback reads through the shared cache and preloads the next segment instead
+  of issuing one open/read per chunk against the recording file.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added

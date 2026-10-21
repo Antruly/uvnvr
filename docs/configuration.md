@@ -61,6 +61,10 @@ All keys are optional.
   },
   "logging": {
     "level": "info"
+  },
+  "storage": {
+    "cacheMb": 128,
+    "readaheadMb": 4
   }
 }
 ```
@@ -76,6 +80,8 @@ All keys are optional.
 | `maintenance` | `false` | Enables destructive operations. Prefer `--maintenance`. |
 | `ffmpeg.path` | auto-detected | FFmpeg executable; `UVNVR_FFMPEG` overrides it. |
 | `logging.level` | `info` | `trace`, `debug`, `info`, `warn` or `error`. |
+| `storage.cacheMb` | `128` | LRU playback cache in MiB; `0` disables caching. |
+| `storage.readaheadMb` | `4` | Bytes of the next segment preloaded while the current one plays; `0` disables read-ahead. |
 
 Flat aliases are accepted for hand-written files: `port`, `rtspPort`,
 `dataDir`, `host`, `ffmpegPath`, `logLevel`, `maintenance`, `tlsCert`,
@@ -93,6 +99,8 @@ Unknown keys are ignored.
 | `UVNVR_DATA_DIR` | `dataDir` |
 | `UVNVR_FFMPEG` | `ffmpeg.path` |
 | `UVNVR_LOG_LEVEL` | `logging.level` |
+| `UVNVR_CACHE_MB` | `storage.cacheMb` |
+| `UVNVR_READAHEAD_MB` | `storage.readaheadMb` |
 | `UVNVR_TLS_CERT` / `UVNVR_TLS_KEY` | TLS certificate and key |
 
 ## Applying changes

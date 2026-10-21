@@ -11,7 +11,7 @@ BUILD_DIR="build"
 LIBUVCPP_ROOT=""
 FFMPEG_BIN=""
 ARCH="x64"
-VERSION="0.2.0"
+VERSION="0.3.0"
 OUT="dist-packages"
 STAGE=""
 

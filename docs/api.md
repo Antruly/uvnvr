@@ -44,6 +44,7 @@ All endpoints are under `/api/v1` unless noted.
 | POST/PUT/DELETE | `/api/v1/storage/volumes[/{id}]` | storage.manage |
 | GET | `/api/v1/recordings` | playback.view |
 | GET | `/api/v1/recordings/{id}/download` | playback.download |
+| POST | `/api/v1/playback/export` | playback.download |
 | POST | `/api/v1/playback/ticket` | playback.view |
 | WS | `/ws/playback?ticket=...` | playback.view |
 | GET | `/api/v1/alerts` | alert.view |
@@ -77,6 +78,28 @@ paces the MPEG-TS stream by the segment bitrate, and the web player additionally
 sets the media element's playback rate. Seeking (fast-forward/rewind buttons,
 timeline clicks) requests a new ticket starting at the target time; the server
 starts at the nearest keyframe.
+
+## Downloads and export
+
+`GET /api/v1/recordings/{id}/download` streams the segment without buffering
+the whole file in memory and supports HTTP Range:
+
+```
+Range: bytes=0-1048575
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 0-1048575/52428800
+Accept-Ranges: bytes
+```
+
+A suffix range (`bytes=-65536`) and an open range (`bytes=1048576-`) are
+accepted. Unsatisfiable ranges return 416 with `Content-Range: bytes */<size>`.
+
+`POST /api/v1/playback/export` with
+`{ "channelId": 1, "stream": "main", "startMs": 0, "endMs": 0 }` concatenates
+the segments in the range and remuxes them to a fast-start MP4 with the bundled
+FFmpeg. It returns `video/mp4` as an attachment. The range is limited to six
+hours and 4 GiB of input, and temporary files are removed after the response.
+`503 ffmpeg_unavailable` is returned when no FFmpeg executable is configured.
 
 ## Startup configuration
 

@@ -186,11 +186,13 @@ Open **Playback**.
    **0.5×–8×** speed control. The server paces the stream to the selected rate;
    fast-forward is forward playback at a higher rate, and rewind is repeated
    backward seeks (browsers cannot decode a reversed GOP).
-6. **Download** fetches a single MPEG-TS segment. Open it with VLC or remux it to
-   MP4 with FFmpeg. Downloads support HTTP Range for resumable transfers.
-
-Playback and downloads share an LRU block cache and a read-ahead layer inside the
-storage module; the application only asks for an index and a byte offset.
+6. **Download** fetches a single MPEG-TS segment with HTTP Range support, so
+   interrupted transfers can resume. **Export MP4** remuxes the selected segment
+   to a fast-start MP4 with the bundled FFmpeg; no transcoding is performed.
+7. Playback and downloads share a 64 KiB-block LRU cache (128 MB by default) and
+   preload the next segment while the current one plays. Cache hits, misses and
+   memory use are shown in **System settings**; tune them with
+   `storage.cacheMb` and `storage.readaheadMb`.
 
 ## 8. Snapshots, API and RTSP output
 
