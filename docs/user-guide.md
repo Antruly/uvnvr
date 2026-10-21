@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.13.0)
+# UvNVR User Guide (0.14.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -107,6 +107,11 @@ network, add the channel manually with the protocol **ONVIF** and the device hos
    camera's PullPoint service and turns motion, person, tamper and line-crossing
    notifications into alerts.
 6. Save. The channel begins connecting immediately.
+
+For ONVIF channels, the edit dialog's **Camera encoder** section reads and
+applies the main-stream encoding (H.264/H.265), resolution, frame rate, bitrate
+and quality. Zero values keep the camera's current setting. The camera's ONVIF
+account must be allowed to change encoder configuration.
 
 Use **Auto detect** in the channel form to probe the entered host. It tries
 ONVIF first, then Hikvision ISAPI or Dahua CGI over HTTP Digest; choose the brand

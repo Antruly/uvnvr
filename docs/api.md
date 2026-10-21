@@ -52,6 +52,7 @@ header for cookie-authenticated mutating requests.
 | PUT/DELETE | `/api/v1/layouts/{id}` | preview.view |
 | POST | `/api/v1/channels/discover` | channel.manage |
 | POST | `/api/v1/channels/onvif/probe` | channel.manage |
+| GET/PUT | `/api/v1/channels/{id}/encoder` | channel.manage |
 | POST | `/api/v1/channels/{id}/reconnect` | channel.manage |
 | POST | `/api/v1/channels/sync` | channel.manage |
 | GET | `/api/v1/channels/{id}/snapshot` | api.snapshot |
@@ -295,6 +296,34 @@ offset and performs the same camera synchronization; it returns `offsetMs`,
 `applied`, `applyError` and `cameras`. Pure RTSP cameras have no control channel
 and are reported as skipped. For Hikvision/Dahua channels (or ONVIF channels whose
 manufacturer is Hikvision/Dahua) the vendor ISAPI/CGI API is used as a fallback.
+
+## Camera encoder
+
+`GET /api/v1/channels/{id}/encoder` reads the first video encoder configuration
+from an ONVIF camera's media service:
+
+```json
+{
+  "token": "v1",
+  "encoding": "H264",
+  "width": 1920,
+  "height": 1080,
+  "fps": 25,
+  "bitrateKbps": 4096,
+  "quality": 5
+}
+```
+
+`PUT` with any subset of `token`, `encoding` (`h264`/`h265`), `width`
+(160–8192), `height` (120–8192), `fps` (1–120), `bitrateKbps` (16–102400) and
+`quality` (1–100) fetches the current configuration, replaces the requested
+fields and sends `SetVideoEncoderConfiguration` with `ForcePersistence=true`.
+Zero or omitted values keep the camera setting. Applied values are stored in the
+channel's `media.encoder`.
+
+Only ONVIF channels are supported; other protocols return `400
+unsupported_protocol`. The camera's own ONVIF user must be allowed to change the
+encoder configuration.
 
 ## Brand detection
 

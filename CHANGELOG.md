@@ -4,6 +4,25 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-10-22
+
+### Added
+
+- **Per-channel camera encoder configuration.** ONVIF channels expose
+  `GET/PUT /api/v1/channels/{id}/encoder`, backed by
+  `GetVideoEncoderConfigurations` and `SetVideoEncoderConfiguration` on the
+  camera's media service. Encoding (H.264/H.265), width, height, frame rate,
+  bitrate (kbps) and quality can be read from and applied to the main stream.
+- The channel edit dialog has a **Camera encoder** section with **Read from
+  camera** and **Apply to camera** actions. Applied values are stored in the
+  channel's `media.encoder` and returned by the channel API.
+
+### Notes
+
+- Encoder control is available for ONVIF channels; Hikvision ISAPI and Dahua CGI
+  encoder setters are not implemented yet. Zero values keep the camera's current
+  setting for that field.
+
 ## [0.13.0] - 2026-10-22
 
 ### Added
