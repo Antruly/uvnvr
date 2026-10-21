@@ -15,6 +15,12 @@ interface Settings {
     apiLockMinutes: number
   }
   audit: { retentionDays: number }
+  event: {
+    enabled: boolean
+    preSeconds: number
+    postSeconds: number
+    maxSeconds: number
+  }
   system: {
     timezone: string
     language: string
@@ -100,6 +106,12 @@ const settings = reactive<Settings>({
     apiLockMinutes: 10,
   },
   audit: { retentionDays: 180 },
+  event: {
+    enabled: true,
+    preSeconds: 10,
+    postSeconds: 30,
+    maxSeconds: 300,
+  },
   system: {
     timezone: 'UTC',
     language: 'auto',
@@ -158,6 +170,7 @@ async function load() {
     ])
     Object.assign(settings.security, settingsResponse.security)
     Object.assign(settings.audit, settingsResponse.audit)
+    Object.assign(settings.event, settingsResponse.event)
     Object.assign(settings.system, settingsResponse.system)
     Object.assign(settings.smtp, settingsResponse.smtp)
     summary.value = summaryResponse
@@ -180,6 +193,12 @@ async function save() {
       body: JSON.stringify({
         security: settings.security,
         audit: settings.audit,
+        event: {
+          enabled: settings.event.enabled,
+          preSeconds: Number(settings.event.preSeconds),
+          postSeconds: Number(settings.event.postSeconds),
+          maxSeconds: Number(settings.event.maxSeconds),
+        },
         system: settings.system,
         smtp: {
           enabled: settings.smtp.enabled,
@@ -194,6 +213,7 @@ async function save() {
     })
     Object.assign(settings.security, updated.security)
     Object.assign(settings.audit, updated.audit)
+    Object.assign(settings.event, updated.event)
     Object.assign(settings.system, updated.system)
     Object.assign(settings.smtp, updated.smtp)
     smtpPassword.value = ''
@@ -441,6 +461,56 @@ onMounted(load)
           <button class="button primary" type="submit" :disabled="saving || !canManage()">
             <AppIcon name="save" :size="16" />
             {{ saving ? t('common.loading') : t('system.save') }}
+          </button>
+        </div>
+      </form>
+
+      <form class="panel settings-card" @submit.prevent="save">
+        <div class="section-title">
+          <AppIcon name="playback" :size="20" />
+          <h3>{{ t('system.eventRecording') }}</h3>
+        </div>
+        <label class="check-row">
+          <input v-model="settings.event.enabled" type="checkbox" />
+          <span>{{ t('system.eventEnabled') }}</span>
+        </label>
+        <div class="form-grid">
+          <label class="field">
+            <span>{{ t('system.eventPre') }}</span>
+            <input
+              v-model.number="settings.event.preSeconds"
+              class="input"
+              type="number"
+              min="0"
+              max="60"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.eventPost') }}</span>
+            <input
+              v-model.number="settings.event.postSeconds"
+              class="input"
+              type="number"
+              min="1"
+              max="3600"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.eventMax') }}</span>
+            <input
+              v-model.number="settings.event.maxSeconds"
+              class="input"
+              type="number"
+              min="1"
+              max="3600"
+            />
+          </label>
+        </div>
+        <p class="small-note">{{ t('system.eventHint') }}</p>
+        <div class="modal-actions">
+          <button class="button primary" type="submit" :disabled="saving || !canManage()">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.save') }}
           </button>
         </div>
       </form>

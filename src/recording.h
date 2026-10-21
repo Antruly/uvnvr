@@ -21,6 +21,10 @@ public:
   void Stop();
   void OnTs(int64_t channel_id, const std::string& stream, const uint8_t* data, size_t len);
 
+  // Starts or extends an event clip for every stream the channel's active
+  // event plan covers. Called for motion/person/tamper/intrusion alerts.
+  void OnEvent(int64_t channel_id);
+
   // Active recorder/segment snapshots for the system UI.
   std::string StatusJson();
 

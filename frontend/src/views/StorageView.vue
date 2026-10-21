@@ -24,6 +24,7 @@ interface Volume {
 interface ActiveRecording {
   channelId: number
   stream: string
+  recordType: string
   active: boolean
   path: string
   bytes: number
@@ -66,6 +67,10 @@ function formatBytes(value: number) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)))
   return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
+
+function typeLabel(type: string) {
+  return type === 'event' ? t('storage.recordTypeEvent') : t('storage.recordTypeTimed')
 }
 
 function formatTime(ms: number) {
@@ -259,6 +264,7 @@ onBeforeUnmount(() => {
         <tr>
           <th>{{ t('playback.channel') }}</th>
           <th>{{ t('playback.stream') }}</th>
+          <th>{{ t('storage.type') }}</th>
           <th>{{ t('storage.state') }}</th>
           <th>{{ t('storage.currentFile') }}</th>
           <th>{{ t('playback.size') }}</th>
@@ -266,9 +272,13 @@ onBeforeUnmount(() => {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="item in recordingStatus?.recordings ?? []" :key="`${item.channelId}:${item.stream}`">
+        <tr
+          v-for="item in recordingStatus?.recordings ?? []"
+          :key="`${item.channelId}:${item.stream}:${item.recordType}`"
+        >
           <td>#{{ item.channelId }}</td>
           <td>{{ item.stream }}</td>
+          <td>{{ typeLabel(item.recordType) }}</td>
           <td>
             <span class="status-pill" :class="item.active ? 'ok' : 'muted'">
               {{ item.active ? t('storage.recordingNow') : t('storage.recordingIdle') }}
@@ -279,7 +289,7 @@ onBeforeUnmount(() => {
           <td>{{ formatTime(item.startMs) }}</td>
         </tr>
         <tr v-if="!recordingStatus?.recordings?.length">
-          <td colspan="6" class="empty-cell">{{ t('storage.noActiveRecordings') }}</td>
+          <td colspan="7" class="empty-cell">{{ t('storage.noActiveRecordings') }}</td>
         </tr>
       </tbody>
     </table>

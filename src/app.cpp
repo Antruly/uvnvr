@@ -919,6 +919,10 @@ bool App::Migrate(std::string* error) {
       {"recording.segment_size_mb", "256"},
       {"recording.segment_mode", "time"},
       {"recording.retention_days", "30"},
+      {"event.enabled", "1"},
+      {"event.pre_seconds", "10"},
+      {"event.post_seconds", "30"},
+      {"event.max_seconds", "300"},
   };
   for (const auto& [key, value] : settings) {
     uvcpp::uvcpp_db_params params;
@@ -2249,6 +2253,8 @@ void App::RegisterCoreRoutes() {
                            !update_int("audit", "retentionDays", 1, 3650, "audit.retention_days")) {
                          return;
                        }
+                       if (!UpdateEventSettings(body, &*error))
+                         return;
 
                        if (body.contains("system") && body["system"].is_object()) {
                          const auto& system = body["system"];
@@ -2376,6 +2382,51 @@ void App::RegisterCoreRoutes() {
                "system.manage"));
 }
 
+bool App::UpdateEventSettings(const json& body, std::string* error) {
+  if (!body.contains("event") || !body["event"].is_object())
+    return true;
+  const auto& event = body["event"];
+  int64_t pre = GetSettingInt("event.pre_seconds", 10);
+  int64_t post = GetSettingInt("event.post_seconds", 30);
+  int64_t max_seconds = GetSettingInt("event.max_seconds", 300);
+  bool enabled = GetSettingInt("event.enabled", 1) != 0;
+  const auto read_int = [&](const char* key, int64_t* target) -> bool {
+    const auto it = event.find(key);
+    if (it == event.end())
+      return true;
+    if (!it->is_number_integer()) {
+      *error = std::string(key) + " must be an integer";
+      return false;
+    }
+    *target = it->get<int64_t>();
+    return true;
+  };
+  if (!read_int("preSeconds", &pre) || !read_int("postSeconds", &post) ||
+      !read_int("maxSeconds", &max_seconds))
+    return false;
+  if (pre < 0 || pre > 60 || post < 1 || post > 3600 || max_seconds < 1 || max_seconds > 3600 ||
+      post > max_seconds) {
+    *error = "event pre/post/max seconds are out of range";
+    return false;
+  }
+  if (event.contains("enabled")) {
+    if (!event["enabled"].is_boolean()) {
+      *error = "event enabled must be a boolean";
+      return false;
+    }
+    enabled = event["enabled"].get<bool>();
+  }
+  std::string db_error;
+  if (!SetSetting("event.enabled", enabled ? "1" : "0", &db_error) ||
+      !SetSetting("event.pre_seconds", std::to_string(pre), &db_error) ||
+      !SetSetting("event.post_seconds", std::to_string(post), &db_error) ||
+      !SetSetting("event.max_seconds", std::to_string(max_seconds), &db_error)) {
+    *error = db_error;
+    return false;
+  }
+  return true;
+}
+
 json App::SettingsJson() {
   return json{
       {"security", json{{"webMaxFailures", GetSettingInt("security.web_max_failures", 10)},
@@ -2383,6 +2434,10 @@ json App::SettingsJson() {
                         {"apiMaxFailures", GetSettingInt("security.api_max_failures", 100)},
                         {"apiLockMinutes", GetSettingInt("security.api_lock_minutes", 10)}}},
       {"audit", json{{"retentionDays", GetSettingInt("audit.retention_days", 180)}}},
+      {"event", json{{"enabled", GetSettingInt("event.enabled", 1) != 0},
+                     {"preSeconds", GetSettingInt("event.pre_seconds", 10)},
+                     {"postSeconds", GetSettingInt("event.post_seconds", 30)},
+                     {"maxSeconds", GetSettingInt("event.max_seconds", 300)}}},
       {"system", json{{"timezone", GetSetting("system.timezone", "UTC")},
                       {"language", GetSetting("system.language", "auto")},
                       {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0},
@@ -6157,6 +6212,10 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
             "created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
             params, nullptr, &error)) {
     std::fprintf(stderr, "alert insert failed: %s\n", error.c_str());
+  }
+  if (recording_ && channel_id > 0 &&
+      (type == "motion" || type == "person" || type == "tamper" || type == "intrusion")) {
+    recording_->OnEvent(channel_id);
   }
   if (level != "info" && GetSettingInt("smtp.enabled", 0) != 0) {
     const std::string host = GetSetting("smtp.host", "smtp.qq.com");

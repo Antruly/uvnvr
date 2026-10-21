@@ -153,6 +153,7 @@ private:
   int64_t AdminRoleId();
   json BuildSummary();
   json SettingsJson();
+  bool UpdateEventSettings(const json& body, std::string* error);
   void Audit(const std::string& category, const std::string& level, const std::string& actor,
              const std::string& ip, const std::string& ua, const std::string& object_type,
              const std::string& object_id, const std::string& action, const std::string& result,

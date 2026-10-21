@@ -53,7 +53,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       id: 'recording',
       title: 'Recording and storage',
       body: [
-        'Recording is plan-driven. A channel records only while an active timed/event plan covers the current half hour.',
+        'Recording is plan-driven. Timed cells record continuously; event and timed+event cells also record alert-triggered clips with pre-roll and post-roll, configured under System → Event recording.',
         'Segments are MPEG-TS files, aligned to keyframes and indexed in SQLite.',
         'Storage volumes support loop recording (delete oldest) or stop-and-alert. Retention is enforced by the recorder.',
         'Change the slice duration or size in the settings keys recording.segment_minutes / recording.segment_size_mb.',
@@ -151,7 +151,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       id: 'recording',
       title: '录像与存储',
       body: [
-        '录像是计划驱动的：只有当前半小时落在定时/预警计划内时，通道才会录像。',
+        '录像是计划驱动的：定时格持续录像；预警格与定时+预警格还会在预警时录制带预录/后录的片段，可在 系统设置 → 事件录像 中配置。',
         '切片为 MPEG-TS 文件，在关键帧处切分，并写入 SQLite 索引。',
         '存储卷支持循环录制（删除最旧）或录满停止并预警；保留策略由录像服务执行。',
         '切片时长与大小可在设置 recording.segment_minutes / recording.segment_size_mb 中调整。',

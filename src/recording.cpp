@@ -146,6 +146,13 @@ struct RecordingService::Impl {
     Segment segment;
     bool has_segment = false;
     std::string current_codec;
+    bool event_mode = false;
+    std::string record_type = "timed";
+    std::atomic<int64_t> event_deadline_ms{0};
+    std::atomic<int64_t> event_hard_deadline_ms{0};
+    std::atomic<bool> finished{false};
+    int64_t event_start_ms = 0;
+    bool event_start_used = false;
     mutable std::mutex status_mutex;
     struct StatusSnapshot {
       bool active = false;
@@ -173,11 +180,33 @@ struct RecordingService::Impl {
     }
 
     Recorder(Impl* owner_in, int64_t channel, std::string stream_kind, VolumeInfo vol,
-             int64_t minutes, int64_t size_mb, std::string mode)
+             int64_t minutes, int64_t size_mb, std::string mode,
+             std::string record_type_in = "timed")
         : owner(owner_in), channel_id(channel), stream(std::move(stream_kind)),
           volume(std::move(vol)), segment_minutes(std::max<int64_t>(1, minutes)),
-          segment_size_mb(std::max<int64_t>(16, size_mb)), segment_mode(std::move(mode)) {
+          segment_size_mb(std::max<int64_t>(16, size_mb)), segment_mode(std::move(mode)),
+          event_mode(record_type_in == "event"), record_type(std::move(record_type_in)) {
       RefreshStatus();
+    }
+
+    // Event clips start with the buffered pre-roll and stop at the deadline.
+    void BeginEvent(int64_t start_ms, int64_t deadline_ms, int64_t hard_deadline_ms) {
+      event_start_ms = start_ms;
+      event_deadline_ms = deadline_ms;
+      event_hard_deadline_ms = hard_deadline_ms;
+    }
+
+    // A follow-up alert extends the current clip without exceeding its cap.
+    void ExtendEvent(int64_t deadline_ms) {
+      const int64_t hard = event_hard_deadline_ms.load();
+      int64_t current = event_deadline_ms.load();
+      const int64_t target = std::min(deadline_ms, hard);
+      while (target > current && !event_deadline_ms.compare_exchange_weak(current, target)) {
+      }
+    }
+
+    bool EventExpired(int64_t now_ms) const {
+      return event_mode && now_ms >= event_deadline_ms.load();
     }
 
     ~Recorder() {
@@ -229,13 +258,18 @@ struct RecordingService::Impl {
       value.channel_id = channel_id;
       value.channel_name = std::to_string(channel_id);
       value.stream = stream;
-      value.start_ms = now_ms;
+      // The first event segment begins with the pre-roll, so its index row
+      // starts before the alert and matches the first buffered frame.
+      value.start_ms = event_mode && !event_start_used && event_start_ms > 0
+                           ? std::min<int64_t>(now_ms, event_start_ms)
+                           : now_ms;
       value.limit_bytes = segment_size_mb * 1024 * 1024;
       value.limit_ms = segment_minutes * 60 * 1000;
       value.seq = static_cast<int64_t>(now_ms);
       value.codec = current_codec;
-      const std::string base = std::to_string(channel_id) + "_" + stream + "_" +
-                               std::to_string(now_ms) + "_" + std::to_string(value.seq);
+      const std::string base = std::to_string(channel_id) + "_" + stream +
+                               (event_mode ? "_event" : "") + "_" + std::to_string(now_ms) + "_" +
+                               std::to_string(value.seq);
       value.path = (dir / (base + ".ts")).string();
       value.part_path = (dir / (base + ".ts.part")).string();
       value.file.open(value.part_path, std::ios::binary | std::ios::trunc);
@@ -247,6 +281,7 @@ struct RecordingService::Impl {
       }
       segment = std::move(value);
       has_segment = true;
+      event_start_used = true;
       RefreshStatus();
       std::fprintf(stderr, "[recording] channel %lld %s -> %s\n",
                    static_cast<long long>(channel_id), stream.c_str(), segment.path.c_str());
@@ -261,6 +296,15 @@ struct RecordingService::Impl {
         segment.file.close();
       }
       std::error_code ec;
+      // An event that produced no media (for example while the camera was
+      // offline) should not leave an empty index row or file behind.
+      if (event_mode && segment.bytes == 0) {
+        std::filesystem::remove(segment.part_path, ec);
+        has_segment = false;
+        segment = Segment{};
+        RefreshStatus();
+        return;
+      }
       std::filesystem::rename(segment.part_path, segment.path, ec);
       if (ec) {
         std::fprintf(stderr, "[recording] cannot finalize %s: %s\n", segment.part_path.c_str(),
@@ -284,7 +328,7 @@ struct RecordingService::Impl {
       params.add(std::max<int64_t>(0, end_ms - segment.start_ms));
       params.add(segment.bytes);
       params.add(segment.codec);
-      params.add("timed");
+      params.add(record_type);
       params.add(end_ms / 1000);
       std::string error;
       if (!uvcpp::uvcpp_db_ok(owner->db->insert(
@@ -373,14 +417,30 @@ struct RecordingService::Impl {
         std::shared_ptr<std::vector<uint8_t>> item;
         {
           std::unique_lock<std::mutex> lock(mutex);
-          cv.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+          if (event_mode) {
+            // Event clips must finalize on time even when the camera is quiet.
+            cv.wait_for(lock, std::chrono::milliseconds(250),
+                        [this] { return stopping.load() || !queue.empty(); });
+          } else {
+            cv.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+          }
           if (stopping.load() && queue.empty())
             break;
-          item = std::move(queue.front());
-          queue.pop_front();
+          if (!queue.empty()) {
+            item = std::move(queue.front());
+            queue.pop_front();
+          }
+        }
+        if (!item) {
+          if (event_mode && EventExpired(NowMs()))
+            break;
+          continue;
         }
         WriteChunk(item);
+        if (event_mode && EventExpired(NowMs()))
+          break;
       }
+      finished = true;
       Finalize();
     }
   };
@@ -399,6 +459,18 @@ struct RecordingService::Impl {
   std::mutex mutex;
   std::map<std::string, std::shared_ptr<Recorder>> recorders;
   int64_t last_cleanup_ms = 0;
+
+  // Event clips are independent of the timed recorder map: a channel can have
+  // a timed recording and an alert-triggered clip at the same time.
+  std::mutex event_mutex;
+  std::map<std::string, std::shared_ptr<Recorder>> event_recorders;
+  std::map<std::string, std::string> event_streams; // key -> stream for active event plans
+  struct BufferedChunk {
+    int64_t at_ms = 0;
+    std::shared_ptr<std::vector<uint8_t>> data;
+  };
+  std::map<std::string, std::deque<BufferedChunk>> preroll;
+  int64_t preroll_window_ms = 10 * 1000;
 
   static std::string Key(int64_t channel, const std::string& stream) {
     return std::to_string(channel) + ":" + stream;
@@ -459,7 +531,7 @@ struct RecordingService::Impl {
     recorder->Stop();
   }
 
-  std::map<std::string, std::string> ActivePlans() {
+  std::map<std::string, std::string> ActivePlanStreams(const std::string& modes) {
     std::map<std::string, std::string> result;
     const std::time_t now = std::time(nullptr);
     std::tm tm{};
@@ -479,9 +551,11 @@ struct RecordingService::Impl {
     uvcpp::uvcpp_db_table table;
     if (!uvcpp::uvcpp_db_ok(db->query(
             "SELECT channel_id, stream FROM record_plans WHERE enabled = 1 AND weekday = ? "
-            "AND mode IN ('timed','both') AND ("
-            "(start_min <= end_min AND ? >= start_min AND ? < end_min) OR "
-            "(start_min > end_min AND (? >= start_min OR ? < end_min)))",
+            "AND mode IN (" +
+                modes +
+                ") AND ("
+                "(start_min <= end_min AND ? >= start_min AND ? < end_min) OR "
+                "(start_min > end_min AND (? >= start_min OR ? < end_min)))",
             params, &table))) {
       return result;
     }
@@ -492,6 +566,86 @@ struct RecordingService::Impl {
       result[Key(channel, table.at(i, "stream").to_text())] = table.at(i, "stream").to_text();
     }
     return result;
+  }
+
+  std::map<std::string, std::string> ActivePlans() {
+    return ActivePlanStreams("'timed','both'");
+  }
+
+  std::map<std::string, std::string> ActiveEventPlans() {
+    return ActivePlanStreams("'event','both'");
+  }
+
+  // Buffers the most recent TS bytes for event pre-roll. Caller holds
+  // event_mutex. A long gap means the stream reconnected, so old bytes must
+  // not be stitched to the new connection.
+  void BufferPrerollLocked(const std::string& key, const uint8_t* data, size_t len) {
+    auto& buffer = preroll[key];
+    const int64_t now = NowMs();
+    if (preroll_window_ms <= 0) {
+      buffer.clear();
+      return;
+    }
+    if (!buffer.empty() && now - buffer.back().at_ms > 2000)
+      buffer.clear();
+    auto chunk = std::make_shared<std::vector<uint8_t>>(data, data + len);
+    buffer.push_back(BufferedChunk{now, std::move(chunk)});
+    const int64_t cutoff = now - preroll_window_ms;
+    while (!buffer.empty() && buffer.front().at_ms < cutoff)
+      buffer.pop_front();
+  }
+
+  void OnEvent(int64_t channel_id) {
+    if (channel_id <= 0 || GetSettingInt(db, "event.enabled", 1) == 0)
+      return;
+    const int64_t now = NowMs();
+    const int64_t post_ms =
+        std::clamp<int64_t>(GetSettingInt(db, "event.post_seconds", 30), 1, 3600) * 1000;
+    const int64_t max_ms = std::max(
+        post_ms, std::clamp<int64_t>(GetSettingInt(db, "event.max_seconds", 300), 1, 3600) * 1000);
+    // Query the plans directly: a plan created a moment before the alert must
+    // still start a clip, even if the scheduler has not refreshed its snapshot.
+    std::vector<std::string> streams;
+    const std::string prefix = std::to_string(channel_id) + ":";
+    for (const auto& [key, stream] : ActiveEventPlans()) {
+      if (key.compare(0, prefix.size(), prefix) == 0)
+        streams.push_back(stream);
+    }
+    if (streams.empty())
+      return;
+    VolumeInfo volume;
+    if (!ActiveVolume(&volume))
+      return;
+    const int64_t size_mb = GetSettingInt(db, "recording.segment_size_mb", 256);
+    // One event produces one clip unless it reaches the configured maximum.
+    const int64_t minutes = std::max<int64_t>(1, (max_ms + 59999) / 60000);
+    for (const auto& stream : streams) {
+      const std::string key = Key(channel_id, stream);
+      std::lock_guard<std::mutex> lock(event_mutex);
+      auto existing = event_recorders.find(key);
+      if (existing != event_recorders.end()) {
+        if (!existing->second->finished.load()) {
+          existing->second->ExtendEvent(now + post_ms);
+          continue;
+        }
+        // The clip ended but the scheduler has not pruned it yet. Start a new
+        // clip instead of extending a recorder whose thread already exited.
+        event_recorders.erase(existing);
+      }
+      auto recorder = std::make_shared<Recorder>(this, channel_id, stream, volume, minutes, size_mb,
+                                                 "time", "event");
+      int64_t start_ms = now;
+      const auto buffered = preroll.find(key);
+      if (buffered != preroll.end() && !buffered->second.empty()) {
+        start_ms = buffered->second.front().at_ms;
+        for (const auto& chunk : buffered->second)
+          recorder->Push(chunk.data->data(), chunk.data->size());
+      }
+      recorder->BeginEvent(start_ms, now + post_ms, now + max_ms);
+      // Insert before starting so live chunks cannot outrun the pre-roll.
+      event_recorders[key] = recorder;
+      recorder->Start();
+    }
   }
 
   void Cleanup() {
@@ -589,23 +743,33 @@ struct RecordingService::Impl {
     VolumeInfo volume;
     const bool has_volume = ActiveVolume(&volume);
     nlohmann::json items = nlohmann::json::array();
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      for (const auto& [key, recorder] : recorders) {
+    const auto append = [&items](const std::map<std::string, std::shared_ptr<Recorder>>& map) {
+      for (const auto& [key, recorder] : map) {
         Recorder::StatusSnapshot snapshot;
         {
           std::lock_guard<std::mutex> status_lock(recorder->status_mutex);
           snapshot = recorder->status;
         }
-        items.push_back(nlohmann::json{{"channelId", recorder->channel_id},
-                                       {"stream", recorder->stream},
-                                       {"active", snapshot.active},
-                                       {"path", snapshot.path},
-                                       {"bytes", snapshot.bytes},
-                                       {"startMs", snapshot.start_ms},
-                                       {"volumeId", snapshot.volume_id},
-                                       {"volumePath", snapshot.volume_path}});
+        items.push_back(nlohmann::json{
+            {"channelId", recorder->channel_id},
+            {"stream", recorder->stream},
+            {"recordType", recorder->record_type},
+            {"active", snapshot.active},
+            {"path", snapshot.path},
+            {"bytes", snapshot.bytes},
+            {"startMs", snapshot.start_ms},
+            {"volumeId", snapshot.volume_id},
+            {"volumePath", snapshot.volume_path},
+            {"untilMs", recorder->event_mode ? recorder->event_deadline_ms.load() : 0}});
       }
+    };
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      append(recorders);
+    }
+    {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      append(event_recorders);
     }
     nlohmann::json result{{"recordings", std::move(items)},
                           {"volume", has_volume ? nlohmann::json{{"id", volume.id},
@@ -620,6 +784,33 @@ struct RecordingService::Impl {
       VolumeInfo volume;
       const bool has_volume = ActiveVolume(&volume);
       const auto active = ActivePlans();
+      const auto event_active = GetSettingInt(db, "event.enabled", 1) != 0
+                                    ? ActiveEventPlans()
+                                    : std::map<std::string, std::string>{};
+      const int64_t preroll_seconds =
+          std::clamp<int64_t>(GetSettingInt(db, "event.pre_seconds", 10), 0, 60);
+      std::vector<std::shared_ptr<Recorder>> expired_events;
+      {
+        std::lock_guard<std::mutex> lock(event_mutex);
+        event_streams = event_active;
+        preroll_window_ms = preroll_seconds * 1000;
+        for (auto it = preroll.begin(); it != preroll.end();) {
+          if (event_active.find(it->first) == event_active.end())
+            it = preroll.erase(it);
+          else
+            ++it;
+        }
+        for (auto it = event_recorders.begin(); it != event_recorders.end();) {
+          if (it->second->finished.load()) {
+            expired_events.push_back(it->second);
+            it = event_recorders.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      for (auto& expired : expired_events)
+        expired->Stop();
       if (has_volume) {
         for (const auto& [key, stream] : active) {
           const size_t colon = key.find(':');
@@ -667,6 +858,13 @@ struct RecordingService::Impl {
     }
     for (auto& [key, recorder] : copy)
       recorder->Stop();
+    std::map<std::string, std::shared_ptr<Recorder>> event_copy;
+    {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      event_copy.swap(event_recorders);
+    }
+    for (auto& [key, recorder] : event_copy)
+      recorder->Stop();
   }
 };
 
@@ -683,21 +881,37 @@ void RecordingService::Stop() {
   impl_->Stop();
 }
 
+void RecordingService::OnEvent(int64_t channel_id) {
+  impl_->OnEvent(channel_id);
+}
+
 std::string RecordingService::StatusJson() {
   return impl_->StatusJson();
 }
 
 void RecordingService::OnTs(int64_t channel_id, const std::string& stream, const uint8_t* data,
                             size_t len) {
+  const std::string key = Impl::Key(channel_id, stream);
   std::shared_ptr<Impl::Recorder> recorder;
+  std::shared_ptr<Impl::Recorder> event_recorder;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto it = impl_->recorders.find(Impl::Key(channel_id, stream));
-    if (it == impl_->recorders.end())
-      return;
-    recorder = it->second;
+    const auto it = impl_->recorders.find(key);
+    if (it != impl_->recorders.end())
+      recorder = it->second;
   }
-  recorder->Push(data, len);
+  {
+    std::lock_guard<std::mutex> lock(impl_->event_mutex);
+    if (impl_->event_streams.find(key) != impl_->event_streams.end())
+      impl_->BufferPrerollLocked(key, data, len);
+    const auto it = impl_->event_recorders.find(key);
+    if (it != impl_->event_recorders.end())
+      event_recorder = it->second;
+  }
+  if (recorder)
+    recorder->Push(data, len);
+  if (event_recorder)
+    event_recorder->Push(data, len);
 }
 
 } // namespace uvnvr
