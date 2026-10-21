@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Playback integration test for 0.2.0.
+"""Playback, download-range, cache and MP4-export integration test.
 
 Inserts a synthetic keyframe-aligned MPEG-TS segment and drives the playback
 WebSocket through the API. Verifies server-side pacing at 8x and keyframe-based

@@ -4,7 +4,7 @@
 #
 #   packaging/linux/build-package.sh \
 #     --build build --libuvcpp /path/to/libuvcpp-1.8.1-linux-x64 \
-#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.2.0 --out dist-packages
+#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.3.0 --out dist-packages
 set -euo pipefail
 
 BUILD_DIR="build"

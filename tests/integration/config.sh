@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 0.2.0 integration test: JSON startup configuration, CLI precedence and the
+# 0.2.0+ integration test: JSON startup configuration, CLI precedence and the
 # read-only system configuration endpoint.
 #
 # Usage: tests/integration/config.sh [path-to-uvnvr] [base-port]
