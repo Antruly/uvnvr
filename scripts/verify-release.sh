@@ -20,7 +20,16 @@ fail() {
 }
 
 echo "== downloading ${REPO} ${TAG} =="
-gh release download "${TAG}" --repo "${REPO}" --dir "${DIR}"
+for attempt in 1 2 3; do
+  if gh release download "${TAG}" --repo "${REPO}" --dir "${DIR}" --clobber; then
+    break
+  fi
+  if [[ "${attempt}" -eq 3 ]]; then
+    echo "download failed after ${attempt} attempts" >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 expected=(
   "uvnvr-${VERSION}-windows-x64-setup.exe"
