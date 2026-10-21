@@ -79,7 +79,7 @@ All keys are optional.
 | `http.tls.selfSigned` | `false` | Generates a localhost certificate when no cert/key is set. |
 | `rtsp.port` | `554` | Falls back to 8554/8555 when the port cannot be bound. |
 | `dataDir` | `./data` | Database, secret key, alerts and default recordings root. Windows installs under Program Files default to `%ProgramData%\UvNVR`; installs on another drive default to `<install>\data`. |
-| `maintenance` | `false` | Enables destructive operations. Prefer `--maintenance`. |
+| `maintenance` | `false` | Enables administrator-only destructive operations (recording deletion, audit purge, serial/display-version changes, volume formatting). Prefer `--maintenance` for a temporary operations session. |
 | `ffmpeg.path` | auto-detected | FFmpeg executable; `UVNVR_FFMPEG` overrides it. |
 | `logging.level` | `info` | `trace`, `debug`, `info`, `warn` or `error`. |
 | `storage.cacheMb` | `128` | LRU playback cache in MiB; `0` disables caching. |

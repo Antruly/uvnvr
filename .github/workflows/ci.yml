@@ -70,7 +70,7 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.9.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.10.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 
@@ -112,6 +112,9 @@ jobs:
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/mediamtx/mediamtx
         run: python3 tests/integration/event_recording.py ./build/uvnvr 19610
+
+      - name: Maintenance integration test
+        run: python3 tests/integration/maintenance.py ./build/uvnvr 19910
 
       - name: Upload server log on failure
         if: failure()

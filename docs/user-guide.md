@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.9.0)
+# UvNVR User Guide (0.10.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -226,6 +226,9 @@ actually being written without scanning the disk.
 
 Manual deletion of video files is not available outside maintenance mode.
 Automatic retention and loop cleanup are policy operations and are audited.
+In maintenance mode, **Format volume** deletes all UvNVR recordings on that
+volume and their index rows after you type the volume path; it does not reformat
+the filesystem or touch unrelated files.
 
 ## 7. Playback and download
 
@@ -253,6 +256,8 @@ Open **Playback**.
    preload the next segment while the current one plays. Cache hits, misses and
    memory use are shown in **System settings**; tune them with
    `storage.cacheMb` and `storage.readaheadMb`.
+8. In maintenance mode a **Delete** button removes the selected segment's file
+   and index row. The recording must be inside a configured storage volume.
 
 ## 8. Snapshots, API and RTSP output
 
@@ -300,13 +305,13 @@ Each alert shows its snapshot when available; acknowledging is audited.
 
 Alert sources:
 
-- Motion detection on a low-resolution sampled frame. Sensitivity, region and
-  cooldown are configurable. This is an experimental frame-difference detector,
-  not AI.
+- Motion detection on a low-resolution sampled frame. Enable it, set sensitivity
+  (1–100), cooldown seconds and one percentage region under **System → Motion
+  detection**. This is an experimental frame-difference detector, not AI.
 - ONVIF camera events (motion, person, tamper, line crossing) when enabled on the
   channel. Each type has a 60-second per-channel cooldown.
 - Camera offline and recovery events.
-- Storage nearly full, disk errors and service errors.
+- Storage nearly full events.
 
 Configure SMTP under **System → Email alerts**. The default preset is QQ Mail
 (`smtp.qq.com:465`); use the account's authorization code, not the login
@@ -340,25 +345,38 @@ database; without it the stored credentials cannot be recovered.
 
 ### Maintenance mode
 
-Start the service with `--maintenance` to expose destructive operations: manual
-video/log deletion, serial number changes, version changes and full-disk
-formatting. These actions require an administrator, a second confirmation and
-are always audited. Outside maintenance mode they return forbidden.
+Start the service with `--maintenance` to expose destructive operations:
+
+- Delete a recording segment from **Playback** (the file and its index row).
+- Purge audit entries from **Logs**, or export them as CSV first.
+- Change the serial number or the display version under **System**.
+- Format a storage volume from **Storage**. This deletes every UvNVR recording
+  under `<volume>/uvnvr` and the volume's index rows; it does not run `mkfs` or
+  remove unrelated files. Type the volume path to confirm.
+
+Every operation requires an administrator, an explicit confirmation and is
+audited. Outside maintenance mode the API returns `403`. The display version
+affects the UI and system overview; `/healthz` reports the build version.
 
 ## 11. System settings
 
 **System** contains:
 
-- Security: lockout thresholds, audit retention (default 180 days), time zone,
-  UI language and GPU enable/disable.
+- Security: lockout thresholds, audit retention (default 180 days), time zone
+  and UI language.
 - Time: current server time, NTP enable/server/offset, immediate NTP sync, and
   "use browser time" calibration. The page clock updates every second. Both
   sync actions also set the clock on ONVIF-capable cameras (Hikvision/Dahua via
   ONVIF) and report how many cameras were synchronized; pure RTSP cameras are
   skipped.
-- Performance: detected tier (low/medium/high), GPU devices and active FFmpeg
-  mode. Low-tier systems default to the sub stream off; the tier can be
-  overridden.
+- Event recording and motion detection: pre/post-roll, maximum clip length,
+  motion sensitivity/cooldown/region.
+- Performance: detected tier (low/medium/high) and GPU state. The tier caps
+  simultaneous motion sampling (low 2, medium 4, high 8 channels). The GPU
+  switch makes snapshots and motion samples try hardware decoding first with a
+  software fallback; live preview and recording are stream-copied either way.
+- Maintenance (only when the service runs with `--maintenance`): serial number
+  and display version.
 - Email: SMTP host, port, user, password, sender and test send.
 - API tokens: create, list and revoke.
 - Logging: application log location and level; audit logs are stored in SQLite.
@@ -370,10 +388,11 @@ sessions, alerts and bitrate trends. It is the default landing page.
 
 Open **Logs**. Filter by category (auth, channel, record, storage, API, system,
 alert, permission, maintenance), level, result, actor, source IP, keyword and
-time range. Results are paginated and can be exported as CSV.
+time range. Results are paginated. **Export CSV** downloads the filtered rows
+(UTF-8 with BOM, up to 100,000 entries). In maintenance mode **Purge logs**
+deletes audit entries after confirmation; the purge itself is audited.
 
-Audit entries expire after the configured retention period. Manual deletion is
-reserved for maintenance mode.
+Audit entries expire after the configured retention period.
 
 ## 13. Help and about
 

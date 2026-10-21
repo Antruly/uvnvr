@@ -4,6 +4,43 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-10-21
+
+### Added
+
+- **Maintenance mode operations.** `--maintenance` now gates administrator-only
+  destructive actions: deleting a recording segment, purging audit entries,
+  changing the serial number, setting a display version and formatting a storage
+  volume. Each action requires an explicit confirmation and is audited; outside
+  maintenance mode they return `403`.
+- **Motion detection settings.** **System → Motion detection** and
+  `GET/PUT /api/v1/settings` (`motion.enabled`, `motion.sensitivity`,
+  `motion.cooldownSeconds`, `motion.region.x/y/width/height`) control the
+  frame-difference detector. The region is a percentage rectangle of the 64×36
+  sample frame.
+- **Audit CSV export.** `GET /api/v1/audit/export` streams the filtered audit
+  log as CSV (UTF-8 with BOM) and the Logs page has an **Export CSV** button.
+- **Windows snapshot and motion capture.** The Windows build now runs FFmpeg
+  through `CreateProcess` pipes for JPEG snapshots and grayscale motion frames
+  instead of returning “not wired yet”.
+- **GPU-assisted capture.** When GPU acceleration is enabled, snapshot and
+  motion sampling try `-hwaccel auto` first and fall back to software decoding.
+
+### Changed
+
+- The performance tier now limits simultaneous motion sampling (low 2, medium
+  4, high 8 channels), so the tier affects runtime behavior instead of only
+  being displayed.
+- Formatting a volume removes UvNVR's `uvnvr` recording tree and its index rows;
+  it does not run a filesystem `mkfs` or touch unrelated files.
+- The display version override affects the UI and system overview only;
+  `/healthz` continues to report the build version.
+
+### Fixed
+
+- The dashboard reported channel and recording counts as zero; both counts now
+  come from the database.
+
 ## [0.9.0] - 2026-10-21
 
 ### Added

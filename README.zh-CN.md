@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.9.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.10.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,16 +22,17 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.9.0 — 事件触发录像。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.10.0 — 运维保障。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.9.0 让事件计划真正录像：移动侦测和 ONVIF 人形/遮挡/越线事件会触发带预录的片段，
-后续预警在最长时长内延长当前片段，后录结束后自动收尾；预录、后录与单段最长时长均可配置。
-0.8.0 的 CSV 批量导入与实时录像状态，0.7.0 的海康/大华 HTTP 后备、HTTP 端口、x64 MSI
-与编码自动续播，0.6.0 的录像修复与运维 UI，0.5.0 的 ONVIF 事件，0.4.0 的通道分组与布局，
-0.3.0 的下载/导出/缓存，0.2.0 的启动配置继续保留。WebRTC、云平台与高级分析仍不在范围内。
-里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
+0.10.0 补齐运维能力：运维模式现在真正限制录像删除、审计清理、序列号/显示版本修改与存储卷格式化；
+移动侦测支持灵敏度、冷却时间与区域配置；审计日志可导出 CSV；Windows 支持抓拍与移动侦测采样；
+GPU 抓拍失败时自动回退软件解码。0.9.0 的事件触发录像、0.8.0 的 CSV 批量导入与实时录像状态、
+0.7.0 的海康/大华 HTTP 后备、HTTP 端口、x64 MSI 与编码自动续播，0.6.0 的录像修复与运维 UI，
+0.5.0 的 ONVIF 事件，0.4.0 的通道分组与布局，0.3.0 的下载/导出/缓存，0.2.0 的启动配置继续保留。
+WebRTC、云平台与高级分析仍不在范围内。里程碑见
+[`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -65,6 +66,8 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
 - CSV 批量导入通道（逐行识别与错误报告）；录像状态 API 与存储页实时面板（当前文件、写入量、生效卷）。
 - 移动侦测与 ONVIF 人形/遮挡/越线事件触发录像，支持预录、后录与单段最长时长配置；
   事件计划与 `record_type=event` 索引已完整接通。
+- 运维模式操作（录像删除、审计清理、序列号/显示版本修改、存储卷格式化），带管理员校验、
+  二次确认与审计；可配置移动侦测；审计 CSV 导出；Windows 抓拍/移动侦测；GPU 抓拍与软件回退。
 
 ### 已交付范围
 
@@ -160,7 +163,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.9.0 已知限制
+## 0.10.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -178,6 +181,10 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 - 提供 x64 MSI；arm64 与便携版仍使用 NSIS/zip，MSI 未签名，SmartScreen 可能提示。
 - 海康/大华 HTTP 后备覆盖 ISAPI/CGI 摄像头；其他不支持 ONVIF 的品牌仍需手动配置。
 - CSV 导入为逐条处理；录像状态面板会同时列出正在写入的计划录像与事件录像。
+- 格式化存储卷只删除 UvNVR 的 `uvnvr` 录像目录与索引记录，不会执行 `mkfs`，也不删除磁盘上的其他文件。
+- 显示版本号只影响界面和系统概览；`/healthz` 仍返回构建版本。
+- 移动侦测只支持一个矩形区域（按采样帧百分比），不支持多边形遮罩或目标跟踪。
+- GPU 开关只影响抓拍与移动侦测采样；实时预览与录像使用流复制，不经过 GPU。
 - 审计日志与录像共用数据盘；独立审计路径为后续增强。
 
 ## 许可证
@@ -246,6 +253,7 @@ tests/             单元/集成/E2E 测试
 | 0.7.0 | ✅ 海康/大华 HTTP 后备、HTTP 端口、x64 MSI、编码自动续播 |
 | 0.8.0 | ✅ CSV 批量导入、实时录像状态与生效存储卷显示 |
 | 0.9.0 | ✅ 事件触发录像（预录/后录）、事件计划、事件录像设置 |
+| 0.10.0 | ✅ 运维操作、移动侦测设置、审计导出、Windows 抓拍、GPU 回退 |
 
 ## 贡献与安全
 

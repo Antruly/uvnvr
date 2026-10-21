@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.9.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.10.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,21 +22,23 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.9.0 — event-triggered recording.** The recorder supports
+**0.10.0 — operational safeguards.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.9.0 turns event plans into real recordings: motion and ONVIF person/tamper/line
-events start clips with buffered pre-roll, extend them with follow-up alerts and
-stop after the post-roll, with configurable pre/post/maximum durations. It builds
-on 0.8.0's CSV bulk import and live recording status, 0.7.0's Hikvision/Dahua HTTP
-fallback, per-channel HTTP port, x64 MSI and codec-boundary continuation, 0.6.0's
-recording fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and
-layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the
-core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain out
-of scope. Track the milestones in
+0.10.0 closes the operational gaps: maintenance mode now gates recording deletion,
+audit purging, serial/display-version changes and volume formatting; motion
+detection has configurable sensitivity, cooldown and region; the audit log exports
+to CSV; Windows gains snapshot and motion capture; and GPU-assisted capture falls
+back to software. It builds on 0.9.0's event-triggered clips, 0.8.0's CSV bulk
+import and live recording status, 0.7.0's Hikvision/Dahua HTTP fallback,
+per-channel HTTP port, x64 MSI and codec-boundary continuation, 0.6.0's recording
+fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and layouts,
+0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the core NVR
+loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of
+scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -85,6 +87,10 @@ output.
 - Event-triggered clips for motion and ONVIF person/tamper/line events, with
   configurable pre-roll, post-roll and maximum length; event plans and
   `record_type=event` indexing are wired end to end.
+- Maintenance-mode operations (recording deletion, audit purge, serial and
+  display-version changes, volume formatting) with admin checks, confirmations
+  and audit entries; configurable motion detection; CSV audit export; Windows
+  snapshot/motion capture; GPU-assisted capture with software fallback.
 
 ### Delivered scope
 
@@ -183,7 +189,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.9.0)
+## Known limitations (0.10.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -211,6 +217,14 @@ and `/ws` to `127.0.0.1:8080`).
   ONVIF still need manual configuration.
 - CSV import is sequential. The recording-status panel lists both scheduled and
   event recorders while they are active.
+- Formatting a volume removes UvNVR's `uvnvr` recording tree and its index rows;
+  it does not run `mkfs` or delete unrelated files on the disk.
+- The display version override changes the UI and system overview only; `/healthz`
+  keeps reporting the build version.
+- Motion detection supports one rectangular region (percentage of the sampled
+  frame), not polygon masks or per-object tracking.
+- The GPU switch accelerates snapshot and motion sampling only; live streams and
+  recordings are stream-copied and do not use the GPU.
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -281,6 +295,7 @@ tests/             unit/integration/e2e tests
 | 0.7.0 | ✅ Hikvision/Dahua HTTP fallback, HTTP port, x64 MSI, codec auto-continue |
 | 0.8.0 | ✅ CSV bulk import, live recording status and active-volume visibility |
 | 0.9.0 | ✅ Event-triggered clipping (pre/post-roll), event plans, event settings |
+| 0.10.0 | ✅ Maintenance operations, motion settings, audit export, Windows capture, GPU fallback |
 
 ## Contributing and security
 

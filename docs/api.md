@@ -51,8 +51,10 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/plans/sync` | plan.manage |
 | GET | `/api/v1/storage/volumes` | storage.view |
 | POST/PUT/DELETE | `/api/v1/storage/volumes[/{id}]` | storage.manage |
+| POST | `/api/v1/storage/format` | maintenance + admin |
 | GET | `/api/v1/recordings/status` | storage.view |
 | GET | `/api/v1/recordings` | playback.view |
+| DELETE | `/api/v1/recordings/{id}` | maintenance + admin |
 | GET | `/api/v1/recordings/{id}/download` | playback.download |
 | POST | `/api/v1/playback/export` | playback.download |
 | POST | `/api/v1/playback/ticket` | playback.view |
@@ -67,6 +69,10 @@ All endpoints are under `/api/v1` unless noted.
 | GET | `/api/v1/permissions` | user.view |
 | GET/POST/DELETE | `/api/v1/tokens[/{id}]` | api.access |
 | GET | `/api/v1/audit` | log.view |
+| GET | `/api/v1/audit/export` | log.view |
+| POST | `/api/v1/audit/purge` | maintenance + admin |
+| PUT | `/api/v1/system/serial` | maintenance + admin |
+| PUT | `/api/v1/system/version` | maintenance + admin |
 
 ## RTSP output
 
@@ -301,8 +307,8 @@ Ports and the data directory are applied at startup. See
 ## Runtime settings
 
 `GET /api/v1/settings` returns the editable groups (`security`, `audit`,
-`event`, `system`, `smtp`); `PUT` accepts any subset of them. Event recording
-uses:
+`event`, `motion`, `system`, `smtp`); `PUT` accepts any subset of them. Event
+recording uses:
 
 ```json
 {
@@ -320,6 +326,53 @@ uses:
 is written. When the global switch is off, alerts still create alert records but
 no event clips. Per-channel event plans (`mode` `event` or `both`) decide which
 channels and streams react to alerts.
+
+Motion detection uses:
+
+```json
+{
+  "motion": {
+    "enabled": true,
+    "sensitivity": 50,
+    "cooldownSeconds": 60,
+    "region": { "x": 0, "y": 0, "width": 100, "height": 100 }
+  }
+}
+```
+
+`sensitivity` is 1–100 (50 is the historical threshold), `cooldownSeconds` is
+10–3600, and the region is a percentage rectangle inside the 64×36 sampled
+frame. The performance tier caps simultaneous motion sampling (low 2, medium 4,
+high 8 channels). The `system.gpuEnabled` switch makes snapshots and motion
+samples try hardware decoding first and fall back to software.
+
+## Audit export
+
+`GET /api/v1/audit/export` accepts the same `category`, `level`, `q`, `from` and
+`to` filters as `GET /api/v1/audit` and returns at most 100,000 rows as
+`text/csv; charset=utf-8` (UTF-8 BOM included for Excel) with the columns:
+
+```
+id,ts,category,level,actor,ip,userAgent,objectType,objectId,action,result,errorCode,detail
+```
+
+## Maintenance mode
+
+Start the service with `--maintenance` (or `"maintenance": true` in the startup
+configuration) to enable administrator-only destructive endpoints. Requests from
+non-admin accounts or a normal-mode service return `403` with `admin_required` or
+`maintenance_required`.
+
+| Endpoint | Body | Effect |
+|---|---|---|
+| `DELETE /api/v1/recordings/{id}` | — | Deletes the segment file and its index row. The path must be inside a configured volume. |
+| `POST /api/v1/audit/purge` | `{"confirm":"purge","before":<epoch-seconds>}` | Deletes audit rows older than `before`, or all rows when `before` is 0. |
+| `PUT /api/v1/system/serial` | `{"serial":"LAB-0001"}` | Replaces the serial number. |
+| `PUT /api/v1/system/version` | `{"version":"9.9.9-lab"}` | Sets the display version; an empty string clears it. |
+| `POST /api/v1/storage/format` | `{"volumeId":1,"confirm":"<volume path>"}` | Removes every UvNVR recording under `<volume>/uvnvr`, deletes the volume's index rows and reports the count. It does not reformat the filesystem. |
+
+Every successful maintenance action is written to the audit log. The display
+version affects the UI and system overview; `/healthz` keeps the build version.
 
 ## Errors
 
