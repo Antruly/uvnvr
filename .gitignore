@@ -44,3 +44,5 @@ desktop.ini
 /playwright-report/
 auto.crt
 auto.key
+__pycache__/
+*.pyc
