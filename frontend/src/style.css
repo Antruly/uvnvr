@@ -3326,6 +3326,12 @@ select.input {
   display: none;
 }
 
+.encoder-section {
+  margin: 18px 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
 .event-toast {
   position: fixed;
   right: 24px;

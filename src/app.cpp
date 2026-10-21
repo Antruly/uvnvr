@@ -1960,8 +1960,7 @@ int App::Run() {
   media_->SetGpuEnabled(GetSettingInt("system.gpu_enabled", 1) != 0);
   if (!media_->Available()) {
     RaiseAlert(0, "service_error", "error",
-               "FFmpeg is not available; live preview, recording and snapshots cannot start.",
-               "");
+               "FFmpeg is not available; live preview, recording and snapshots cannot start.", "");
   }
   onvif_events_ = std::make_unique<OnvifEventService>(
       [this](int64_t channel_id, const std::string& type, const std::string& message) {
@@ -4986,6 +4985,168 @@ void App::RegisterChannelRoutes() {
                      });
                },
                "channel.delete"));
+
+  web_.get("/api/v1/channels/:id/encoder",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, channel_id, op] {
+                       ChannelRow channel;
+                       std::string error;
+                       if (!LoadChannel(channel_id, &channel, &error)) {
+                         op->ok = false;
+                         op->status = 404;
+                         op->code = "not_found";
+                         op->message = "channel not found";
+                         return;
+                       }
+                       if (channel.protocol != "onvif") {
+                         op->ok = false;
+                         op->status = 400;
+                         op->code = "unsupported_protocol";
+                         op->message =
+                             "camera encoder control is available for ONVIF channels only";
+                         return;
+                       }
+                       const std::string password = DecryptSecret(channel.password_enc, &error);
+                       OnvifEncoderConfig config;
+                       if (!GetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
+                                                  channel.username, password, &config, &error)) {
+                         op->ok = false;
+                         op->status = 502;
+                         op->code = "encoder_failed";
+                         op->message = error.empty() ? "cannot read the camera encoder" : error;
+                         return;
+                       }
+                       op->data =
+                           json{{"token", config.token},    {"encoding", config.encoding},
+                                {"width", config.width},    {"height", config.height},
+                                {"fps", config.fps},        {"bitrateKbps", config.bitrate_kbps},
+                                {"quality", config.quality}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "channel.manage"));
+
+  web_.put("/api/v1/channels/:id/encoder",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(id_param, &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 OnvifEncoderConfig config;
+                 config.token = JsonString(body, "token");
+                 std::string encoding = JsonString(body, "encoding");
+                 for (char& c : encoding)
+                   c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                 if (!encoding.empty() && encoding != "h264" && encoding != "h265") {
+                   SendError(resp, 400, "invalid_encoding", "encoding must be h264 or h265");
+                   next();
+                   return;
+                 }
+                 config.encoding = encoding == "h264" ? "H264" : (encoding == "h265" ? "H265" : "");
+                 config.width = static_cast<int>(JsonInt(body, "width", 0));
+                 config.height = static_cast<int>(JsonInt(body, "height", 0));
+                 config.fps = static_cast<int>(JsonInt(body, "fps", 0));
+                 config.bitrate_kbps = static_cast<int>(JsonInt(body, "bitrateKbps", 0));
+                 config.quality = static_cast<int>(JsonInt(body, "quality", 0));
+                 if ((config.width != 0 && (config.width < 160 || config.width > 8192)) ||
+                     (config.height != 0 && (config.height < 120 || config.height > 8192)) ||
+                     (config.fps != 0 && (config.fps < 1 || config.fps > 120)) ||
+                     (config.bitrate_kbps != 0 &&
+                      (config.bitrate_kbps < 16 || config.bitrate_kbps > 102400)) ||
+                     (config.quality != 0 && (config.quality < 1 || config.quality > 100))) {
+                   SendError(resp, 400, "invalid_encoder", "encoder values are out of range");
+                   next();
+                   return;
+                 }
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, channel_id, config, actor, ip, ua, op] {
+                       ChannelRow channel;
+                       std::string error;
+                       if (!LoadChannel(channel_id, &channel, &error)) {
+                         op->ok = false;
+                         op->status = 404;
+                         op->code = "not_found";
+                         op->message = "channel not found";
+                         return;
+                       }
+                       if (channel.protocol != "onvif") {
+                         op->ok = false;
+                         op->status = 400;
+                         op->code = "unsupported_protocol";
+                         op->message =
+                             "camera encoder control is available for ONVIF channels only";
+                         return;
+                       }
+                       const std::string password = DecryptSecret(channel.password_enc, &error);
+                       if (!SetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
+                                                  channel.username, password, config, &error)) {
+                         op->ok = false;
+                         op->status = 502;
+                         op->code = "encoder_failed";
+                         op->message = error.empty() ? "cannot apply the camera encoder" : error;
+                         return;
+                       }
+                       json media = json::parse(channel.media_json, nullptr, false);
+                       if (!media.is_object())
+                         media = json::object();
+                       media["encoder"] = json{{"encoding", config.encoding},
+                                               {"width", config.width},
+                                               {"height", config.height},
+                                               {"fps", config.fps},
+                                               {"bitrateKbps", config.bitrate_kbps},
+                                               {"quality", config.quality}};
+                       uvcpp::uvcpp_db_params update;
+                       update.add(media.dump());
+                       update.add(NowSeconds());
+                       update.add(channel_id);
+                       if (!Exec("UPDATE channels SET media_json = ?, updated_at = ? WHERE id = ?",
+                                 update, nullptr, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = error;
+                         return;
+                       }
+                       Audit("channel", "warning", actor.username, ip, ua, "channel",
+                             std::to_string(channel_id), "encoder", "success", "",
+                             media["encoder"].dump());
+                       op->data = media["encoder"];
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "channel.manage"));
 
   web_.get("/api/v1/channels/:id/snapshot",
            Protected(

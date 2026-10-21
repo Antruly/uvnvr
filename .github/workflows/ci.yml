@@ -70,7 +70,7 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.13.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.14.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 
@@ -94,6 +94,9 @@ jobs:
 
       - name: Brand HTTP digest integration test
         run: python3 tests/integration/brand_http.py ./build/uvnvr 19810
+
+      - name: ONVIF encoder integration test
+        run: python3 tests/integration/onvif_encoder.py ./build/uvnvr 19410
 
       - name: Fetch MediaMTX test fixture
         run: |

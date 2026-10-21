@@ -108,6 +108,18 @@ const scan = reactive({
   result: null as OnvifProbeResult | null,
 })
 const detecting = ref(false)
+const encoder = reactive({
+  token: '',
+  encoding: 'H264',
+  width: 0,
+  height: 0,
+  fps: 0,
+  bitrateKbps: 0,
+  quality: 0,
+})
+const encoderBusy = ref(false)
+const encoderError = ref('')
+const encoderNotice = ref('')
 const importing = ref(false)
 const importTotal = ref(0)
 const importDone = ref(0)
@@ -229,6 +241,49 @@ async function importCsv(event: Event) {
   } finally {
     importing.value = false
     input.value = ''
+  }
+}
+
+async function readEncoder() {
+  if (modal.mode !== 'edit' || modal.id <= 0) return
+  encoderBusy.value = true
+  encoderError.value = ''
+  encoderNotice.value = ''
+  try {
+    const config = await api<typeof encoder>(`/api/v1/channels/${modal.id}/encoder`)
+    Object.assign(encoder, config)
+    encoderNotice.value = t('channels.encoderReadDone')
+  } catch (caught) {
+    encoderError.value = caught instanceof Error ? caught.message : t('common.error')
+  } finally {
+    encoderBusy.value = false
+  }
+}
+
+async function applyEncoder() {
+  if (modal.mode !== 'edit' || modal.id <= 0) return
+  encoderBusy.value = true
+  encoderError.value = ''
+  encoderNotice.value = ''
+  try {
+    const config = await api<typeof encoder>(`/api/v1/channels/${modal.id}/encoder`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        token: encoder.token,
+        encoding: encoder.encoding,
+        width: Number(encoder.width),
+        height: Number(encoder.height),
+        fps: Number(encoder.fps),
+        bitrateKbps: Number(encoder.bitrateKbps),
+        quality: Number(encoder.quality),
+      }),
+    })
+    Object.assign(encoder, config)
+    encoderNotice.value = t('channels.encoderApplied')
+  } catch (caught) {
+    encoderError.value = caught instanceof Error ? caught.message : t('common.error')
+  } finally {
+    encoderBusy.value = false
   }
 }
 
@@ -923,6 +978,61 @@ onMounted(load)
               <option value="bottom-right">bottom-right</option>
             </select>
           </label>
+        </div>
+
+        <div v-if="modal.mode === 'edit' && modal.protocol === 'onvif'" class="encoder-section">
+          <div class="section-title">
+            <AppIcon name="settings" :size="18" />
+            <h3>{{ t('channels.encoderTitle') }}</h3>
+          </div>
+          <p class="small-note">{{ t('channels.encoderHint') }}</p>
+          <div class="modal-columns">
+            <label class="field">
+              <span>{{ t('channels.encoderEncoding') }}</span>
+              <select v-model="encoder.encoding" class="input">
+                <option value="H264">H.264</option>
+                <option value="H265">H.265</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>{{ t('channels.encoderWidth') }}</span>
+              <input v-model.number="encoder.width" class="input" type="number" min="0" max="8192" />
+            </label>
+            <label class="field">
+              <span>{{ t('channels.encoderHeight') }}</span>
+              <input v-model.number="encoder.height" class="input" type="number" min="0" max="8192" />
+            </label>
+            <label class="field">
+              <span>{{ t('channels.encoderFps') }}</span>
+              <input v-model.number="encoder.fps" class="input" type="number" min="0" max="120" />
+            </label>
+            <label class="field">
+              <span>{{ t('channels.encoderBitrate') }}</span>
+              <input
+                v-model.number="encoder.bitrateKbps"
+                class="input"
+                type="number"
+                min="0"
+                max="102400"
+              />
+            </label>
+            <label class="field">
+              <span>{{ t('channels.encoderQuality') }}</span>
+              <input v-model.number="encoder.quality" class="input" type="number" min="0" max="100" />
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="button" :disabled="encoderBusy" @click="readEncoder">
+              <AppIcon name="refresh" :size="15" />
+              {{ t('channels.encoderRead') }}
+            </button>
+            <button type="button" class="button primary" :disabled="encoderBusy" @click="applyEncoder">
+              <AppIcon name="save" :size="15" />
+              {{ t('channels.encoderApply') }}
+            </button>
+          </div>
+          <p v-if="encoderNotice" class="notice">{{ encoderNotice }}</p>
+          <p v-if="encoderError" class="form-error">{{ encoderError }}</p>
         </div>
 
         <p class="small-note">{{ t('channels.hikvisionHint') }}</p>

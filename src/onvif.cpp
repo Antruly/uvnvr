@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <openssl/evp.h>
@@ -334,6 +335,118 @@ std::string DeviceServiceUrl(const std::string& xaddr) {
   return base + "/onvif/device_service";
 }
 
+struct XmlBlock {
+  std::string open_tag;
+  std::string inner;
+  std::string close_tag;
+};
+
+bool ExtractFirstBlock(const std::string& xml, const std::string& tag, XmlBlock* block) {
+  size_t pos = 0;
+  while ((pos = xml.find('<', pos)) != std::string::npos) {
+    if (pos + 1 >= xml.size() || xml[pos + 1] == '/' || xml[pos + 1] == '?' ||
+        xml[pos + 1] == '!') {
+      ++pos;
+      continue;
+    }
+    size_t name_end = pos + 1;
+    while (name_end < xml.size() &&
+           (std::isalnum(static_cast<unsigned char>(xml[name_end])) || xml[name_end] == '_' ||
+            xml[name_end] == '-' || xml[name_end] == ':' || xml[name_end] == '.')) {
+      ++name_end;
+    }
+    std::string name = xml.substr(pos + 1, name_end - pos - 1);
+    const size_t colon = name.rfind(':');
+    if (colon != std::string::npos)
+      name = name.substr(colon + 1);
+    if (name != tag) {
+      pos = name_end;
+      continue;
+    }
+    const size_t open_end = xml.find('>', name_end);
+    if (open_end == std::string::npos)
+      return false;
+    if (xml[open_end - 1] == '/') {
+      pos = open_end + 1;
+      continue;
+    }
+    size_t scan = open_end + 1;
+    while ((scan = xml.find("</", scan)) != std::string::npos) {
+      size_t end = scan + 2;
+      while (end < xml.size() &&
+             (std::isalnum(static_cast<unsigned char>(xml[end])) || xml[end] == '_' ||
+              xml[end] == '-' || xml[end] == ':' || xml[end] == '.')) {
+        ++end;
+      }
+      std::string close_name = xml.substr(scan + 2, end - (scan + 2));
+      const size_t close_colon = close_name.rfind(':');
+      if (close_colon != std::string::npos)
+        close_name = close_name.substr(close_colon + 1);
+      if (close_name == tag) {
+        block->open_tag = xml.substr(pos, open_end - pos + 1);
+        block->inner = xml.substr(open_end + 1, scan - open_end - 1);
+        block->close_tag = xml.substr(scan, end - scan);
+        return true;
+      }
+      scan = end;
+    }
+    return false;
+  }
+  return false;
+}
+
+bool ReplaceTagValue(std::string* xml, const std::string& tag, const std::string& value) {
+  size_t pos = 0;
+  while ((pos = xml->find('<', pos)) != std::string::npos) {
+    if (pos + 1 >= xml->size() || (*xml)[pos + 1] == '/' || (*xml)[pos + 1] == '?' ||
+        (*xml)[pos + 1] == '!') {
+      ++pos;
+      continue;
+    }
+    size_t name_end = pos + 1;
+    while (name_end < xml->size() &&
+           (std::isalnum(static_cast<unsigned char>((*xml)[name_end])) || (*xml)[name_end] == '_' ||
+            (*xml)[name_end] == '-' || (*xml)[name_end] == ':' || (*xml)[name_end] == '.')) {
+      ++name_end;
+    }
+    std::string name = xml->substr(pos + 1, name_end - pos - 1);
+    const size_t colon = name.rfind(':');
+    if (colon != std::string::npos)
+      name = name.substr(colon + 1);
+    if (name != tag) {
+      pos = name_end;
+      continue;
+    }
+    const size_t open_end = xml->find('>', name_end);
+    if (open_end == std::string::npos)
+      return false;
+    if ((*xml)[open_end - 1] == '/') {
+      pos = open_end + 1;
+      continue;
+    }
+    size_t scan = open_end + 1;
+    while ((scan = xml->find("</", scan)) != std::string::npos) {
+      size_t end = scan + 2;
+      while (end < xml->size() &&
+             (std::isalnum(static_cast<unsigned char>((*xml)[end])) || (*xml)[end] == '_' ||
+              (*xml)[end] == '-' || (*xml)[end] == ':' || (*xml)[end] == '.')) {
+        ++end;
+      }
+      std::string close_name = xml->substr(scan + 2, end - (scan + 2));
+      const size_t close_colon = close_name.rfind(':');
+      if (close_colon != std::string::npos)
+        close_name = close_name.substr(close_colon + 1);
+      if (close_name == tag) {
+        xml->replace(open_end + 1, scan - open_end - 1, value);
+        return true;
+      }
+      scan = end;
+    }
+    return false;
+  }
+  return false;
+}
+
 std::string Trim(std::string value) {
   while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
     value.erase(value.begin());
@@ -606,6 +719,118 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
     info->profiles.push_back(std::move(profile));
   }
   return !info->profiles.empty();
+}
+
+std::string ResolveMediaService(const std::string& device, const std::string& security,
+                                std::string* error) {
+  const std::string capabilities = SoapCall(
+      device, security,
+      "<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>", error);
+  if (!capabilities.empty()) {
+    const std::string media = ExtractTag(capabilities, "Media");
+    const std::string xaddr = Trim(ExtractTag(media, "XAddr"));
+    if (!xaddr.empty())
+      return xaddr;
+  }
+  return device;
+}
+
+bool GetOnvifEncoderConfig(const std::string& host, int port, const std::string& username,
+                           const std::string& password, OnvifEncoderConfig* config,
+                           std::string* error) {
+  if (!EnsureWinsock(error))
+    return false;
+  const std::string device =
+      "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
+  const std::string security = SecurityHeader(username, password);
+  const std::string media = ResolveMediaService(device, security, error);
+  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", error);
+  if (xml.empty())
+    return false;
+  XmlBlock block;
+  if (!ExtractFirstBlock(xml, "Configurations", &block)) {
+    if (error)
+      *error = "the camera returned no video encoder configuration";
+    return false;
+  }
+  config->token = AttributeValue(block.open_tag, "token");
+  config->encoding = Trim(ExtractTag(block.inner, "Encoding"));
+  config->width = std::atoi(Trim(ExtractTag(block.inner, "Width")).c_str());
+  config->height = std::atoi(Trim(ExtractTag(block.inner, "Height")).c_str());
+  config->fps = std::atoi(Trim(ExtractTag(block.inner, "FrameRateLimit")).c_str());
+  config->bitrate_kbps = std::atoi(Trim(ExtractTag(block.inner, "BitrateLimit")).c_str());
+  config->quality = std::atoi(Trim(ExtractTag(block.inner, "Quality")).c_str());
+  if (config->token.empty()) {
+    if (error)
+      *error = "the camera encoder configuration has no token";
+    return false;
+  }
+  return true;
+}
+
+bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string& username,
+                           const std::string& password, const OnvifEncoderConfig& config,
+                           std::string* error) {
+  if (!EnsureWinsock(error))
+    return false;
+  const std::string device =
+      "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
+  const std::string security = SecurityHeader(username, password);
+  const std::string media = ResolveMediaService(device, security, error);
+  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", error);
+  if (xml.empty())
+    return false;
+  XmlBlock block;
+  if (!ExtractFirstBlock(xml, "Configurations", &block)) {
+    if (error)
+      *error = "the camera returned no video encoder configuration";
+    return false;
+  }
+  const std::string token =
+      config.token.empty() ? AttributeValue(block.open_tag, "token") : config.token;
+  if (token.empty()) {
+    if (error)
+      *error = "the camera encoder configuration has no token";
+    return false;
+  }
+  std::string inner = block.inner;
+  if (!config.encoding.empty() && !ReplaceTagValue(&inner, "Encoding", config.encoding)) {
+    if (error)
+      *error = "the camera does not expose the Encoding field";
+    return false;
+  }
+  if (config.width > 0 && !ReplaceTagValue(&inner, "Width", std::to_string(config.width))) {
+    if (error)
+      *error = "the camera does not expose the Width field";
+    return false;
+  }
+  if (config.height > 0 && !ReplaceTagValue(&inner, "Height", std::to_string(config.height))) {
+    if (error)
+      *error = "the camera does not expose the Height field";
+    return false;
+  }
+  if (config.fps > 0 && !ReplaceTagValue(&inner, "FrameRateLimit", std::to_string(config.fps))) {
+    if (error)
+      *error = "the camera does not expose the FrameRateLimit field";
+    return false;
+  }
+  if (config.bitrate_kbps > 0 &&
+      !ReplaceTagValue(&inner, "BitrateLimit", std::to_string(config.bitrate_kbps))) {
+    if (error)
+      *error = "the camera does not expose the BitrateLimit field";
+    return false;
+  }
+  if (config.quality > 0 && !ReplaceTagValue(&inner, "Quality", std::to_string(config.quality))) {
+    if (error)
+      *error = "the camera does not expose the Quality field";
+    return false;
+  }
+  const std::string body = "<trt:SetVideoEncoderConfiguration><trt:Configuration token=\"" +
+                           XmlEscape(token) + "\">" + inner +
+                           "</trt:Configuration><trt:ForcePersistence>true</trt:ForcePersistence>"
+                           "</trt:SetVideoEncoderConfiguration>";
+  const std::string response = SoapCall(media, security, body, error);
+  return !response.empty();
 }
 
 bool ResolveOnvifEventUrl(const std::string& host, int port, const std::string& username,

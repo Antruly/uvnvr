@@ -56,6 +56,26 @@ bool PullOnvifEvents(const std::string& address, const std::string& username,
                      const std::string& password, int timeout_ms, std::vector<OnvifEvent>* events,
                      std::string* error);
 
+struct OnvifEncoderConfig {
+  std::string token;
+  std::string encoding;
+  int width = 0;
+  int height = 0;
+  int fps = 0;
+  int bitrate_kbps = 0;
+  int quality = 0;
+};
+
+// Reads the first video encoder configuration through the ONVIF media service.
+bool GetOnvifEncoderConfig(const std::string& host, int port, const std::string& username,
+                           const std::string& password, OnvifEncoderConfig* config,
+                           std::string* error);
+
+// Applies encoding, resolution, frame rate and bitrate to that configuration.
+bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string& username,
+                           const std::string& password, const OnvifEncoderConfig& config,
+                           std::string* error);
+
 // Sets the camera clock through the ONVIF device service (Manual UTC time).
 bool SetOnvifTime(const std::string& host, int port, const std::string& username,
                   const std::string& password, int64_t epoch_ms, std::string* error);
