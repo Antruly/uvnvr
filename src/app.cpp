@@ -487,12 +487,12 @@ ByteRange ParseByteRange(const std::string& header, uint64_t size) {
 
 const std::vector<std::string>& AllPermissions() {
   static const std::vector<std::string> kPermissions = {
-      "dashboard.view", "preview.view",  "playback.view", "playback.download", "channel.view",
-      "channel.create", "channel.delete", "channel.manage", "plan.view",       "plan.manage",
-      "storage.view",   "storage.manage",
-      "alert.view",     "alert.manage",  "user.view",     "user.manage",       "log.view",
-      "system.view",    "system.manage", "api.access",    "api.snapshot",      "api.stream",
-      "api.download",   "api.alerts",    "rtsp.access",   "maintenance",
+      "dashboard.view", "preview.view",   "playback.view",  "playback.download", "channel.view",
+      "channel.create", "channel.delete", "channel.manage", "plan.view",         "plan.manage",
+      "storage.view",   "storage.manage", "alert.view",     "alert.manage",      "user.view",
+      "user.manage",    "log.view",       "system.view",    "system.manage",     "api.access",
+      "api.snapshot",   "api.stream",     "api.download",   "api.alerts",        "rtsp.access",
+      "maintenance",
   };
   return kPermissions;
 }
@@ -571,10 +571,9 @@ std::vector<std::string> EffectiveTokenPermissions(const std::vector<std::string
   }
   std::vector<std::string> effective;
   for (const std::string& permission : expanded) {
-    const bool allowed =
-        std::any_of(role.begin(), role.end(), [&](const std::string& granted) {
-          return PermissionImplies(granted, permission);
-        });
+    const bool allowed = std::any_of(role.begin(), role.end(), [&](const std::string& granted) {
+      return PermissionImplies(granted, permission);
+    });
     if (allowed && std::find(effective.begin(), effective.end(), permission) == effective.end())
       effective.push_back(permission);
   }
@@ -3157,10 +3156,9 @@ void App::RegisterProtectedRoutes() {
                   uvcpp::uvcpp_db_params params;
                   params.add(user.id);
                   std::string error;
-                  if (!Query(
-                          "SELECT id, name, created_at, expires_at, last_used_at, scopes_json "
-                          "FROM api_tokens WHERE user_id = ? ORDER BY id",
-                          params, &table, &error)) {
+                  if (!Query("SELECT id, name, created_at, expires_at, last_used_at, scopes_json "
+                             "FROM api_tokens WHERE user_id = ? ORDER BY id",
+                             params, &table, &error)) {
                     return;
                   }
                   for (size_t i = 0; i < table.rows().size(); ++i) {
@@ -3260,14 +3258,12 @@ void App::RegisterProtectedRoutes() {
                     return;
                   }
                   const int64_t id = new_id.to_int64();
-                  Audit("api", "info", user.username, ip, ua, "token", std::to_string(id),
-                        "create", "success", "",
+                  Audit("api", "info", user.username, ip, ua, "token", std::to_string(id), "create",
+                        "success", "",
                         json{{"name", name}, {"expiresInDays", days}, {"scopes", scopes}}.dump());
                   op->status = 201;
-                  op->data = json{{"id", id},
-                                  {"name", name},
-                                  {"token", raw_token},
-                                  {"scopes", scopes}};
+                  op->data =
+                      json{{"id", id}, {"name", name}, {"token", raw_token}, {"scopes", scopes}};
                 },
                 [op, &resp, next] {
                   SendOp(resp, *op);
@@ -3781,21 +3777,16 @@ json App::SyncCameraTimes(int64_t epoch_ms) {
     }
     const int port = channel.protocol == "onvif" && channel.port > 0 ? channel.port : 80;
     std::string camera_error;
-    const bool ok = SetOnvifTime(channel.host, port, channel.username, password, epoch_ms,
-                                 &camera_error);
+    const bool ok =
+        SetOnvifTime(channel.host, port, channel.username, password, epoch_ms, &camera_error);
     if (ok)
       ++synced;
     else
       ++failed;
-    cameras.push_back(json{{"channelId", channel.id},
-                           {"name", channel.name},
-                           {"ok", ok},
-                           {"error", camera_error}});
+    cameras.push_back(json{
+        {"channelId", channel.id}, {"name", channel.name}, {"ok", ok}, {"error", camera_error}});
   }
-  return json{{"synced", synced},
-              {"failed", failed},
-              {"skipped", skipped},
-              {"cameras", cameras}};
+  return json{{"synced", synced}, {"failed", failed}, {"skipped", skipped}, {"cameras", cameras}};
 }
 
 bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
@@ -6416,10 +6407,9 @@ void App::RegisterSystemRoutes() {
                   const bool applied = ApplySystemTime(epoch_ms, &error);
                   const json cameras = SyncCameraTimes(epoch_ms);
                   Audit("system", "warning", actor.username, "", "", "system", "", "time_sync",
-                        applied ? "success" : "failure", "", json{{"epochMs", epoch_ms},
-                                                                    {"applyError", error},
-                                                                    {"cameras", cameras}}
-                                                                   .dump());
+                        applied ? "success" : "failure", "",
+                        json{{"epochMs", epoch_ms}, {"applyError", error}, {"cameras", cameras}}
+                            .dump());
                   op->data = json{{"ok", true},
                                   {"serverMs", epoch_ms},
                                   {"serverTimeApplied", applied},
@@ -6433,46 +6423,45 @@ void App::RegisterSystemRoutes() {
           },
           "system.manage"));
 
-  web_.post(
-      "/api/v1/system/ntp/sync",
-      Protected(
-          [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
-                 uvcpp::uvcpp_web_next next) {
-            auto op = std::make_shared<OpResult>();
-            RunWork(
-                [this, op] {
-                  const std::string server = GetSetting("system.ntp_server", "pool.ntp.org");
-                  int64_t offset = 0;
-                  std::string ntp_error;
-                  if (!QueryNtpOffset(server, &offset, &ntp_error)) {
-                    op->ok = false;
-                    op->status = 502;
-                    op->code = "ntp_failed";
-                    op->message = ntp_error;
-                    return;
-                  }
-                  const int64_t target_ms = NowSeconds() * 1000 + offset;
-                  std::string apply_error;
-                  const bool applied = ApplySystemTime(target_ms, &apply_error);
-                  const json cameras = SyncCameraTimes(target_ms);
-                  std::string db_error;
-                  SetSetting("system.ntp_last_offset_ms", std::to_string(offset), &db_error);
-                  SetSetting("system.ntp_last_sync", std::to_string(NowSeconds()), &db_error);
-                  Audit("system", "warning", "system", "", "", "system", "", "ntp_sync",
-                        applied ? "success" : "failure", "",
-                        json{{"offsetMs", offset}, {"applyError", apply_error}}.dump());
-                  op->data = json{{"offsetMs", offset},
-                                  {"serverMs", target_ms},
-                                  {"applied", applied},
-                                  {"applyError", apply_error},
-                                  {"cameras", cameras}};
+  web_.post("/api/v1/system/ntp/sync",
+            Protected(
+                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, op] {
+                        const std::string server = GetSetting("system.ntp_server", "pool.ntp.org");
+                        int64_t offset = 0;
+                        std::string ntp_error;
+                        if (!QueryNtpOffset(server, &offset, &ntp_error)) {
+                          op->ok = false;
+                          op->status = 502;
+                          op->code = "ntp_failed";
+                          op->message = ntp_error;
+                          return;
+                        }
+                        const int64_t target_ms = NowSeconds() * 1000 + offset;
+                        std::string apply_error;
+                        const bool applied = ApplySystemTime(target_ms, &apply_error);
+                        const json cameras = SyncCameraTimes(target_ms);
+                        std::string db_error;
+                        SetSetting("system.ntp_last_offset_ms", std::to_string(offset), &db_error);
+                        SetSetting("system.ntp_last_sync", std::to_string(NowSeconds()), &db_error);
+                        Audit("system", "warning", "system", "", "", "system", "", "ntp_sync",
+                              applied ? "success" : "failure", "",
+                              json{{"offsetMs", offset}, {"applyError", apply_error}}.dump());
+                        op->data = json{{"offsetMs", offset},
+                                        {"serverMs", target_ms},
+                                        {"applied", applied},
+                                        {"applyError", apply_error},
+                                        {"cameras", cameras}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
                 },
-                [op, &resp, next] {
-                  SendOp(resp, *op);
-                  next();
-                });
-          },
-          "system.manage"));
+                "system.manage"));
 }
 
 } // namespace uvnvr

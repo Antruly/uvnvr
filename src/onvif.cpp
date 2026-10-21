@@ -710,8 +710,7 @@ bool SetOnvifTime(const std::string& host, int port, const std::string& username
                 tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
   const std::string service =
       "http://" + host + ":" + std::to_string(port > 0 ? port : 80) + "/onvif/device_service";
-  const std::string response =
-      SoapCall(service, SecurityHeader(username, password), body, error);
+  const std::string response = SoapCall(service, SecurityHeader(username, password), body, error);
   if (response.empty())
     return false;
   if (response.find("Fault") != std::string::npos ||

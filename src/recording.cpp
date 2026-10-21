@@ -229,8 +229,8 @@ struct RecordingService::Impl {
       std::error_code ec;
       std::filesystem::rename(segment.part_path, segment.path, ec);
       if (ec) {
-        std::fprintf(stderr, "[recording] cannot finalize %s: %s\n",
-                     segment.part_path.c_str(), ec.message().c_str());
+        std::fprintf(stderr, "[recording] cannot finalize %s: %s\n", segment.part_path.c_str(),
+                     ec.message().c_str());
         std::filesystem::remove(segment.part_path, ec);
         has_segment = false;
         return;
@@ -484,10 +484,10 @@ struct RecordingService::Impl {
           uvcpp::uvcpp_db_params params;
           params.add(id);
           params.add(cutoff);
-          if (!uvcpp::uvcpp_db_ok(db->query(
-                  "SELECT id, path FROM recordings WHERE volume_id = ? AND end_ms < ? "
-                  "ORDER BY start_ms ASC LIMIT 100",
-                  params, &expired)) ||
+          if (!uvcpp::uvcpp_db_ok(
+                  db->query("SELECT id, path FROM recordings WHERE volume_id = ? AND end_ms < ? "
+                            "ORDER BY start_ms ASC LIMIT 100",
+                            params, &expired)) ||
               expired.rows().empty()) {
             break;
           }

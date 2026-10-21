@@ -42,3 +42,5 @@ desktop.ini
 /coverage/
 /test-results/
 /playwright-report/
+auto.crt
+auto.key
