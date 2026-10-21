@@ -6,6 +6,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($InstallDir) {
+    # The MSI passes [INSTALLFOLDER]. so the trailing backslash cannot escape
+    # the closing quote; normalize it back to the real directory.
+    $InstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+}
 $dataRoot = Join-Path $env:ProgramData 'UvNVR'
 $configPath = Join-Path $dataRoot 'uvnvr.json'
 $desktopUrl = Join-Path $env:PUBLIC 'Desktop\UvNVR Web UI.url'

@@ -37,7 +37,7 @@
 
     <CustomAction Id="Configure.SetProperty"
                   Property="Configure"
-                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#ConfigureScript]&quot; -HttpPort [HTTPPORT] -RtspPort [RTSPPORT] -InstallDir &quot;[INSTALLFOLDER]&quot;" />
+                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#ConfigureScript]&quot; -HttpPort [HTTPPORT] -RtspPort [RTSPPORT] -InstallDir &quot;[INSTALLFOLDER].&quot;" />
     <CustomAction Id="Configure"
                   BinaryKey="WixCA"
                   DllEntry="WixQuietExec"
