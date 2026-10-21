@@ -44,6 +44,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'RTSP: use the full URL, e.g. rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101.',
         'Hikvision/Dahua: leave the URL empty and fill host, port and credentials; the path template is generated.',
         'Main and sub streams are independent. Sub stream is recommended for multi-cell preview.',
+        'Use Groups to build a channel tree; the Live preview rail shows the same groups and can collapse them.',
       ],
     },
     {
@@ -137,6 +138,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'RTSP：填写完整 URL，例如 rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101。',
         '海康/大华：URL 可留空，填写 IP、端口和凭据后由系统生成路径模板。',
         '主码流与子码流独立配置；多画面预览建议使用子码流。',
+        '使用“通道分组”构建通道树；实时预览左侧会按分组展示并支持折叠。',
       ],
     },
     {

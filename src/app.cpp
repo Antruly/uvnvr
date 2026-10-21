@@ -325,6 +325,7 @@ int64_t TableInt(const uvcpp::uvcpp_db_table& table, size_t row, const std::stri
 
 void FillChannelRow(const uvcpp::uvcpp_db_table& table, size_t row, ChannelRow* channel) {
   channel->id = TableInt(table, row, "id");
+  channel->group_id = TableInt(table, row, "group_id");
   channel->name = TableText(table, row, "name");
   channel->protocol = TableText(table, row, "protocol");
   channel->host = TableText(table, row, "host");
@@ -667,6 +668,28 @@ bool App::Migrate(std::string* error) {
       "last_offline_at INTEGER NOT NULL DEFAULT 0,"
       "created_at INTEGER NOT NULL,"
       "updated_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS channel_groups ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "name TEXT NOT NULL,"
+      "parent_id INTEGER NOT NULL DEFAULT 0,"
+      "sort INTEGER NOT NULL DEFAULT 0,"
+      "created_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS channel_group_members ("
+      "channel_id INTEGER PRIMARY KEY,"
+      "group_id INTEGER NOT NULL)",
+      "CREATE INDEX IF NOT EXISTS idx_channel_groups_parent "
+      "ON channel_groups(parent_id, sort)",
+      "CREATE INDEX IF NOT EXISTS idx_channel_group_members_group "
+      "ON channel_group_members(group_id)",
+      "CREATE TABLE IF NOT EXISTS layouts ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "user_id INTEGER NOT NULL,"
+      "name TEXT NOT NULL,"
+      "grid_json TEXT NOT NULL,"
+      "is_default INTEGER NOT NULL DEFAULT 0,"
+      "created_at INTEGER NOT NULL,"
+      "updated_at INTEGER NOT NULL)",
+      "CREATE INDEX IF NOT EXISTS idx_layouts_user ON layouts(user_id, updated_at)",
       "CREATE TABLE IF NOT EXISTS record_plans ("
       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
       "channel_id INTEGER NOT NULL,"
@@ -2274,6 +2297,8 @@ void SendOp(uvcpp::uvcpp_web_response& resp, const OpResult& result) {
 void App::RegisterProtectedRoutes() {
   RegisterCoreRoutes();
   RegisterChannelRoutes();
+  RegisterGroupRoutes();
+  RegisterLayoutRoutes();
   RegisterOnvifRoutes();
   RegisterStreamRoutes();
   RegisterRecordingRoutes();
@@ -3336,7 +3361,10 @@ bool App::LoadChannel(int64_t id, ChannelRow* out, std::string* error) {
   uvcpp::uvcpp_db_table table;
   uvcpp::uvcpp_db_params params;
   params.add(id);
-  if (!Query("SELECT * FROM channels WHERE id = ?", params, &table, error) || table.empty()) {
+  if (!Query("SELECT c.*, COALESCE(m.group_id, 0) AS group_id FROM channels c "
+             "LEFT JOIN channel_group_members m ON m.channel_id = c.id WHERE c.id = ?",
+             params, &table, error) ||
+      table.empty()) {
     return false;
   }
   FillChannelRow(table, 0, out);
@@ -3346,7 +3374,10 @@ bool App::LoadChannel(int64_t id, ChannelRow* out, std::string* error) {
 std::vector<ChannelRow> App::LoadChannels(std::string* error) {
   std::vector<ChannelRow> result;
   uvcpp::uvcpp_db_table table;
-  if (!Query("SELECT * FROM channels ORDER BY name COLLATE NOCASE, id", {}, &table, error)) {
+  if (!Query("SELECT c.*, COALESCE(m.group_id, 0) AS group_id FROM channels c "
+             "LEFT JOIN channel_group_members m ON m.channel_id = c.id "
+             "ORDER BY c.name COLLATE NOCASE, c.id",
+             {}, &table, error)) {
     return result;
   }
   result.reserve(table.rows().size());
@@ -3367,6 +3398,7 @@ json App::ChannelJson(const ChannelRow& channel) const {
     watermark = json::object();
   return json{
       {"id", channel.id},
+      {"groupId", channel.group_id},
       {"name", channel.name},
       {"protocol", channel.protocol},
       {"host", channel.host},
@@ -3632,6 +3664,7 @@ void App::RegisterChannelRoutes() {
             const std::string sub_url = JsonString(body, "subUrl");
             const bool sub_enabled = JsonBool(body, "subEnabled", !sub_url.empty());
             const bool enabled = JsonBool(body, "enabled", true);
+            const int64_t group_id = JsonInt(body, "groupId", 0);
             const std::string brand = JsonString(body, "brand");
             const json media = body.contains("media") && body["media"].is_object() ? body["media"]
                                                                                    : json::object();
@@ -3659,7 +3692,22 @@ void App::RegisterChannelRoutes() {
             auto op = std::make_shared<OpResult>();
             RunWork(
                 [this, name, protocol, host, port, username, password, main_url, sub_url,
-                 sub_enabled, enabled, brand, media, watermark, actor, ip, ua, op] {
+                 sub_enabled, enabled, group_id, brand, media, watermark, actor, ip, ua, op] {
+                  if (group_id > 0) {
+                    uvcpp::uvcpp_db_table group_table;
+                    uvcpp::uvcpp_db_params group_params;
+                    group_params.add(group_id);
+                    std::string group_error;
+                    if (!Query("SELECT id FROM channel_groups WHERE id = ?", group_params,
+                               &group_table, &group_error) ||
+                        group_table.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_group";
+                      op->message = "the channel group does not exist";
+                      return;
+                    }
+                  }
                   std::string encrypt_error;
                   const std::string password_enc = EncryptSecret(password, &encrypt_error);
                   if (!password.empty() && password_enc.empty()) {
@@ -3701,10 +3749,24 @@ void App::RegisterChannelRoutes() {
                     return;
                   }
                   const int64_t id = new_id.to_int64();
+                  if (group_id > 0) {
+                    uvcpp::uvcpp_db_params member;
+                    member.add(id);
+                    member.add(group_id);
+                    if (!Exec("INSERT OR REPLACE INTO channel_group_members(channel_id, group_id) "
+                              "VALUES(?, ?)",
+                              member, nullptr, &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = "the channel group could not be assigned";
+                      return;
+                    }
+                  }
                   Audit("channel", "info", actor.username, ip, ua, "channel", std::to_string(id),
                         "create", "success", "", json{{"name", name}}.dump());
                   op->status = 201;
-                  op->data = json{{"id", id}, {"name", name}};
+                  op->data = json{{"id", id}, {"name", name}, {"groupId", group_id}};
                 },
                 [this, op, &resp, next] {
                   if (op->ok && op->data.contains("id")) {
@@ -3780,12 +3842,30 @@ void App::RegisterChannelRoutes() {
                       body.contains("watermark") && body["watermark"].is_object()
                           ? body["watermark"].dump()
                           : existing.watermark_json;
+                  const int64_t group_id = body.contains("groupId")
+                                               ? JsonInt(body, "groupId", existing.group_id)
+                                               : existing.group_id;
                   if (name.empty() || name.size() > 64 || port < 1 || port > 65535) {
                     op->ok = false;
                     op->status = 400;
                     op->code = "invalid_channel";
                     op->message = "invalid name or port";
                     return;
+                  }
+                  if (group_id > 0) {
+                    uvcpp::uvcpp_db_table group_table;
+                    uvcpp::uvcpp_db_params group_params;
+                    group_params.add(group_id);
+                    std::string group_error;
+                    if (!Query("SELECT id FROM channel_groups WHERE id = ?", group_params,
+                               &group_table, &group_error) ||
+                        group_table.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_group";
+                      op->message = "the channel group does not exist";
+                      return;
+                    }
                   }
                   std::string password_enc = existing.password_enc;
                   if (has_password && !password.empty()) {
@@ -3826,10 +3906,28 @@ void App::RegisterChannelRoutes() {
                     op->message = "the channel could not be updated";
                     return;
                   }
+                  uvcpp::uvcpp_db_params member_delete;
+                  member_delete.add(channel_id);
+                  Exec("DELETE FROM channel_group_members WHERE channel_id = ?", member_delete,
+                       nullptr, &error);
+                  if (group_id > 0) {
+                    uvcpp::uvcpp_db_params member;
+                    member.add(channel_id);
+                    member.add(group_id);
+                    if (!Exec("INSERT OR REPLACE INTO channel_group_members(channel_id, group_id) "
+                              "VALUES(?, ?)",
+                              member, nullptr, &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = "the channel group could not be assigned";
+                      return;
+                    }
+                  }
                   Audit("channel", "info", actor.username, ip, ua, "channel",
                         std::to_string(channel_id), "update", "success", "",
                         json{{"name", name}}.dump());
-                  op->data = json{{"id", channel_id}, {"name", name}};
+                  op->data = json{{"id", channel_id}, {"name", name}, {"groupId", group_id}};
                 },
                 [this, op, channel_id, &resp, next] {
                   if (op->ok)
@@ -3870,6 +3968,8 @@ void App::RegisterChannelRoutes() {
                        params.add(channel_id);
                        Exec("DELETE FROM record_plans WHERE channel_id = ?", params, nullptr,
                             &error);
+                       Exec("DELETE FROM channel_group_members WHERE channel_id = ?", params,
+                            nullptr, &error);
                        if (!Exec("DELETE FROM channels WHERE id = ?", params, nullptr, &error)) {
                          op->ok = false;
                          op->status = 500;
@@ -4033,6 +4133,544 @@ void App::RegisterChannelRoutes() {
                       });
                 },
                 "channel.manage"));
+}
+
+void App::RegisterGroupRoutes() {
+  web_.get("/api/v1/channel-groups",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, op] {
+                       uvcpp::uvcpp_db_table table;
+                       std::string error;
+                       if (!Query("SELECT g.id, g.name, g.parent_id, g.sort, "
+                                  "COUNT(m.channel_id) AS channels "
+                                  "FROM channel_groups g LEFT JOIN channel_group_members m "
+                                  "ON m.group_id = g.id GROUP BY g.id "
+                                  "ORDER BY g.sort, g.name COLLATE NOCASE",
+                                  {}, &table, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = error;
+                         return;
+                       }
+                       json items = json::array();
+                       for (size_t row = 0; row < table.rows().size(); ++row) {
+                         items.push_back(json{
+                             {"id", TableInt(table, row, "id")},
+                             {"name", TableText(table, row, "name")},
+                             {"parentId", TableInt(table, row, "parent_id")},
+                             {"sort", TableInt(table, row, "sort")},
+                             {"channels", TableInt(table, row, "channels")},
+                         });
+                       }
+                       op->data = std::move(items);
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "channel.view"));
+
+  web_.post(
+      "/api/v1/channel-groups",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const std::string name = JsonString(body, "name");
+            const int64_t parent_id = JsonInt(body, "parentId", 0);
+            const int64_t sort = JsonInt(body, "sort", 0);
+            if (name.empty() || name.size() > 64) {
+              SendError(resp, 400, "invalid_name", "group name is required (max 64 characters)");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, name, parent_id, sort, actor, ip, ua, op] {
+                  std::string error;
+                  if (parent_id > 0) {
+                    uvcpp::uvcpp_db_table parent;
+                    uvcpp::uvcpp_db_params params;
+                    params.add(parent_id);
+                    if (!Query("SELECT id FROM channel_groups WHERE id = ?", params, &parent,
+                               &error) ||
+                        parent.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_parent";
+                      op->message = "the parent group does not exist";
+                      return;
+                    }
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(name);
+                  params.add(parent_id);
+                  params.add(sort);
+                  params.add(NowSeconds());
+                  uvcpp::uvcpp_db_value new_id;
+                  if (!uvcpp::uvcpp_db_ok(db_.insert(
+                          "INSERT INTO channel_groups(name, parent_id, sort, created_at) "
+                          "VALUES(?, ?, ?, ?)",
+                          params, &new_id))) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the group could not be created";
+                    return;
+                  }
+                  const int64_t id = new_id.to_int64();
+                  Audit("channel", "info", actor.username, ip, ua, "channel_group",
+                        std::to_string(id), "create", "success", "", json{{"name", name}}.dump());
+                  op->status = 201;
+                  op->data = json{{"id", id},
+                                  {"name", name},
+                                  {"parentId", parent_id},
+                                  {"sort", sort},
+                                  {"channels", 0}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "channel.manage"));
+
+  web_.put(
+      "/api/v1/channel-groups/:id",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string* id_param = req.param("id");
+            int64_t group_id = 0;
+            if (!ParseIntParam(id_param, &group_id) || group_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid group id");
+              next();
+              return;
+            }
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, group_id, body, actor, ip, ua, op] {
+                  uvcpp::uvcpp_db_table current;
+                  uvcpp::uvcpp_db_params current_params;
+                  current_params.add(group_id);
+                  std::string error;
+                  if (!Query("SELECT id, name, parent_id, sort FROM channel_groups WHERE id = ?",
+                             current_params, &current, &error) ||
+                      current.empty()) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "group not found";
+                    return;
+                  }
+                  const std::string name = body.contains("name") ? JsonString(body, "name")
+                                                                 : TableText(current, 0, "name");
+                  const int64_t parent_id = body.contains("parentId")
+                                                ? JsonInt(body, "parentId", 0)
+                                                : TableInt(current, 0, "parent_id");
+                  const int64_t sort = body.contains("sort") ? JsonInt(body, "sort", 0)
+                                                             : TableInt(current, 0, "sort");
+                  if (name.empty() || name.size() > 64) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "invalid_name";
+                    op->message = "group name is required (max 64 characters)";
+                    return;
+                  }
+                  if (parent_id == group_id) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "invalid_parent";
+                    op->message = "a group cannot be its own parent";
+                    return;
+                  }
+                  int64_t cursor = parent_id;
+                  for (int depth = 0; depth < 64 && cursor > 0; ++depth) {
+                    if (cursor == group_id) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_parent";
+                      op->message = "the parent would create a cycle";
+                      return;
+                    }
+                    uvcpp::uvcpp_db_table parent;
+                    uvcpp::uvcpp_db_params parent_params;
+                    parent_params.add(cursor);
+                    if (!Query("SELECT parent_id FROM channel_groups WHERE id = ?", parent_params,
+                               &parent, &error) ||
+                        parent.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_parent";
+                      op->message = "the parent group does not exist";
+                      return;
+                    }
+                    cursor = TableInt(parent, 0, "parent_id");
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(name);
+                  params.add(parent_id);
+                  params.add(sort);
+                  params.add(group_id);
+                  if (!Exec("UPDATE channel_groups SET name = ?, parent_id = ?, sort = ? "
+                            "WHERE id = ?",
+                            params, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the group could not be updated";
+                    return;
+                  }
+                  Audit("channel", "info", actor.username, ip, ua, "channel_group",
+                        std::to_string(group_id), "update", "success", "",
+                        json{{"name", name}}.dump());
+                  op->data = json{
+                      {"id", group_id}, {"name", name}, {"parentId", parent_id}, {"sort", sort}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "channel.manage"));
+
+  web_.del(
+      "/api/v1/channel-groups/:id",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string* id_param = req.param("id");
+            int64_t group_id = 0;
+            if (!ParseIntParam(id_param, &group_id) || group_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid group id");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, group_id, actor, ip, ua, op] {
+                  uvcpp::uvcpp_db_table current;
+                  uvcpp::uvcpp_db_params current_params;
+                  current_params.add(group_id);
+                  std::string error;
+                  if (!Query("SELECT id, name, parent_id FROM channel_groups WHERE id = ?",
+                             current_params, &current, &error) ||
+                      current.empty()) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "group not found";
+                    return;
+                  }
+                  const int64_t parent_id = TableInt(current, 0, "parent_id");
+                  uvcpp::uvcpp_db_params params;
+                  params.add(group_id);
+                  Exec("DELETE FROM channel_group_members WHERE group_id = ?", params, nullptr,
+                       &error);
+                  uvcpp::uvcpp_db_params reparent;
+                  reparent.add(parent_id);
+                  reparent.add(group_id);
+                  Exec("UPDATE channel_groups SET parent_id = ? WHERE parent_id = ?", reparent,
+                       nullptr, &error);
+                  uvcpp::uvcpp_db_params remove;
+                  remove.add(group_id);
+                  if (!Exec("DELETE FROM channel_groups WHERE id = ?", remove, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the group could not be deleted";
+                    return;
+                  }
+                  Audit("channel", "warning", actor.username, ip, ua, "channel_group",
+                        std::to_string(group_id), "delete", "success", "",
+                        json{{"name", TableText(current, 0, "name")}}.dump());
+                  op->data = json{{"ok", true}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "channel.manage"));
+}
+
+void App::RegisterLayoutRoutes() {
+  web_.get("/api/v1/layouts",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const UserContext user = UserFromRequest(req);
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, user, op] {
+                       uvcpp::uvcpp_db_table table;
+                       uvcpp::uvcpp_db_params params;
+                       params.add(user.id);
+                       std::string error;
+                       if (!Query("SELECT id, name, grid_json, is_default, created_at, updated_at "
+                                  "FROM layouts WHERE user_id = ? "
+                                  "ORDER BY is_default DESC, updated_at DESC",
+                                  params, &table, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = error;
+                         return;
+                       }
+                       json items = json::array();
+                       for (size_t row = 0; row < table.rows().size(); ++row) {
+                         json grid =
+                             json::parse(TableText(table, row, "grid_json"), nullptr, false);
+                         if (grid.is_discarded() || !grid.is_object())
+                           grid = json::object();
+                         items.push_back(json{
+                             {"id", TableInt(table, row, "id")},
+                             {"name", TableText(table, row, "name")},
+                             {"grid", grid},
+                             {"isDefault", TableInt(table, row, "is_default") != 0},
+                             {"createdAt", TableInt(table, row, "created_at")},
+                             {"updatedAt", TableInt(table, row, "updated_at")},
+                         });
+                       }
+                       op->data = std::move(items);
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "preview.view"));
+
+  web_.post(
+      "/api/v1/layouts",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object() || !body.contains("grid") ||
+                !body["grid"].is_object()) {
+              SendError(resp, 400, "invalid_json", "name and grid are required");
+              next();
+              return;
+            }
+            const std::string name = JsonString(body, "name");
+            const json grid = body["grid"];
+            const bool is_default = JsonBool(body, "isDefault", false);
+            if (name.empty() || name.size() > 64 || grid.dump().size() > 64 * 1024) {
+              SendError(resp, 400, "invalid_layout",
+                        "layout name (max 64) or grid (max 64 KiB) is invalid");
+              next();
+              return;
+            }
+            const UserContext user = UserFromRequest(req);
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, user, name, grid, is_default, op] {
+                  uvcpp::uvcpp_db_table count;
+                  uvcpp::uvcpp_db_params count_params;
+                  count_params.add(user.id);
+                  std::string error;
+                  if (!Query("SELECT COUNT(*) AS n FROM layouts WHERE user_id = ?", count_params,
+                             &count, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  const int64_t existing = count.empty() ? 0 : TableInt(count, 0, "n");
+                  if (existing >= 20) {
+                    op->ok = false;
+                    op->status = 409;
+                    op->code = "too_many_layouts";
+                    op->message = "up to 20 layouts are allowed per user";
+                    return;
+                  }
+                  const bool make_default = is_default || existing == 0;
+                  if (make_default) {
+                    uvcpp::uvcpp_db_params clear;
+                    clear.add(user.id);
+                    Exec("UPDATE layouts SET is_default = 0 WHERE user_id = ?", clear, nullptr,
+                         &error);
+                  }
+                  uvcpp::uvcpp_db_params params;
+                  params.add(user.id);
+                  params.add(name);
+                  params.add(grid.dump());
+                  params.add(make_default ? 1 : 0);
+                  params.add(NowSeconds());
+                  params.add(NowSeconds());
+                  uvcpp::uvcpp_db_value new_id;
+                  if (!uvcpp::uvcpp_db_ok(db_.insert(
+                          "INSERT INTO layouts(user_id, name, grid_json, is_default, created_at, "
+                          "updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+                          params, &new_id))) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = "the layout could not be created";
+                    return;
+                  }
+                  op->status = 201;
+                  op->data = json{{"id", new_id.to_int64()},
+                                  {"name", name},
+                                  {"grid", grid},
+                                  {"isDefault", make_default}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "preview.view"));
+
+  web_.put("/api/v1/layouts/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t layout_id = 0;
+                 if (!ParseIntParam(id_param, &layout_id) || layout_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid layout id");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 const UserContext user = UserFromRequest(req);
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, user, layout_id, body, op] {
+                       uvcpp::uvcpp_db_table current;
+                       uvcpp::uvcpp_db_params current_params;
+                       current_params.add(layout_id);
+                       current_params.add(user.id);
+                       std::string error;
+                       if (!Query("SELECT id, name, grid_json, is_default FROM layouts "
+                                  "WHERE id = ? AND user_id = ?",
+                                  current_params, &current, &error) ||
+                           current.empty()) {
+                         op->ok = false;
+                         op->status = 404;
+                         op->code = "not_found";
+                         op->message = "layout not found";
+                         return;
+                       }
+                       const std::string name = body.contains("name")
+                                                    ? JsonString(body, "name")
+                                                    : TableText(current, 0, "name");
+                       const std::string grid_json =
+                           body.contains("grid") && body["grid"].is_object()
+                               ? body["grid"].dump()
+                               : TableText(current, 0, "grid_json");
+                       const bool is_default = body.contains("isDefault")
+                                                   ? JsonBool(body, "isDefault", false)
+                                                   : TableInt(current, 0, "is_default") != 0;
+                       if (name.empty() || name.size() > 64 || grid_json.size() > 64 * 1024) {
+                         op->ok = false;
+                         op->status = 400;
+                         op->code = "invalid_layout";
+                         op->message = "layout name (max 64) or grid (max 64 KiB) is invalid";
+                         return;
+                       }
+                       if (is_default) {
+                         uvcpp::uvcpp_db_params clear;
+                         clear.add(user.id);
+                         Exec("UPDATE layouts SET is_default = 0 WHERE user_id = ?", clear, nullptr,
+                              &error);
+                       }
+                       uvcpp::uvcpp_db_params params;
+                       params.add(name);
+                       params.add(grid_json);
+                       params.add(is_default ? 1 : 0);
+                       params.add(NowSeconds());
+                       params.add(layout_id);
+                       if (!Exec("UPDATE layouts SET name = ?, grid_json = ?, is_default = ?, "
+                                 "updated_at = ? WHERE id = ?",
+                                 params, nullptr, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = "the layout could not be updated";
+                         return;
+                       }
+                       op->data = json{{"id", layout_id},
+                                       {"name", name},
+                                       {"grid", json::parse(grid_json, nullptr, false)},
+                                       {"isDefault", is_default}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "preview.view"));
+
+  web_.del("/api/v1/layouts/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 const std::string* id_param = req.param("id");
+                 int64_t layout_id = 0;
+                 if (!ParseIntParam(id_param, &layout_id) || layout_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid layout id");
+                   next();
+                   return;
+                 }
+                 const UserContext user = UserFromRequest(req);
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, user, layout_id, op] {
+                       uvcpp::uvcpp_db_params params;
+                       params.add(layout_id);
+                       params.add(user.id);
+                       std::string error;
+                       if (!Exec("DELETE FROM layouts WHERE id = ? AND user_id = ?", params,
+                                 nullptr, &error)) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "database_error";
+                         op->message = "the layout could not be deleted";
+                         return;
+                       }
+                       op->data = json{{"ok", true}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "preview.view"));
 }
 
 void App::RegisterOnvifRoutes() {

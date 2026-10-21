@@ -1,7 +1,7 @@
 {
   "name": "uvnvr-frontend",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || ^24.11.0 || >=26.0.0"

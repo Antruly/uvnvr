@@ -8,6 +8,7 @@ defineOptions({ name: 'ChannelsView' })
 
 interface Channel {
   id: number
+  groupId: number
   name: string
   protocol: string
   host: string
@@ -51,8 +52,19 @@ interface OnvifProbeResult {
   profiles: OnvifProfile[]
 }
 
+interface ChannelGroup {
+  id: number
+  name: string
+  parentId: number
+  sort: number
+  channels: number
+}
+
 const { t } = useI18n()
 const channels = ref<Channel[]>([])
+const groups = ref<ChannelGroup[]>([])
+const groupsOpen = ref(false)
+const groupModal = reactive({ open: false, name: '', parentId: 0 })
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -60,6 +72,7 @@ const modal = reactive({
   open: false,
   mode: 'create' as 'create' | 'edit',
   id: 0,
+  groupId: 0,
   name: '',
   protocol: 'rtsp',
   host: '',
@@ -98,6 +111,10 @@ function flash(message: string) {
   }, 3500)
 }
 
+function groupName(id: number) {
+  return groups.value.find((group) => group.id === id)?.name ?? ''
+}
+
 function stateLabel(channel: Channel) {
   if (!channel.enabled) return t('common.disabled')
   if (channel.mainState === 'online') return t('preview.online')
@@ -128,7 +145,12 @@ function stateClass(channel: Channel) {
 async function load() {
   error.value = ''
   try {
-    channels.value = await api<Channel[]>('/api/v1/channels')
+    const [channelRows, groupRows] = await Promise.all([
+      api<Channel[]>('/api/v1/channels'),
+      api<ChannelGroup[]>('/api/v1/channel-groups'),
+    ])
+    channels.value = channelRows
+    groups.value = groupRows
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -141,6 +163,7 @@ function openCreate() {
     open: true,
     mode: 'create',
     id: 0,
+    groupId: 0,
     name: '',
     protocol: 'rtsp',
     host: '',
@@ -162,6 +185,7 @@ function openEdit(channel: Channel) {
     open: true,
     mode: 'edit',
     id: channel.id,
+    groupId: channel.groupId ?? 0,
     name: channel.name,
     protocol: channel.protocol,
     host: channel.host,
@@ -192,6 +216,7 @@ async function save() {
       subEnabled: modal.subEnabled,
       enabled: modal.enabled,
       brand: modal.brand,
+      groupId: modal.groupId,
       watermark: {
         text: modal.watermarkText,
         position: modal.watermarkPosition,
@@ -284,6 +309,7 @@ async function probe(device: OnvifDevice) {
       Object.assign(modal, {
         open: true,
         mode: 'create',
+        groupId: 0,
         name: scan.result.device.model || device.ip,
         protocol: 'onvif',
         host: device.ip,
@@ -303,6 +329,37 @@ async function probe(device: OnvifDevice) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
   } finally {
     scan.probing = ''
+  }
+}
+
+function openGroups() {
+  groupsOpen.value = !groupsOpen.value
+  groupModal.name = ''
+  groupModal.parentId = 0
+}
+
+async function createGroup() {
+  if (!groupModal.name.trim()) return
+  try {
+    await api('/api/v1/channel-groups', {
+      method: 'POST',
+      body: JSON.stringify({ name: groupModal.name.trim(), parentId: groupModal.parentId }),
+    })
+    groupModal.name = ''
+    groupModal.parentId = 0
+    await load()
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
+async function removeGroup(group: ChannelGroup) {
+  if (!window.confirm(t('channels.deleteGroupConfirm', { name: group.name }))) return
+  try {
+    await api(`/api/v1/channel-groups/${group.id}`, { method: 'DELETE' })
+    await load()
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
 }
 
@@ -326,6 +383,10 @@ onMounted(load)
         <AppIcon name="search" :size="16" />
         {{ t('channels.scanOnvif') }}
       </button>
+      <button class="button" @click="openGroups">
+        <AppIcon name="users" :size="16" />
+        {{ t('channels.groups') }}
+      </button>
       <button class="button primary" @click="openCreate">
         <AppIcon name="plus" :size="16" />
         {{ t('channels.addChannel') }}
@@ -335,6 +396,37 @@ onMounted(load)
 
   <p v-if="notice" class="notice">{{ notice }}</p>
   <p v-if="error" class="form-error">{{ error }}</p>
+
+  <section v-if="groupsOpen" class="panel groups-panel">
+    <div class="section-title">
+      <AppIcon name="users" :size="18" />
+      <h3>{{ t('channels.groups') }}</h3>
+    </div>
+    <form class="group-form" @submit.prevent="createGroup">
+      <input v-model="groupModal.name" class="input" :placeholder="t('channels.groupName')" maxlength="64" />
+      <select v-model.number="groupModal.parentId" class="input">
+        <option :value="0">{{ t('channels.ungrouped') }}</option>
+        <option v-for="group in groups" :key="group.id" :value="group.id">
+          {{ group.name }}
+        </option>
+      </select>
+      <button class="button primary" type="submit" :disabled="!groupModal.name.trim()">
+        <AppIcon name="plus" :size="15" />
+        {{ t('channels.addGroup') }}
+      </button>
+    </form>
+    <div v-if="groups.length === 0" class="small-note">{{ t('channels.noGroups') }}</div>
+    <ul v-else class="group-list">
+      <li v-for="group in groups" :key="group.id">
+        <span><strong>{{ group.name }}</strong>
+          <small class="muted"> · {{ t('channels.groupChannels', { count: group.channels }) }}</small>
+        </span>
+        <button class="button small danger" @click="removeGroup(group)">
+          <AppIcon name="trash" :size="14" />
+        </button>
+      </li>
+    </ul>
+  </section>
 
   <section v-if="loading" class="panel empty-state">
     <span class="spinner"></span>
@@ -360,6 +452,7 @@ onMounted(load)
               <span class="user-avatar small"><AppIcon name="camera" :size="15" /></span>
               <div>
                 <strong>{{ channel.name }}</strong>
+                <small v-if="channel.groupId" class="block muted">{{ groupName(channel.groupId) }}</small>
                 <small>{{ channel.host || '—' }}<span v-if="channel.port">:{{ channel.port }}</span></small>
               </div>
             </div>
@@ -426,6 +519,15 @@ onMounted(load)
             <select v-model="modal.protocol" class="input">
               <option v-for="protocol in protocols" :key="protocol" :value="protocol">
                 {{ protocol }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span>{{ t('channels.group') }}</span>
+            <select v-model.number="modal.groupId" class="input">
+              <option :value="0">{{ t('channels.ungrouped') }}</option>
+              <option v-for="group in groups" :key="group.id" :value="group.id">
+                {{ group.name }}
               </option>
             </select>
           </label>

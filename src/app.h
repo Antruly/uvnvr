@@ -28,6 +28,7 @@ using json = nlohmann::json;
 
 struct ChannelRow {
   int64_t id = 0;
+  int64_t group_id = 0;
   std::string name;
   std::string protocol;
   std::string host;
@@ -117,6 +118,8 @@ private:
   void RegisterAlertRoutes();
   void RegisterSystemRoutes();
   void RegisterChannelRoutes();
+  void RegisterGroupRoutes();
+  void RegisterLayoutRoutes();
   void RegisterOnvifRoutes();
   void RegisterStreamRoutes();
   void RegisterRecordingRoutes();

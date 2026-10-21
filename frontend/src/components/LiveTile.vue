@@ -7,6 +7,7 @@ import { api } from '@/api/client'
 
 export interface LiveChannel {
   id: number
+  groupId: number
   name: string
   host: string
   port: number

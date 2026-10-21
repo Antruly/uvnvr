@@ -3075,3 +3075,57 @@ select.input {
     position: static;
   }
 }
+
+.groups-panel {
+  padding: 16px 20px 20px;
+}
+
+.group-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0 14px;
+}
+
+.group-form .input {
+  flex: 1;
+}
+
+.group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.group-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 14, 24, 0.5);
+}
+
+.channel-group {
+  display: grid;
+  gap: 4px;
+}
+
+.channel-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(120, 155, 195, 0.08);
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}

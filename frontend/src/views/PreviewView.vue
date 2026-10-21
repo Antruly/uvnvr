@@ -9,8 +9,17 @@ defineOptions({ name: 'PreviewView' })
 
 const { t } = useI18n()
 
+interface ChannelGroup {
+  id: number
+  name: string
+  parentId: number
+  sort: number
+  channels: number
+}
+
 interface Layout {
   id: string
+  serverId?: number
   name: string
   grid: string
   cols: number
@@ -28,6 +37,8 @@ const gridOptions = [
 
 const storageKey = 'uvnvr.preview.layouts'
 const channels = ref<LiveChannel[]>([])
+const groups = ref<ChannelGroup[]>([])
+const collapsedGroups = ref<Set<number>>(new Set())
 const loading = ref(true)
 const error = ref('')
 const search = ref('')
@@ -48,7 +59,30 @@ function defaultLayout(): Layout {
   }
 }
 
-function loadLayouts() {
+interface ServerLayout {
+  id: number
+  name: string
+  grid: { grid?: string; cols?: number; rows?: number; cells?: (number | null)[] }
+  isDefault: boolean
+}
+
+function fromServer(row: ServerLayout): Layout {
+  const cols = Math.max(1, Math.min(8, Number(row.grid.cols) || 2))
+  const rows = Math.max(1, Math.min(8, Number(row.grid.rows) || 2))
+  const cells = Array.isArray(row.grid.cells) ? [...row.grid.cells] : []
+  while (cells.length < cols * rows) cells.push(null)
+  return {
+    id: `server-${row.id}`,
+    serverId: row.id,
+    name: row.name,
+    grid: typeof row.grid.grid === 'string' ? row.grid.grid : 'custom',
+    cols,
+    rows,
+    cells: cells.slice(0, cols * rows),
+  }
+}
+
+function loadLocalLayouts() {
   try {
     const raw = localStorage.getItem(storageKey)
     if (raw) {
@@ -67,12 +101,68 @@ function loadLayouts() {
   activeLayoutId.value = layout.id
 }
 
+async function loadLayouts() {
+  loadLocalLayouts()
+  try {
+    const server = await api<ServerLayout[]>('/api/v1/layouts')
+    if (server.length > 0) {
+      layouts.value = server.map(fromServer)
+      activeLayoutId.value = layouts.value[0].id
+      saveLayouts()
+    }
+  } catch {
+    /* Offline or unsupported: keep the local layouts. */
+  }
+}
+
+const syncTimers = new Map<string, number>()
+
+async function syncLayout(layout: Layout) {
+  const grid = { grid: layout.grid, cols: layout.cols, rows: layout.rows, cells: layout.cells }
+  try {
+    if (layout.serverId) {
+      await api(`/api/v1/layouts/${layout.serverId}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: layout.name,
+          grid,
+          isDefault: layouts.value[0]?.id === layout.id,
+        }),
+      })
+    } else {
+      const created = await api<{ id: number }>('/api/v1/layouts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: layout.name,
+          grid,
+          isDefault: layouts.value[0]?.id === layout.id,
+        }),
+      })
+      layout.serverId = created.id
+      saveLayouts()
+    }
+  } catch {
+    /* Keep the local copy; the next change retries. */
+  }
+}
+
+function scheduleSync(layout: Layout | undefined) {
+  if (!layout) return
+  const existing = syncTimers.get(layout.id)
+  if (existing !== undefined) window.clearTimeout(existing)
+  syncTimers.set(
+    layout.id,
+    window.setTimeout(() => void syncLayout(layout), 700),
+  )
+}
+
 function saveLayouts() {
   try {
     localStorage.setItem(storageKey, JSON.stringify(layouts.value))
   } catch {
     /* Storage may be unavailable; the page still works for this session. */
   }
+  scheduleSync(activeLayout.value)
 }
 
 const activeLayout = computed(
@@ -89,6 +179,36 @@ const filteredChannels = computed(() => {
   if (!query) return channels.value
   return channels.value.filter((channel) => channel.name.toLowerCase().includes(query))
 })
+
+const groupedChannels = computed(() => {
+  if (groups.value.length === 0) return []
+  const buckets = new Map<number, LiveChannel[]>()
+  for (const channel of filteredChannels.value) {
+    const groupId = groups.value.some((group) => group.id === channel.groupId)
+      ? channel.groupId
+      : 0
+    const bucket = buckets.get(groupId) ?? []
+    bucket.push(channel)
+    buckets.set(groupId, bucket)
+  }
+  const result: { id: number; name: string; channels: LiveChannel[] }[] = []
+  for (const group of groups.value) {
+    const bucket = buckets.get(group.id)
+    if (bucket?.length) result.push({ id: group.id, name: group.name, channels: bucket })
+  }
+  const ungrouped = buckets.get(0)
+  if (ungrouped?.length) {
+    result.push({ id: 0, name: t('channels.ungrouped'), channels: ungrouped })
+  }
+  return result
+})
+
+function toggleGroup(id: number) {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedGroups.value = next
+}
 
 const onlineCount = computed(
   () => channels.value.filter((channel) => channel.mainState === 'online').length,
@@ -165,9 +285,11 @@ function addLayout() {
   const name = window.prompt(t('preview.layoutName'), `${t('preview.layout')} ${layouts.value.length + 1}`)
   if (!name) return
   const copy: Layout = {
-    ...activeLayout.value,
     id: `layout-${Date.now()}`,
     name,
+    grid: activeLayout.value.grid,
+    cols: activeLayout.value.cols,
+    rows: activeLayout.value.rows,
     cells: [...activeLayout.value.cells],
   }
   layouts.value.push(copy)
@@ -177,9 +299,13 @@ function addLayout() {
 
 function removeLayout() {
   if (layouts.value.length <= 1 || !activeLayout.value) return
-  const index = layouts.value.findIndex((layout) => layout.id === activeLayout.value?.id)
+  const removed = activeLayout.value
+  const index = layouts.value.findIndex((layout) => layout.id === removed.id)
   layouts.value.splice(index, 1)
   activeLayoutId.value = layouts.value[Math.max(0, index - 1)].id
+  if (removed.serverId) {
+    void api(`/api/v1/layouts/${removed.serverId}`, { method: 'DELETE' }).catch(() => undefined)
+  }
   saveLayouts()
 }
 
@@ -198,7 +324,12 @@ function reloadAll() {
 async function loadChannels() {
   error.value = ''
   try {
-    channels.value = await api<LiveChannel[]>('/api/v1/channels')
+    const [channelRows, groupRows] = await Promise.all([
+      api<LiveChannel[]>('/api/v1/channels'),
+      api<ChannelGroup[]>('/api/v1/channel-groups'),
+    ])
+    channels.value = channelRows
+    groups.value = groupRows
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -213,7 +344,7 @@ watch(
 )
 
 onMounted(() => {
-  loadLayouts()
+  void loadLayouts()
   void loadChannels()
   window.setInterval(loadChannels, 10_000)
 })
@@ -270,21 +401,48 @@ onMounted(() => {
       </div>
       <input v-model="search" class="input" type="search" :placeholder="t('common.search')" />
       <div class="channel-list">
-        <button
-          v-for="channel in filteredChannels"
-          :key="channel.id"
-          class="channel-item"
-          :class="{ active: selectedChannelId === channel.id }"
-          draggable="true"
-          @click="selectedChannelId = channel.id"
-          @dragstart="draggingId = channel.id"
-        >
-          <span class="status-dot" :class="statusClass(channel)"></span>
-          <span class="channel-item-copy">
-            <strong>{{ channel.name }}</strong>
-            <small>{{ channel.protocol }} · {{ channel.host || '—' }}</small>
-          </span>
-        </button>
+        <template v-if="groups.length === 0">
+          <button
+            v-for="channel in filteredChannels"
+            :key="channel.id"
+            class="channel-item"
+            :class="{ active: selectedChannelId === channel.id }"
+            draggable="true"
+            @click="selectedChannelId = channel.id"
+            @dragstart="draggingId = channel.id"
+          >
+            <span class="status-dot" :class="statusClass(channel)"></span>
+            <span class="channel-item-copy">
+              <strong>{{ channel.name }}</strong>
+              <small>{{ channel.protocol }} · {{ channel.host || '—' }}</small>
+            </span>
+          </button>
+        </template>
+        <template v-else>
+          <div v-for="group in groupedChannels" :key="group.id" class="channel-group">
+            <button class="channel-group-head" @click="toggleGroup(group.id)">
+              <span>{{ group.name }}</span>
+              <span class="count-badge">{{ group.channels.length }}</span>
+            </button>
+            <template v-if="!collapsedGroups.has(group.id)">
+              <button
+                v-for="channel in group.channels"
+                :key="channel.id"
+                class="channel-item"
+                :class="{ active: selectedChannelId === channel.id }"
+                draggable="true"
+                @click="selectedChannelId = channel.id"
+                @dragstart="draggingId = channel.id"
+              >
+                <span class="status-dot" :class="statusClass(channel)"></span>
+                <span class="channel-item-copy">
+                  <strong>{{ channel.name }}</strong>
+                  <small>{{ channel.protocol }} · {{ channel.host || '—' }}</small>
+                </span>
+              </button>
+            </template>
+          </div>
+        </template>
         <p v-if="filteredChannels.length === 0" class="small-note">
           {{ t('preview.noChannels') }}
           <RouterLink to="/channels">{{ t('preview.addChannel') }}</RouterLink>
