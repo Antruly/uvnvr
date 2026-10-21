@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.17.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.18.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,15 +22,15 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.17.0 — 安装包与界面刷新。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.18.0 — 实时回放与细节完善。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.17.0 用现代 Inno Setup 安装包替换 Windows NSIS（中英文、服务端口、防火墙、开机任务、
-桌面快捷方式），为 ONVIF 扫描增加多选/批量添加，修复扫描到建通道的流程，并刷新界面、
-图标与亮色主题。0.16.0 的 io_uring 录像 I/O、0.15.0 的海康/大华编码控制、0.14.0 的
-ONVIF 编码控制、0.13.0 的 RTSP 音频、0.12.0 的 RTSP Digest 与实时事件，以及更早的
-核心里程碑继续保留。WebRTC、云平台与高级分析仍不在范围内。里程碑见
+0.18.0 支持播放正在写入的 `.ts.part` 切片并在切片轮换后继续下一段；回放时间轴可拖动；
+抓拍缩略图显示加载动画；存储卷默认永久保留；审计字段中文化；修复亮色主题下部分选中
+按钮白字白底的问题。0.17.0 的 Inno Setup 安装包、ONVIF 批量添加与界面刷新，0.16.0 的
+io_uring 录像 I/O，0.15.0 的海康/大华编码控制，0.14.0 的 ONVIF 编码控制，0.13.0 的
+RTSP 音频继续保留。WebRTC、云平台与高级分析仍不在范围内。里程碑见
 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
@@ -74,6 +74,7 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
 - RTSP AAC（RFC 3640）与 G.711（PCMA/PCMU）音频轨道、独立 RTP/RTCP；录像批量写入
   （`recording.batch_mb`/`batch_ms`）；磁盘/服务异常预警；存储目录浏览与根目录/不可写路径校验。
 - ONVIF 扫描多选与 **添加所选**，逐行显示状态与错误。
+- 回放可跟随正在写入的 `.ts.part` 切片，切片轮换后继续下一段；时间轴支持拖动定位。
 - 摄像头编码控制（`GET/PUT /api/v1/channels/{id}/encoder`），支持 ONVIF、海康 ISAPI 与大华 CGI：编码、分辨率、帧率、码率（ONVIF 另含质量），通道编辑中可直接读取/应用。
 
 ### 已交付范围
@@ -170,7 +171,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.17.0 已知限制
+## 0.18.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -273,6 +274,7 @@ tests/             单元/集成/E2E 测试
 | 0.15.0 | ✅ 海康 ISAPI 与大华 CGI 编码参数读取/应用 |
 | 0.16.0 | ✅ libuv/io_uring 录像 I/O 与 fsync 批量控制 |
 | 0.17.0 | ✅ Inno Setup Windows 安装包、ONVIF 批量添加、界面/图标/亮色主题刷新 |
+| 0.18.0 | ✅ 录制中切片实时回放、可拖动时间轴、抓拍加载动画、审计中文化 |
 
 ## 贡献与安全
 

@@ -158,7 +158,12 @@ while this socket is connected.
 ## Downloads and export
 
 `GET /api/v1/recordings` returns `path`, `codec`, `startMs`, `endMs`,
-`durationMs`, `sizeBytes` and `recordType` for each segment. A codec change starts
+`durationMs`, `sizeBytes`, `recordType` and `active` for each segment. Segments
+that are still being written are included with `active: true`, a negative `id`,
+a `path` ending in `.ts.part`, and `endMs` set to the current time. Playback
+tickets may start inside such a segment; the server follows the growing file,
+switches to the finalized file at rotation and continues with the next active
+segment. Download, export and delete are not available for active rows. A codec change starts
 a new segment; playback sessions stop at that boundary so one player never
 receives mixed H.264/H.265 data. Seek to the next segment to switch codecs.
 

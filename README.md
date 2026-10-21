@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.17.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.18.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,20 +22,20 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.17.0 — installer and UI refresh.** The recorder supports
+**0.18.0 — live playback and polish.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.17.0 replaces the Windows NSIS setup with a modern Inno Setup installer
-(English/Chinese, service ports, firewall, boot task, desktop shortcuts), adds
-multi-select/bulk add to ONVIF discovery, fixes the scan-to-channel flow and
-refreshes the UI, icon set and light theme. It builds on 0.16.0's io_uring
-recording I/O, 0.15.0's Hikvision/Dahua encoder control, 0.14.0's ONVIF encoder
-control, 0.13.0's RTSP audio, 0.12.0's RTSP Digest and live events, and the
-earlier core NVR milestones. Peer-to-peer/WebRTC, cloud access and advanced
-analytics remain out of scope. Track the milestones in
+0.18.0 lets playback follow the segment that is still being recorded, adds a
+draggable playback timeline, snapshot loading indicators, unlimited retention by
+default, localized audit values and a light-theme/active-control cleanup. It
+builds on 0.17.0's Inno Setup installer, ONVIF bulk add and UI refresh, 0.16.0's
+io_uring recording I/O, 0.15.0's Hikvision/Dahua encoder control, 0.14.0's ONVIF
+encoder control, 0.13.0's RTSP audio, and the earlier core NVR milestones.
+Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of scope.
+Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -197,7 +197,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.17.0)
+## Known limitations (0.18.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -322,6 +322,7 @@ tests/             unit/integration/e2e tests
 | 0.15.0 | ✅ Hikvision ISAPI and Dahua CGI encoder read/apply |
 | 0.16.0 | ✅ libuv/io_uring recording I/O with fsync batching |
 | 0.17.0 | ✅ Inno Setup Windows installer, ONVIF bulk add, UI/icons and light-theme refresh |
+| 0.18.0 | ✅ Live recording playback, draggable timeline, snapshot spinners, audit localization |
 
 ## Contributing and security
 

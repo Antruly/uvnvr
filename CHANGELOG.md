@@ -4,6 +4,31 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] - 2026-10-22
+
+### Added
+
+- **Playback of the segment being recorded.** `GET /api/v1/recordings` now
+  includes the open `.ts.part` segment with `active: true`, and the playback
+  service follows it through a live active-segment provider: it reads the
+  growing part file, switches to the final file at rotation, and waits for the
+  next segment. The playback list refreshes every five seconds and marks the
+  live row as **Recording**.
+- **Draggable playback timeline.** Pointer drag on the timeline moves the cursor
+  and seeks on release; clicking still works.
+- Snapshot thumbnails show a loading spinner until the JPEG arrives.
+- Audit values (level, action, result) are localized in Chinese.
+
+### Changed
+
+- New storage volumes default to retention **0 (unlimited)** and loop mode; the
+  schema and API defaults use 0 instead of 30 days.
+- API-token scope groups use alternating row colors so long checklists are
+  easier to follow.
+- Light theme: plan brushes (timed/event/both/erase), segmented controls,
+  layout tabs and small active buttons no longer use white text on a white
+  background; accent, warning, violet and danger variants use theme tokens.
+
 ## [0.17.0] - 2026-10-22
 
 ### Added

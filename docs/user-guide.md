@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.17.0)
+# UvNVR User Guide (0.18.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -226,8 +226,8 @@ Open **Storage** to manage recording volumes.
   - **Loop**: delete the oldest segments when the volume reaches its limit.
   - **Alert**: stop recording and raise an alert at the limit.
 - Configure the maximum usage percentage (default 90), reserved space and
-  retention days (default 30; **0 means keep forever**). Expired segments are
-  deleted automatically.
+  retention days (default **0 — keep forever**). Expired segments are deleted
+  automatically when a positive retention is set.
 - Volumes can be disabled without deleting existing files.
 
 The **Active recordings** panel below the volume list refreshes every five
@@ -249,7 +249,9 @@ the filesystem or touch unrelated files.
 Open **Playback**.
 
 1. Choose the channel, stream and date.
-2. The timeline shows recorded intervals; click a segment or a time to play.
+2. The timeline shows recorded intervals; click a segment or drag across the
+   timeline to seek. The segment being written is included and marked
+   **Recording**, so you can watch the current file before it is finalized.
 3. Playback streams MPEG-TS over a WebSocket and crosses segment boundaries
    without reloading the player.
 4. Seeking starts a new ticket at the target time, so only the required segment
