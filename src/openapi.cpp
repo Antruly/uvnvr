@@ -123,6 +123,8 @@ const Endpoint kEndpoints[] = {
     {"post", "/api/v1/playback/export", "Export a time range as MP4", "Streaming",
      "playback.download", "video/mp4"},
 
+    {"post", "/api/v1/events/ticket", "Create a real-time events WebSocket ticket", "Alerts",
+     "alert.view", "application/json"},
     {"get", "/api/v1/alerts", "List alerts", "Alerts", "alert.view", "application/json"},
     {"post", "/api/v1/alerts/{id}/ack", "Acknowledge an alert", "Alerts", "alert.manage",
      "application/json"},

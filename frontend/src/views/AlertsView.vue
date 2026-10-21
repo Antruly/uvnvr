@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { api, ApiError } from '@/api/client'
+import { useEventStore } from '@/stores/events'
 
 defineOptions({ name: 'AlertsView' })
 
@@ -71,6 +72,12 @@ async function acknowledge(alert: Alert) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
 }
+
+const events = useEventStore()
+watch(
+  () => events.seq,
+  () => void load(),
+)
 
 onMounted(load)
 </script>

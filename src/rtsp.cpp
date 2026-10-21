@@ -181,6 +181,64 @@ bool SendAll(Socket fd, const std::string& data) {
   return true;
 }
 
+std::string Trim(const std::string& value) {
+  size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])))
+    ++start;
+  size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
+    --end;
+  return value.substr(start, end - start);
+}
+
+std::string Md5Hex(const std::string& data) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int length = 0;
+  if (EVP_Digest(data.data(), data.size(), digest, &length, EVP_md5(), nullptr) != 1)
+    return {};
+  static const char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(length * 2);
+  for (unsigned int i = 0; i < length; ++i) {
+    out.push_back(kHex[digest[i] >> 4]);
+    out.push_back(kHex[digest[i] & 0x0f]);
+  }
+  return out;
+}
+
+std::map<std::string, std::string> ParseAuthParams(const std::string& input) {
+  std::map<std::string, std::string> result;
+  size_t i = 0;
+  while (i < input.size()) {
+    while (i < input.size() &&
+           (input[i] == ',' || std::isspace(static_cast<unsigned char>(input[i]))))
+      ++i;
+    const size_t equals = input.find('=', i);
+    if (equals == std::string::npos)
+      break;
+    const std::string key = Lower(Trim(input.substr(i, equals - i)));
+    i = equals + 1;
+    std::string value;
+    if (i < input.size() && input[i] == '"') {
+      ++i;
+      while (i < input.size() && input[i] != '"') {
+        if (input[i] == '\\' && i + 1 < input.size())
+          ++i;
+        value.push_back(input[i++]);
+      }
+      if (i < input.size())
+        ++i;
+    } else {
+      const size_t comma = input.find(',', i);
+      value = Trim(input.substr(i, comma == std::string::npos ? std::string::npos : comma - i));
+      i = comma == std::string::npos ? input.size() : comma;
+    }
+    if (!key.empty())
+      result[key] = value;
+  }
+  return result;
+}
+
 int64_t NowMillis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -701,16 +759,23 @@ struct RtspServer::Impl {
     }
   };
 
-  Impl(AuthFn auth_in, AttachFn attach_in, DetachFn detach_in, int port_in)
-      : auth(std::move(auth_in)), attach(std::move(attach_in)), detach(std::move(detach_in)),
-        port(port_in) {}
+  Impl(AuthFn auth_in, Ha1Fn ha1_in, AttachFn attach_in, DetachFn detach_in, int port_in)
+      : auth(std::move(auth_in)), ha1(std::move(ha1_in)), attach(std::move(attach_in)),
+        detach(std::move(detach_in)), port(port_in) {
+    nonce = RandomToken();
+    opaque = RandomToken();
+  }
   ~Impl() {
     Stop();
   }
 
   AuthFn auth;
+  Ha1Fn ha1;
   AttachFn attach;
   DetachFn detach;
+  std::string nonce;
+  std::string opaque;
+  static constexpr const char* kRealm = "UvNVR";
   int port;
   Socket listen_fd = kInvalidSocket;
   std::atomic<bool> stopping{false};
@@ -878,18 +943,61 @@ struct RtspServer::Impl {
     return *channel > 0;
   }
 
-  bool Credentials(const Request& request, const std::string& url, std::string* username,
-                   std::string* password) {
+  bool Authenticate(const Request& request, std::string* username) {
     const std::string authorization = request.header("Authorization");
     if (authorization.rfind("Basic ", 0) == 0) {
       const std::string decoded = Base64Decode(authorization.substr(6));
       const size_t colon = decoded.find(':');
       if (colon != std::string::npos) {
-        *username = decoded.substr(0, colon);
-        *password = decoded.substr(colon + 1);
-        return true;
+        const std::string user = decoded.substr(0, colon);
+        const std::string password = decoded.substr(colon + 1);
+        if (auth(user, password)) {
+          *username = user;
+          return true;
+        }
       }
+    } else if (authorization.rfind("Digest ", 0) == 0) {
+      const auto params = ParseAuthParams(authorization.substr(7));
+      const auto user = params.find("username");
+      const auto response = params.find("response");
+      const auto nonce_value = params.find("nonce");
+      if (user == params.end() || response == params.end() || nonce_value == params.end())
+        return false;
+      if (nonce_value->second != nonce)
+        return false;
+      const auto realm = params.find("realm");
+      if (realm != params.end() && realm->second != kRealm)
+        return false;
+      const auto algorithm = params.find("algorithm");
+      if (algorithm != params.end() && Lower(algorithm->second) != "md5")
+        return false;
+      const std::string ha1_value = ha1(user->second);
+      if (ha1_value.empty())
+        return false;
+      const auto uri = params.find("uri");
+      const std::string digest_uri = uri != params.end() ? uri->second : request.url;
+      if (digest_uri != request.url)
+        return false;
+      const std::string ha2 = Md5Hex(request.method + ":" + digest_uri);
+      const auto qop = params.find("qop");
+      std::string expected;
+      if (qop != params.end() && Lower(qop->second) == "auth") {
+        const auto nc = params.find("nc");
+        const auto cnonce = params.find("cnonce");
+        if (nc == params.end() || cnonce == params.end())
+          return false;
+        expected = Md5Hex(ha1_value + ":" + nonce + ":" + nc->second + ":" + cnonce->second +
+                          ":auth:" + ha2);
+      } else {
+        expected = Md5Hex(ha1_value + ":" + nonce + ":" + ha2);
+      }
+      if (expected.empty() || Lower(expected) != Lower(response->second))
+        return false;
+      *username = user->second;
+      return true;
     }
+    // Credentials embedded in the URL are accepted as a Basic fallback.
+    const std::string& url = request.url;
     const size_t scheme = url.find("rtsp://");
     if (scheme != std::string::npos) {
       const size_t at = url.find('@', scheme + 7);
@@ -897,18 +1005,27 @@ struct RtspServer::Impl {
         const std::string userinfo = url.substr(scheme + 7, at - scheme - 7);
         const size_t colon = userinfo.find(':');
         if (colon != std::string::npos) {
-          *username = userinfo.substr(0, colon);
-          *password = userinfo.substr(colon + 1);
-          return true;
+          const std::string user = userinfo.substr(0, colon);
+          const std::string password = userinfo.substr(colon + 1);
+          if (auth(user, password)) {
+            *username = user;
+            return true;
+          }
         }
       }
     }
     return false;
   }
 
+  std::string Challenge(const std::string& cseq) {
+    const std::string headers = "WWW-Authenticate: Digest realm=\"" + std::string(kRealm) +
+                                "\", qop=\"auth\", nonce=\"" + nonce + "\", opaque=\"" + opaque +
+                                "\", algorithm=MD5\r\nWWW-Authenticate: Basic realm=\"UvNVR\"\r\n";
+    return Response(401, "Unauthorized", cseq, headers);
+  }
+
   void ClientLoop(std::shared_ptr<Session> session) {
     std::string username;
-    std::string password;
     bool authenticated = false;
     while (session->alive.load()) {
       Request request;
@@ -922,9 +1039,8 @@ struct RtspServer::Impl {
         break;
       }
       if (!authenticated) {
-        if (!Credentials(request, request.url, &username, &password) || !auth(username, password)) {
-          session->WriteTcp(
-              Response(401, "Unauthorized", cseq, "WWW-Authenticate: Basic realm=\"UvNVR\"\r\n"));
+        if (!Authenticate(request, &username)) {
+          session->WriteTcp(Challenge(cseq));
           continue;
         }
         authenticated = true;
@@ -1043,8 +1159,9 @@ struct RtspServer::Impl {
   }
 };
 
-RtspServer::RtspServer(AuthFn auth, AttachFn attach, DetachFn detach, int port)
-    : impl_(std::make_unique<Impl>(std::move(auth), std::move(attach), std::move(detach), port)) {}
+RtspServer::RtspServer(AuthFn auth, Ha1Fn ha1, AttachFn attach, DetachFn detach, int port)
+    : impl_(std::make_unique<Impl>(std::move(auth), std::move(ha1), std::move(attach),
+                                   std::move(detach), port)) {}
 
 RtspServer::~RtspServer() = default;
 

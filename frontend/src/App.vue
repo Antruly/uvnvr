@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useNow } from '@vueuse/core'
 import AppIcon from '@/components/AppIcon.vue'
+import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useEventStore } from '@/stores/events'
 import { useTabsStore } from '@/stores/tabs'
 import { useTheme } from '@/stores/theme'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const events = useEventStore()
 const tabs = useTabsStore()
 const route = useRoute()
 const router = useRouter()
@@ -26,12 +29,10 @@ const primaryNav = [
   { key: 'playback', to: '/playback', icon: 'playback', permission: 'playback.view' },
   { key: 'plans', to: '/plans', icon: 'dashboard', permission: 'plan.view' },
   { key: 'storage', to: '/storage', icon: 'storage', permission: 'storage.view' },
+  { key: 'alerts', to: '/alerts', icon: 'bell', permission: 'alert.view' },
 ]
 
-const plannedNav = [
-  { key: 'storage', icon: 'storage' },
-  { key: 'alerts', icon: 'bell' },
-]
+const plannedNav: { key: string; icon: string }[] = []
 
 const adminNav = [
   { key: 'users', to: '/users', icon: 'users', permission: 'user.view' },
@@ -102,15 +103,101 @@ function closeTab(path: string) {
 }
 
 async function logout() {
+  disconnectEvents()
   await auth.logout()
   tabs.$reset()
   await router.push('/login')
 }
 
+const toast = ref<{ message: string } | null>(null)
+let toastTimer: number | undefined
+let socket: WebSocket | null = null
+let reconnectTimer: number | undefined
+let reconnectDelay = 1000
+
+function showToast(message: string) {
+  toast.value = { message }
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => {
+    toast.value = null
+  }, 6000)
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer !== undefined || !auth.user) return
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = undefined
+    void connectEvents()
+  }, reconnectDelay)
+  reconnectDelay = Math.min(30000, reconnectDelay * 2)
+}
+
+async function connectEvents() {
+  if (!auth.user || socket) return
+  try {
+    const ticket = await api<{ wsPath: string }>('/api/v1/events/ticket', { method: 'POST' })
+    if (!auth.user) return
+    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const current = new WebSocket(`${scheme}://${window.location.host}${ticket.wsPath}`)
+    socket = current
+    current.onopen = () => {
+      events.setConnected(true)
+      reconnectDelay = 1000
+    }
+    current.onmessage = (message) => {
+      try {
+        const payload = JSON.parse(String(message.data)) as {
+          type?: string
+          alert?: { message?: string }
+        }
+        events.apply(payload)
+        if (payload.type === 'alert' && payload.alert?.message) showToast(payload.alert.message)
+      } catch {
+        /* Ignore malformed events. */
+      }
+    }
+    current.onclose = () => {
+      events.setConnected(false)
+      if (socket === current) socket = null
+      scheduleReconnect()
+    }
+    current.onerror = () => current.close()
+  } catch {
+    scheduleReconnect()
+  }
+}
+
+function disconnectEvents() {
+  if (reconnectTimer !== undefined) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = undefined
+  }
+  if (socket) {
+    const current = socket
+    socket = null
+    current.close()
+  }
+  events.setConnected(false)
+}
+
+watch(
+  () => auth.user,
+  (user) => {
+    if (user) void connectEvents()
+    else disconnectEvents()
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   document.documentElement.lang = locale.value
   void app.fetchServerInfo()
   setInterval(() => void app.fetchServerInfo(), 30_000)
+})
+
+onBeforeUnmount(() => {
+  disconnectEvents()
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer)
 })
 </script>
 
@@ -120,6 +207,13 @@ onMounted(() => {
   </div>
 
   <div v-else class="app-shell" :class="{ 'sidebar-collapsed': app.sidebarCollapsed }">
+    <RouterLink v-if="toast" to="/alerts" class="event-toast" @click="toast = null">
+      <AppIcon name="bell" :size="18" />
+      <div>
+        <strong>{{ t('events.newAlert') }}</strong>
+        <span>{{ toast.message }}</span>
+      </div>
+    </RouterLink>
     <aside class="sidebar">
       <div class="brand">
         <img src="/icon-512.png" alt="" class="brand-mark" />

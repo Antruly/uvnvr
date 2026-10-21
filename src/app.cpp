@@ -98,6 +98,19 @@ std::string Sha256Hex(std::string_view data) {
   return HexEncode(digest, sizeof(digest));
 }
 
+std::string Md5Hex(std::string_view data) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int length = 0;
+  if (EVP_Digest(data.data(), data.size(), digest, &length, EVP_md5(), nullptr) != 1)
+    return {};
+  return HexEncode(digest, length);
+}
+
+// RFC 2617 HA1 for RTSP Digest: MD5(username:realm:password).
+std::string RtspHa1(const std::string& username, const std::string& password) {
+  return Md5Hex(username + ":UvNVR:" + password);
+}
+
 std::string RandomHex(size_t bytes) {
   std::vector<unsigned char> buffer(bytes);
   if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) {
@@ -872,6 +885,21 @@ bool App::Migrate(std::string* error) {
       }
     }
   }
+  {
+    uvcpp::uvcpp_db_table columns;
+    if (Query("PRAGMA table_info(users)", {}, &columns, error)) {
+      bool has_ha1 = false;
+      for (size_t row = 0; row < columns.rows().size(); ++row) {
+        if (TableText(columns, row, "name") == "rtsp_ha1")
+          has_ha1 = true;
+      }
+      if (!has_ha1 &&
+          !Exec("ALTER TABLE users ADD COLUMN rtsp_ha1 TEXT NOT NULL DEFAULT ''", {}, nullptr,
+                error)) {
+        return false;
+      }
+    }
+  }
 
   const int64_t now = NowSeconds();
   const std::vector<std::pair<std::string, std::pair<std::string, std::string>>> defaults = {
@@ -1326,6 +1354,16 @@ LoginResult App::Login(const std::string& username, const std::string& password,
   user.role_name = TableText(table, 0, "role_name");
   user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
 
+  // Upgrading an existing installation populates HA1 on the next successful
+  // login, so RTSP Digest works without resetting passwords.
+  {
+    uvcpp::uvcpp_db_params ha1_update;
+    ha1_update.add(RtspHa1(user.username, password));
+    ha1_update.add(user.id);
+    std::string ha1_error;
+    Exec("UPDATE users SET rtsp_ha1 = ? WHERE id = ?", ha1_update, nullptr, &ha1_error);
+  }
+
   std::string token;
   std::string csrf;
   int64_t expires_at = 0;
@@ -1405,14 +1443,15 @@ LoginResult App::Setup(const std::string& password, const std::string& timezone,
   user_params.add(role_id);
   user_params.add(1);
   user_params.add(now);
+  user_params.add(RtspHa1("admin", password));
 
   std::string error;
   bool ok = uvcpp::uvcpp_db_ok(client->begin());
   uvcpp::uvcpp_db_status status;
   if (ok) {
     status =
-        client->insert("INSERT INTO users(username, password_hash, role_id, enabled, created_at) "
-                       "VALUES(?, ?, ?, ?, ?)",
+        client->insert("INSERT INTO users(username, password_hash, role_id, enabled, created_at, "
+                       "rtsp_ha1) VALUES(?, ?, ?, ?, ?, ?)",
                        user_params, &new_id);
     ok = uvcpp::uvcpp_db_ok(status);
     if (!ok)
@@ -1937,6 +1976,7 @@ int App::Run() {
       [this](const std::string& user, const std::string& password) {
         return VerifyRtspCredentials(user, password);
       },
+      [this](const std::string& user) { return RtspHa1ForUser(user); },
       [this](int64_t channel, const std::string& stream, MediaService::RawSink sink,
              std::string* error) {
         return media_ ? media_->AddRawSubscriber(channel, stream, std::move(sink), error) : 0;
@@ -2812,11 +2852,12 @@ void App::RegisterProtectedRoutes() {
                   params.add(role_id);
                   params.add(enabled ? 1 : 0);
                   params.add(NowSeconds());
+                  params.add(RtspHa1(username, password));
                   uvcpp::uvcpp_db_value new_id;
                   std::string error;
                   if (!uvcpp::uvcpp_db_ok(db_.insert("INSERT INTO users(username, password_hash, "
-                                                     "role_id, enabled, created_at) "
-                                                     "VALUES(?, ?, ?, ?, ?)",
+                                                     "role_id, enabled, created_at, rtsp_ha1) "
+                                                     "VALUES(?, ?, ?, ?, ?, ?)",
                                                      params, &new_id))) {
                     op->ok = false;
                     op->status = IsUniqueError(db_.last_error()) ? 409 : 500;
@@ -2936,9 +2977,10 @@ void App::RegisterProtectedRoutes() {
                     params.add(new_role);
                     params.add(new_enabled ? 1 : 0);
                     params.add(password_hash);
+                    params.add(RtspHa1(target_name, password));
                     params.add(user_id);
-                    if (!Exec("UPDATE users SET role_id = ?, enabled = ?, password_hash = ? "
-                              "WHERE id = ?",
+                    if (!Exec("UPDATE users SET role_id = ?, enabled = ?, password_hash = ?, "
+                              "rtsp_ha1 = ? WHERE id = ?",
                               params, nullptr, &error)) {
                       op->ok = false;
                       op->status = 500;
@@ -4252,6 +4294,55 @@ bool App::CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::str
   return true;
 }
 
+bool App::CreateEventsTicket(int64_t user_id, std::string* token, int64_t* expires_at,
+                             std::string* error) {
+  *token = RandomHex(24);
+  if (token->empty()) {
+    if (error)
+      *error = "cannot generate an events ticket";
+    return false;
+  }
+  *expires_at = NowSeconds() + 30;
+  std::lock_guard<std::mutex> lock(tickets_mutex_);
+  const int64_t now = NowSeconds();
+  for (auto it = tickets_.begin(); it != tickets_.end();) {
+    if (it->second.expires_at <= now)
+      it = tickets_.erase(it);
+    else
+      ++it;
+  }
+  StreamTicket ticket;
+  ticket.user_id = user_id;
+  ticket.expires_at = *expires_at;
+  ticket.events = true;
+  tickets_[*token] = ticket;
+  return true;
+}
+
+void App::BroadcastEvent(const json& event) {
+  if (!event_hub_)
+    return;
+  const std::string text = event.dump();
+  std::vector<std::shared_ptr<EventClient>> clients;
+  {
+    std::lock_guard<std::mutex> lock(event_hub_->mutex);
+    clients.reserve(event_hub_->clients.size());
+    for (const auto& [id, client] : event_hub_->clients) {
+      (void)id;
+      clients.push_back(client);
+    }
+  }
+  for (const auto& client : clients) {
+    web_.post([client, text] {
+      auto* connection = client->connection.load();
+      if (connection == nullptr || !connection->is_open())
+        return;
+      if (connection->send_text(text.data(), text.size()) != 0)
+        client->connection = nullptr;
+    });
+  }
+}
+
 bool App::VerifyRtspCredentials(const std::string& username, const std::string& password) {
   uvcpp::uvcpp_db_table table;
   uvcpp::uvcpp_db_params params;
@@ -4268,6 +4359,24 @@ bool App::VerifyRtspCredentials(const std::string& username, const std::string& 
   UserContext user;
   user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
   return HasPermission(user, "rtsp.access");
+}
+
+std::string App::RtspHa1ForUser(const std::string& username) {
+  uvcpp::uvcpp_db_table table;
+  uvcpp::uvcpp_db_params params;
+  params.add(username);
+  std::string error;
+  if (!Query("SELECT u.rtsp_ha1, u.enabled, r.permissions FROM users u "
+             "JOIN roles r ON r.id = u.role_id WHERE u.username = ? COLLATE NOCASE",
+             params, &table, &error) ||
+      table.empty() || TableInt(table, 0, "enabled") == 0) {
+    return {};
+  }
+  UserContext user;
+  user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
+  if (!HasPermission(user, "rtsp.access"))
+    return {};
+  return TableText(table, 0, "rtsp_ha1");
 }
 
 bool App::ApplySystemTime(int64_t epoch_ms, std::string* error) {
@@ -5738,6 +5847,31 @@ void App::RegisterOnvifRoutes() {
 }
 
 void App::RegisterStreamRoutes() {
+  web_.post(
+      "/api/v1/events/ticket",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const UserContext user = UserFromRequest(req);
+            auto op = std::make_shared<OpResult>();
+            std::string token;
+            std::string error;
+            int64_t expires_at = 0;
+            if (!CreateEventsTicket(user.id, &token, &expires_at, &error)) {
+              op->ok = false;
+              op->status = 500;
+              op->code = "ticket_failed";
+              op->message = error;
+            } else {
+              op->data = json{{"ticket", token},
+                              {"wsPath", "/ws/events?ticket=" + token},
+                              {"expiresAt", expires_at}};
+            }
+            SendOp(resp, *op);
+            next();
+          },
+          "alert.view"));
+
   web_.post("/api/v1/streams/ticket",
             Protected(
                 [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
@@ -5872,7 +6006,7 @@ void App::RegisterStreamRoutes() {
   web_.websocket("/ws/live", [this](uvcpp::uvcpp_web_ws_request& ws) {
     const std::string* ticket_value = ws.query("ticket");
     StreamTicket ticket;
-    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket)) {
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) || ticket.events) {
       if (auto* connection = ws.connection()) {
         const std::string message = R"({"error":"invalid_ticket"})";
         connection->send_text(message.data(), message.size());
@@ -5889,6 +6023,37 @@ void App::RegisterStreamRoutes() {
         connection->close();
       }
     }
+  });
+
+  web_.websocket("/ws/events", [this](uvcpp::uvcpp_web_ws_request& ws) {
+    const std::string* ticket_value = ws.query("ticket");
+    StreamTicket ticket;
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) || !ticket.events) {
+      if (auto* connection = ws.connection()) {
+        const std::string message = R"({"error":"invalid_ticket"})";
+        connection->send_text(message.data(), message.size());
+        connection->close();
+      }
+      return;
+    }
+    auto* connection = ws.connection();
+    if (connection == nullptr)
+      return;
+    const std::shared_ptr<EventHub> hub = event_hub_;
+    auto client = std::make_shared<EventClient>();
+    client->id = hub->next_id++;
+    client->connection = connection;
+    {
+      std::lock_guard<std::mutex> lock(hub->mutex);
+      hub->clients[client->id] = client;
+    }
+    connection->on_close([hub, client](uvcpp::ws_close_code, const std::string&) {
+      client->connection = nullptr;
+      std::lock_guard<std::mutex> lock(hub->mutex);
+      hub->clients.erase(client->id);
+    });
+    const std::string hello = json{{"type", "hello"}, {"version", UVNVR_VERSION}}.dump();
+    connection->send_text(hello.data(), hello.size());
   });
 
   web_.websocket("/ws/playback", [this](uvcpp::uvcpp_web_ws_request& ws) {
@@ -6921,6 +7086,16 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
             params, nullptr, &error)) {
     std::fprintf(stderr, "alert insert failed: %s\n", error.c_str());
   }
+  BroadcastEvent(json{
+      {"type", "alert"},
+      {"alert",
+       json{{"channelId", channel_id},
+            {"type", type},
+            {"level", level},
+            {"message", message},
+            {"snapshotPath", snapshot_path},
+            {"acknowledged", false},
+            {"createdAt", NowSeconds()}}}});
   if (recording_ && channel_id > 0 &&
       (type == "motion" || type == "person" || type == "tamper" || type == "intrusion")) {
     recording_->OnEvent(channel_id);
@@ -7019,6 +7194,11 @@ void App::MonitorRun() {
         event.add(now);
         Exec("INSERT INTO channel_events(channel_id, state, reason, at) VALUES(?, ?, ?, ?)", event,
              nullptr, &state_error);
+        BroadcastEvent(json{{"type", "channel"},
+                            {"channelId", channel.id},
+                            {"name", channel.name},
+                            {"state", state},
+                            {"error", status.error}});
       }
       last_channel_state_[channel.id] = state;
 

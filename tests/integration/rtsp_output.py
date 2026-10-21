@@ -8,9 +8,12 @@ RTSP output with ffprobe over TCP and UDP. The output must advertise H.264 RTP
 Usage: tests/integration/rtsp_output.py [path-to-uvnvr] [http-port]
 Requires ffmpeg/ffprobe in PATH and MEDIAMTX_BIN (or mediamtx in PATH).
 """
+import base64
+import hashlib
 import http.cookiejar
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -46,6 +49,49 @@ def pick_port(preferred: int) -> int:
             return preferred
         except OSError:
             return free_port()
+
+
+def rtsp_options(headers: dict[str, str]) -> str:
+    url = f"rtsp://127.0.0.1:{RTSP_PORT}/live/1/main"
+    lines = [f"OPTIONS {url} RTSP/1.0", "CSeq: 1", "User-Agent: uvnvr-test"]
+    for name, value in headers.items():
+        lines.append(f"{name}: {value}")
+    with socket.create_connection(("127.0.0.1", RTSP_PORT), timeout=5) as connection:
+        connection.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    return data.decode("utf-8", "replace")
+
+
+def check_rtsp_auth():
+    challenge = rtsp_options({})
+    assert "401" in challenge.split("\r\n", 1)[0], challenge
+    assert 'WWW-Authenticate: Digest' in challenge, challenge
+    digest = re.search(r'Digest realm="([^"]+)", qop="auth", nonce="([^"]+)"', challenge)
+    assert digest, challenge
+    realm, nonce = digest.group(1), digest.group(2)
+    url = f"rtsp://127.0.0.1:{RTSP_PORT}/live/1/main"
+    ha1 = hashlib.md5(f"admin:{realm}:{PASSWORD}".encode()).hexdigest()
+    ha2 = hashlib.md5(f"OPTIONS:{url}".encode()).hexdigest()
+    nc = "00000001"
+    cnonce = "0a4f113b"
+    response = hashlib.md5(
+        f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()
+    ).hexdigest()
+    authorization = (
+        f'Digest username="admin", realm="{realm}", nonce="{nonce}", uri="{url}", '
+        f'response="{response}", qop=auth, nc={nc}, cnonce="{cnonce}"'
+    )
+    digest_reply = rtsp_options({"Authorization": authorization})
+    assert digest_reply.startswith("RTSP/1.0 200"), digest_reply
+    basic = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    basic_reply = rtsp_options({"Authorization": f"Basic {basic}"})
+    assert basic_reply.startswith("RTSP/1.0 200"), basic_reply
+    print("RTSP Digest and Basic authentication passed")
 
 
 def probe_stream(transport: str, channel_id: int = 1, deadline: float = 20):
@@ -246,6 +292,8 @@ def main() -> int:
             time.sleep(0.5)
         else:
             raise AssertionError("the test channel never came online")
+
+        check_rtsp_auth()
 
         for transport in ("tcp", "udp"):
             stream, error = probe_stream(transport)

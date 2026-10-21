@@ -12,6 +12,9 @@ const messages = {
       online: 'Service online',
       offline: 'Service unreachable',
     },
+    events: {
+      newAlert: 'New alert',
+    },
     nav: {
       dashboard: 'Dashboard',
       preview: 'Live preview',
@@ -589,6 +592,9 @@ const messages = {
       status: 'M3 基础能力',
       online: '服务在线',
       offline: '服务不可达',
+    },
+    events: {
+      newAlert: '新预警',
     },
     nav: {
       dashboard: '仪表盘',

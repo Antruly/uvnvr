@@ -3,6 +3,7 @@
 
 Usage: tests/integration/onvif_events.py [path-to-uvnvr] [http-port]
 """
+import asyncio
 import http.cookiejar
 import http.server
 import json
@@ -18,6 +19,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import websockets
+
 BIN = Path(sys.argv[1] if len(sys.argv) > 1 else "./build/uvnvr").resolve()
 PORT = int(sys.argv[2] if len(sys.argv) > 2 else 18810)
 RTSP_PORT = PORT + 100
@@ -27,6 +30,8 @@ MOCK_PORT = PORT + 200
 class MockOnvif(http.server.BaseHTTPRequestHandler):
     pulls = 0
     time_updates = 0
+    send_motion = False
+    motion_sent = False
     lock = threading.Lock()
 
     def log_message(self, *_args):
@@ -67,7 +72,9 @@ class MockOnvif(http.server.BaseHTTPRequestHandler):
         elif "PullMessages" in body:
             with MockOnvif.lock:
                 MockOnvif.pulls += 1
-                first = MockOnvif.pulls == 1
+                first = MockOnvif.send_motion and not MockOnvif.motion_sent
+                if first:
+                    MockOnvif.motion_sent = True
             notification = ""
             if first:
                 notification = (
@@ -180,6 +187,26 @@ def main() -> int:
             },
         )
         assert status == 201, (status, channel)
+
+        status, events = call("POST", "/api/v1/events/ticket", {})
+        assert status == 200 and events.get("wsPath"), (status, events)
+
+        async def wait_for_alert():
+            url = f"ws://127.0.0.1:{PORT}{events['wsPath']}"
+            async with websockets.connect(url) as websocket:
+                MockOnvif.send_motion = True
+                deadline = time.monotonic() + 25
+                while time.monotonic() < deadline:
+                    message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=25))
+                    if (
+                        message.get("type") == "alert"
+                        and message.get("alert", {}).get("channelId") == channel["id"]
+                    ):
+                        return message
+                raise AssertionError("no alert arrived over the events WebSocket")
+
+        pushed = asyncio.run(wait_for_alert())
+        print(f"events WebSocket push: {pushed['alert']['type']}")
 
         alert = None
         deadline = time.monotonic() + 20

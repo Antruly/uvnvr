@@ -57,6 +57,7 @@ struct StreamTicket {
   std::string stream;
   int64_t expires_at = 0;
   bool playback = false;
+  bool events = false;
   int64_t start_ms = 0;
   int64_t end_ms = 0;
   double speed = 1.0;
@@ -128,8 +129,12 @@ private:
   void RegisterPlanRoutes();
   bool CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                           std::string* token, int64_t* expires_at, std::string* error);
+  bool CreateEventsTicket(int64_t user_id, std::string* token, int64_t* expires_at,
+                          std::string* error);
+  void BroadcastEvent(const json& event);
   bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
   bool VerifyRtspCredentials(const std::string& username, const std::string& password);
+  std::string RtspHa1ForUser(const std::string& username);
   bool ApplySystemTime(int64_t epoch_ms, std::string* error);
   json SyncCameraTimes(int64_t epoch_ms);
   bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
@@ -225,6 +230,17 @@ private:
   std::vector<unsigned char> secret_key_;
   std::mutex tickets_mutex_;
   std::unordered_map<std::string, StreamTicket> tickets_;
+
+  struct EventClient {
+    uint64_t id = 0;
+    std::atomic<uvcpp::uvcpp_ws_connection*> connection{nullptr};
+  };
+  struct EventHub {
+    std::mutex mutex;
+    std::unordered_map<uint64_t, std::shared_ptr<EventClient>> clients;
+    std::atomic<uint64_t> next_id{1};
+  };
+  std::shared_ptr<EventHub> event_hub_ = std::make_shared<EventHub>();
   std::atomic<bool> setup_required_{true};
   std::mutex serial_mutex_;
   std::string serial_;
