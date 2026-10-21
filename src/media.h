@@ -42,6 +42,7 @@ public:
   MediaService& operator=(const MediaService&) = delete;
 
   void SetFfmpegPath(const std::string& path);
+  void SetGpuEnabled(bool enabled);
   std::string FfmpegPath() const;
   bool Available() const;
 

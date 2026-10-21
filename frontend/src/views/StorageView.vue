@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import UsageMeter from '@/components/UsageMeter.vue'
+import { useAppStore } from '@/stores/app'
 import { api, ApiError } from '@/api/client'
 
 defineOptions({ name: 'StorageView' })
@@ -39,6 +40,8 @@ interface RecordingStatus {
 }
 
 const { t } = useI18n()
+const app = useAppStore()
+const canMaintain = computed(() => app.server?.maintenance === true)
 const volumes = ref<Volume[]>([])
 const recordingStatus = ref<RecordingStatus | null>(null)
 let statusTimer: number | undefined
@@ -142,6 +145,21 @@ async function remove(volume: Volume) {
   }
 }
 
+async function format(volume: Volume) {
+  const typed = window.prompt(t('storage.formatConfirm', { path: volume.path }))
+  if (typed !== volume.path) return
+  try {
+    const result = await api<{ recordings: number }>('/api/v1/storage/format', {
+      method: 'POST',
+      body: JSON.stringify({ volumeId: volume.id, confirm: typed }),
+    })
+    flash(t('storage.formatted', { count: result.recordings }))
+    await load()
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
 async function add() {
   try {
     await api('/api/v1/storage/volumes', {
@@ -239,6 +257,10 @@ onBeforeUnmount(() => {
       </label>
 
       <div class="modal-actions">
+        <button v-if="canMaintain" class="button danger" @click="format(volume)">
+          <AppIcon name="trash" :size="15" />
+          {{ t('storage.format') }}
+        </button>
         <button class="button danger" @click="remove(volume)">
           <AppIcon name="trash" :size="15" />
           {{ t('common.delete') }}

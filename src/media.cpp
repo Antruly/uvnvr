@@ -50,6 +50,7 @@ std::string RedactUrl(const std::string& url) {
   return url.substr(0, scheme + 3) + "***@" + url.substr(at + 1);
 }
 
+#ifdef _WIN32
 std::string QuoteWindowsArg(const std::string& value) {
   if (value.find_first_of(" \t\"") == std::string::npos)
     return value;
@@ -63,6 +64,7 @@ std::string QuoteWindowsArg(const std::string& value) {
   out += '"';
   return out;
 }
+#endif
 
 std::string ResolveFfmpeg() {
   if (const char* env = std::getenv("UVNVR_FFMPEG"); env != nullptr && env[0] != '\0') {
@@ -159,6 +161,84 @@ bool CapturePosix(const std::string& executable, const std::vector<std::string>&
   close(fds[0]);
   int status = 0;
   waitpid(pid, &status, 0);
+  if (output->empty()) {
+    if (error)
+      *error = "ffmpeg capture returned no data";
+    return false;
+  }
+  return true;
+}
+#else
+bool CaptureWindows(const std::string& executable, const std::vector<std::string>& args,
+                    std::string* output, std::string* error) {
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.bInheritHandle = TRUE;
+  HANDLE read_end = nullptr;
+  HANDLE write_end = nullptr;
+  if (!CreatePipe(&read_end, &write_end, &attributes, 0)) {
+    if (error)
+      *error = "cannot create capture pipe";
+    return false;
+  }
+  SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+  HANDLE null_out =
+      CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &attributes, OPEN_EXISTING, 0, nullptr);
+  const bool has_null = null_out != nullptr && null_out != INVALID_HANDLE_VALUE;
+
+  std::string command = QuoteWindowsArg(executable);
+  for (const auto& arg : args)
+    command += " " + QuoteWindowsArg(arg);
+  STARTUPINFOA startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  startup.hStdOutput = write_end;
+  startup.hStdError = has_null ? null_out : GetStdHandle(STD_ERROR_HANDLE);
+  PROCESS_INFORMATION process{};
+  std::vector<char> mutable_command(command.begin(), command.end());
+  mutable_command.push_back('\0');
+  const BOOL started = CreateProcessA(nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
+                                      CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+  CloseHandle(write_end);
+  if (has_null)
+    CloseHandle(null_out);
+  if (!started) {
+    CloseHandle(read_end);
+    if (error)
+      *error = "cannot start ffmpeg (CreateProcess failed)";
+    return false;
+  }
+
+  output->clear();
+  const DWORD deadline = GetTickCount() + 10000;
+  char buffer[16384];
+  while (GetTickCount() < deadline) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(read_end, nullptr, 0, nullptr, &available, nullptr))
+      break;
+    if (available == 0) {
+      if (WaitForSingleObject(process.hProcess, 100) == WAIT_OBJECT_0) {
+        DWORD read = 0;
+        while (ReadFile(read_end, buffer, sizeof(buffer), &read, nullptr) && read > 0)
+          output->append(buffer, read);
+        break;
+      }
+      continue;
+    }
+    DWORD read = 0;
+    if (!ReadFile(read_end, buffer, sizeof(buffer), &read, nullptr) || read == 0)
+      break;
+    output->append(buffer, read);
+    if (output->size() > 16 * 1024 * 1024)
+      break;
+  }
+  if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT)
+    TerminateProcess(process.hProcess, 1);
+  WaitForSingleObject(process.hProcess, 2000);
+  CloseHandle(read_end);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
   if (output->empty()) {
     if (error)
       *error = "ffmpeg capture returned no data";
@@ -538,6 +618,7 @@ struct MediaService::Impl {
 
   uvcpp::uvcpp_web_app* web;
   std::string ffmpeg_path;
+  std::atomic<bool> gpu_enabled{false};
   bool started = false;
   mutable std::mutex mutex;
   std::unordered_map<int64_t, std::shared_ptr<Channel>> channels;
@@ -876,6 +957,10 @@ void MediaService::SetFfmpegPath(const std::string& path) {
     impl_->ffmpeg_path = path;
 }
 
+void MediaService::SetGpuEnabled(bool enabled) {
+  impl_->gpu_enabled = enabled;
+}
+
 std::string MediaService::FfmpegPath() const {
   return impl_->ffmpeg_path;
 }
@@ -963,13 +1048,24 @@ bool MediaService::CaptureJpeg(const std::string& url, std::string* jpeg, std::s
       "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
       "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1",
       "-q:v",         "2",         "-f",    "mjpeg",    "pipe:1"};
+  const auto run = [&](const std::vector<std::string>& attempt) {
 #ifdef _WIN32
-  if (error)
-    *error = "snapshot capture is not wired on Windows yet";
-  return false;
+    return CaptureWindows(impl_->ffmpeg_path, attempt, jpeg, error);
 #else
-  return CapturePosix(impl_->ffmpeg_path, args, jpeg, error);
+    return CapturePosix(impl_->ffmpeg_path, attempt, jpeg, error);
 #endif
+  };
+  if (impl_->gpu_enabled.load()) {
+    // Hardware decoding is an optimization: fall back to software if the
+    // driver or the pixel format cannot produce this snapshot.
+    std::vector<std::string> accelerated = args;
+    const auto input = std::find(accelerated.begin(), accelerated.end(), "-i");
+    accelerated.insert(input, {"-hwaccel", "auto"});
+    if (run(accelerated))
+      return true;
+    jpeg->clear();
+  }
+  return run(args);
 }
 
 bool MediaService::CaptureGray(const std::string& url, int width, int height,
@@ -980,13 +1076,24 @@ bool MediaService::CaptureGray(const std::string& url, int width, int height,
       "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
       "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1",
       "-vf",          filter,      "-f",    "rawvideo", "pipe:1"};
+  const auto run = [&](const std::vector<std::string>& attempt, std::string* output) {
 #ifdef _WIN32
-  if (error)
-    *error = "motion capture is not wired on Windows yet";
-  return false;
+    return CaptureWindows(impl_->ffmpeg_path, attempt, output, error);
 #else
+    return CapturePosix(impl_->ffmpeg_path, attempt, output, error);
+#endif
+  };
   std::string raw;
-  if (!CapturePosix(impl_->ffmpeg_path, args, &raw, error))
+  bool captured = false;
+  if (impl_->gpu_enabled.load()) {
+    std::vector<std::string> accelerated = args;
+    const auto input = std::find(accelerated.begin(), accelerated.end(), "-i");
+    accelerated.insert(input, {"-hwaccel", "auto"});
+    captured = run(accelerated, &raw);
+    if (!captured)
+      raw.clear();
+  }
+  if (!captured && !run(args, &raw))
     return false;
   if (raw.size() < static_cast<size_t>(width * height)) {
     if (error)
@@ -995,7 +1102,6 @@ bool MediaService::CaptureGray(const std::string& url, int width, int height,
   }
   frame->assign(raw.begin(), raw.begin() + width * height);
   return true;
-#endif
 }
 
 void MediaService::SetDataSink(

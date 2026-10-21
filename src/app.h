@@ -154,6 +154,11 @@ private:
   json BuildSummary();
   json SettingsJson();
   bool UpdateEventSettings(const json& body, std::string* error);
+  bool UpdateMotionSettings(const json& body, std::string* error);
+  std::string PerformanceTier() const;
+  bool RequireMaintenance(const uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp);
+  bool SetSerial(const std::string& serial, std::string* error);
+  std::string EffectiveVersion();
   void Audit(const std::string& category, const std::string& level, const std::string& actor,
              const std::string& ip, const std::string& ua, const std::string& object_type,
              const std::string& object_id, const std::string& action, const std::string& result,
@@ -221,6 +226,7 @@ private:
   std::mutex tickets_mutex_;
   std::unordered_map<std::string, StreamTicket> tickets_;
   std::atomic<bool> setup_required_{true};
+  std::mutex serial_mutex_;
   std::string serial_;
 
   std::mutex metrics_mutex_;

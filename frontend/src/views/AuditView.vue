@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { api } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 
 defineOptions({ name: 'AuditView' })
 
@@ -30,6 +31,9 @@ interface AuditResponse {
 }
 
 const { t } = useI18n()
+const app = useAppStore()
+const canMaintain = computed(() => app.server?.maintenance === true)
+const notice = ref('')
 const items = ref<AuditRow[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -131,6 +135,29 @@ function go(delta: number) {
   void load()
 }
 
+function exportCsv() {
+  const params = buildQuery()
+  params.delete('page')
+  params.delete('pageSize')
+  window.location.assign(`/api/v1/audit/export?${params.toString()}`)
+}
+
+async function purge() {
+  if (!window.confirm(t('audit.purgeConfirm'))) return
+  notice.value = ''
+  error.value = ''
+  try {
+    const result = await api<{ deleted: number }>('/api/v1/audit/purge', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: 'purge' }),
+    })
+    notice.value = t('audit.purged', { count: result.deleted })
+    await load(true)
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : t('common.error')
+  }
+}
+
 onMounted(() => void load())
 </script>
 
@@ -143,12 +170,22 @@ onMounted(() => void load())
     </div>
     <div class="head-actions">
       <span class="muted">{{ t('audit.total', { total }) }}</span>
+      <button class="button" @click="exportCsv">
+        <AppIcon name="save" :size="16" />
+        {{ t('audit.exportCsv') }}
+      </button>
+      <button v-if="canMaintain" class="button danger" @click="purge">
+        <AppIcon name="trash" :size="16" />
+        {{ t('audit.purge') }}
+      </button>
       <button class="button" @click="load()">
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
       </button>
     </div>
   </section>
+
+  <p v-if="notice" class="notice">{{ notice }}</p>
 
   <form class="panel filter-bar" @submit.prevent="load(true)">
     <label class="field compact-field">

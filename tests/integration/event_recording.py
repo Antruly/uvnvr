@@ -235,7 +235,7 @@ def main() -> int:
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
         csrf = ""
 
-        def call(method: str, path: str, body: dict | None = None):
+        def call(method: str, path: str, body: dict | None = None, raw: bool = False):
             request = urllib.request.Request(
                 f"http://127.0.0.1:{PORT}{path}",
                 data=None if body is None else json.dumps(body).encode(),
@@ -247,9 +247,15 @@ def main() -> int:
                 request.add_header("X-CSRF-Token", csrf)
             try:
                 with opener.open(request, timeout=20) as response:
-                    return response.status, json.loads(response.read() or b"null")
+                    data = response.read()
+                    if raw:
+                        return response.status, data
+                    return response.status, json.loads(data or b"null")
             except urllib.error.HTTPError as error:
-                return error.code, json.loads(error.read() or b"null")
+                data = error.read()
+                if raw:
+                    return error.code, data
+                return error.code, json.loads(data or b"null")
 
         for _ in range(100):
             try:
@@ -348,6 +354,12 @@ def main() -> int:
             time.sleep(0.5)
         else:
             raise AssertionError("the test channel never came online")
+
+        # The snapshot path exercises the capture command (and the software
+        # fallback when hardware decoding is unavailable).
+        status, image = call("GET", f"/api/v1/channels/{channel_id}/snapshot", raw=True)
+        assert status == 200, (status, image[:200])
+        assert image.startswith(b"\xff\xd8"), image[:16]
         time.sleep(6)
 
         MockOnvif.send_motion = True

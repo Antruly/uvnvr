@@ -923,6 +923,10 @@ bool App::Migrate(std::string* error) {
       {"event.pre_seconds", "10"},
       {"event.post_seconds", "30"},
       {"event.max_seconds", "300"},
+      {"motion.enabled", "1"},
+      {"motion.sensitivity", "50"},
+      {"motion.cooldown_seconds", "60"},
+      {"motion.region", "0,0,100,100"},
   };
   for (const auto& [key, value] : settings) {
     uvcpp::uvcpp_db_params params;
@@ -946,6 +950,7 @@ bool App::Migrate(std::string* error) {
 }
 
 bool App::EnsureSerial(std::string* error) {
+  std::lock_guard<std::mutex> lock(serial_mutex_);
   uvcpp::uvcpp_db_table table;
   if (!Query("SELECT value FROM system_meta WHERE key = 'serial'", {}, &table, error))
     return false;
@@ -1623,16 +1628,12 @@ json App::BuildSummary() {
   alert_params.add(1);
   Query("SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = ?", alert_params, &alert_count,
         &error);
+  uvcpp::uvcpp_db_table channel_count;
+  uvcpp::uvcpp_db_table recording_count;
+  Query("SELECT COUNT(*) AS n FROM channels", {}, &channel_count, &error);
+  Query("SELECT COUNT(*) AS n FROM recordings", {}, &recording_count, &error);
 
-  const double memory_gb = static_cast<double>(total_memory) / (1024.0 * 1024.0 * 1024.0);
-  const int tier_cores =
-      cpu_count > 0 ? cpu_count : static_cast<int>(std::thread::hardware_concurrency());
-  std::string tier = "high";
-  if (tier_cores <= 4 || memory_gb <= 8.0) {
-    tier = "low";
-  } else if (tier_cores <= 8 || memory_gb <= 16.0) {
-    tier = "medium";
-  }
+  const std::string tier = PerformanceTier();
   bool gpu_available = false;
   std::string gpu_vendor = "none";
 #ifdef _WIN32
@@ -1658,9 +1659,13 @@ json App::BuildSummary() {
 #endif
   const bool gpu_enabled = GetSettingInt("system.gpu_enabled", 1) != 0;
 
-  result["version"] = UVNVR_VERSION;
+  result["version"] = EffectiveVersion();
+  result["buildVersion"] = UVNVR_VERSION;
   result["commit"] = UVNVR_GIT_SHA;
-  result["serial"] = serial_;
+  {
+    std::lock_guard<std::mutex> lock(serial_mutex_);
+    result["serial"] = serial_;
+  }
   result["hostname"] = hostname;
   result["os"] = os_name;
   result["uptimeSeconds"] = static_cast<int64_t>(uptime);
@@ -1682,12 +1687,13 @@ json App::BuildSummary() {
                         {"usedBytes", disk_used},
                         {"freeBytes", disk_free},
                         {"usagePercent", disk_percent}};
-  result["counts"] = json{{"users", users.empty() ? 0 : TableInt(users, 0, "n")},
-                          {"sessions", sessions.empty() ? 0 : TableInt(sessions, 0, "n")},
-                          {"audit", audit.empty() ? 0 : TableInt(audit, 0, "n")},
-                          {"alerts", alert_count.empty() ? 0 : TableInt(alert_count, 0, "n")},
-                          {"channels", 0},
-                          {"recordings", 0}};
+  result["counts"] =
+      json{{"users", users.empty() ? 0 : TableInt(users, 0, "n")},
+           {"sessions", sessions.empty() ? 0 : TableInt(sessions, 0, "n")},
+           {"audit", audit.empty() ? 0 : TableInt(audit, 0, "n")},
+           {"alerts", alert_count.empty() ? 0 : TableInt(alert_count, 0, "n")},
+           {"channels", channel_count.empty() ? 0 : TableInt(channel_count, 0, "n")},
+           {"recordings", recording_count.empty() ? 0 : TableInt(recording_count, 0, "n")}};
   if (playback_) {
     const BlockCache::Stats cache = playback_->CacheStats();
     result["cache"] = json{{"hits", cache.hits},
@@ -1909,6 +1915,7 @@ int App::Run() {
   if (const char* ffmpeg = std::getenv("UVNVR_FFMPEG"); ffmpeg != nullptr && ffmpeg[0] != '\0') {
     media_->SetFfmpegPath(ffmpeg);
   }
+  media_->SetGpuEnabled(GetSettingInt("system.gpu_enabled", 1) != 0);
   onvif_events_ = std::make_unique<OnvifEventService>(
       [this](int64_t channel_id, const std::string& type, const std::string& message) {
         RaiseAlert(channel_id, type, "warning", message, "");
@@ -1968,7 +1975,8 @@ void App::RegisterPublicRoutes() {
              json{{"status", "ok"},
                   {"name", UVNVR_PRODUCT_NAME},
                   {"version", UVNVR_VERSION},
-                  {"commit", UVNVR_GIT_SHA}});
+                  {"commit", UVNVR_GIT_SHA},
+                  {"maintenance", config_.maintenance}});
     next();
   });
 
@@ -1985,10 +1993,15 @@ void App::RegisterPublicRoutes() {
   web_.get("/api/v1/setup/status",
            [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
                   uvcpp::uvcpp_web_next next) {
+             std::string serial;
+             {
+               std::lock_guard<std::mutex> lock(serial_mutex_);
+               serial = serial_;
+             }
              SendJson(resp, 200,
                       json{{"setupRequired", setup_required_.load()},
                            {"version", UVNVR_VERSION},
-                           {"serial", serial_}});
+                           {"serial", serial}});
              next();
            });
 
@@ -2090,6 +2103,48 @@ bool JsonBool(const json& body, const char* key, bool fallback) {
   if (it == body.end() || !it->is_boolean())
     return fallback;
   return it->get<bool>();
+}
+
+std::string CsvField(const std::string& value) {
+  if (value.find_first_of(",\"\r\n") == std::string::npos)
+    return value;
+  std::string out = "\"";
+  for (char c : value) {
+    if (c == '"')
+      out += '"';
+    out += c;
+  }
+  out += '"';
+  return out;
+}
+
+struct MotionRegion {
+  int x = 0;
+  int y = 0;
+  int width = 100;
+  int height = 100;
+};
+
+// The settings value is "x,y,width,height" in percent of the frame.
+bool ParseMotionRegion(const std::string& value, MotionRegion* region) {
+  int x = 0;
+  int y = 0;
+  int width = 100;
+  int height = 100;
+  if (std::sscanf(value.c_str(), "%d,%d,%d,%d", &x, &y, &width, &height) != 4)
+    return false;
+  if (x < 0 || y < 0 || width < 1 || height < 1 || x > 100 || y > 100 || width > 100 ||
+      height > 100 || x + width > 100 || y + height > 100)
+    return false;
+  *region = MotionRegion{x, y, width, height};
+  return true;
+}
+
+json MotionRegionJson(const std::string& value) {
+  MotionRegion region;
+  if (!ParseMotionRegion(value, &region))
+    region = MotionRegion{};
+  return json{{"x", region.x}, {"y", region.y}, {"width", region.width}, {"height", region.height}};
 }
 
 bool ValidUsername(const std::string& name) {
@@ -2253,7 +2308,8 @@ void App::RegisterCoreRoutes() {
                            !update_int("audit", "retentionDays", 1, 3650, "audit.retention_days")) {
                          return;
                        }
-                       if (!UpdateEventSettings(body, &*error))
+                       if (!UpdateEventSettings(body, &*error) ||
+                           !UpdateMotionSettings(body, &*error))
                          return;
 
                        if (body.contains("system") && body["system"].is_object()) {
@@ -2299,6 +2355,8 @@ void App::RegisterCoreRoutes() {
                              *error = db_error;
                              return;
                            }
+                           if (media_)
+                             media_->SetGpuEnabled(enabled);
                          }
                          if (system.contains("language")) {
                            const std::string language = system["language"].is_string()
@@ -2427,6 +2485,134 @@ bool App::UpdateEventSettings(const json& body, std::string* error) {
   return true;
 }
 
+bool App::UpdateMotionSettings(const json& body, std::string* error) {
+  if (!body.contains("motion") || !body["motion"].is_object())
+    return true;
+  const auto& motion = body["motion"];
+  bool enabled = GetSettingInt("motion.enabled", 1) != 0;
+  int64_t sensitivity = GetSettingInt("motion.sensitivity", 50);
+  int64_t cooldown = GetSettingInt("motion.cooldown_seconds", 60);
+  MotionRegion region;
+  ParseMotionRegion(GetSetting("motion.region", "0,0,100,100"), &region);
+  if (motion.contains("enabled")) {
+    if (!motion["enabled"].is_boolean()) {
+      *error = "motion enabled must be a boolean";
+      return false;
+    }
+    enabled = motion["enabled"].get<bool>();
+  }
+  const auto read_int = [&](const char* key, int64_t* target) -> bool {
+    const auto it = motion.find(key);
+    if (it == motion.end())
+      return true;
+    if (!it->is_number_integer()) {
+      *error = std::string(key) + " must be an integer";
+      return false;
+    }
+    *target = it->get<int64_t>();
+    return true;
+  };
+  if (!read_int("sensitivity", &sensitivity) || !read_int("cooldownSeconds", &cooldown))
+    return false;
+  if (sensitivity < 1 || sensitivity > 100 || cooldown < 10 || cooldown > 3600) {
+    *error = "motion sensitivity or cooldown is out of range";
+    return false;
+  }
+  if (motion.contains("region")) {
+    const auto& value = motion["region"];
+    if (!value.is_object()) {
+      *error = "motion region must be an object";
+      return false;
+    }
+    const auto read_region = [&](const char* key, int* target) -> bool {
+      const auto it = value.find(key);
+      if (it == value.end() || !it->is_number_integer()) {
+        *error = std::string("motion region ") + key + " must be an integer";
+        return false;
+      }
+      *target = it->get<int>();
+      return true;
+    };
+    if (!read_region("x", &region.x) || !read_region("y", &region.y) ||
+        !read_region("width", &region.width) || !read_region("height", &region.height))
+      return false;
+    if (region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1 ||
+        region.x + region.width > 100 || region.y + region.height > 100) {
+      *error = "motion region is out of range";
+      return false;
+    }
+  }
+  std::string db_error;
+  const std::string region_text = std::to_string(region.x) + "," + std::to_string(region.y) + "," +
+                                  std::to_string(region.width) + "," +
+                                  std::to_string(region.height);
+  if (!SetSetting("motion.enabled", enabled ? "1" : "0", &db_error) ||
+      !SetSetting("motion.sensitivity", std::to_string(sensitivity), &db_error) ||
+      !SetSetting("motion.cooldown_seconds", std::to_string(cooldown), &db_error) ||
+      !SetSetting("motion.region", region_text, &db_error)) {
+    *error = db_error;
+    return false;
+  }
+  return true;
+}
+
+bool App::RequireMaintenance(const uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp) {
+  if (!config_.maintenance) {
+    SendError(resp, 403, "maintenance_required",
+              "this operation requires the service to run in maintenance mode");
+    return false;
+  }
+  if (UserFromRequest(req).role_name != "admin") {
+    SendError(resp, 403, "admin_required", "this operation requires an administrator");
+    return false;
+  }
+  return true;
+}
+
+bool App::SetSerial(const std::string& serial, std::string* error) {
+  if (serial.empty() || serial.size() > 64) {
+    *error = "serial must be between 1 and 64 characters";
+    return false;
+  }
+  for (const char c : serial) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.') {
+      *error = "serial may contain letters, digits, dot, dash and underscore only";
+      return false;
+    }
+  }
+  uvcpp::uvcpp_db_params params;
+  params.add(serial);
+  if (!Exec("INSERT OR REPLACE INTO system_meta(key, value) VALUES('serial', ?)", params, nullptr,
+            error))
+    return false;
+  std::lock_guard<std::mutex> lock(serial_mutex_);
+  serial_ = serial;
+  return true;
+}
+
+std::string App::EffectiveVersion() {
+  uvcpp::uvcpp_db_table table;
+  std::string error;
+  if (!Query("SELECT value FROM system_meta WHERE key = 'version_override'", {}, &table, &error) ||
+      table.empty())
+    return UVNVR_VERSION;
+  const std::string value = TableText(table, 0, "value");
+  return value.empty() ? UVNVR_VERSION : value;
+}
+
+std::string App::PerformanceTier() const {
+  const double memory_gb =
+      static_cast<double>(platform::TotalMemoryBytes()) / (1024.0 * 1024.0 * 1024.0);
+  const int cores = platform::CpuCount() > 0
+                        ? platform::CpuCount()
+                        : static_cast<int>(std::thread::hardware_concurrency());
+  if (cores <= 4 || memory_gb <= 8.0)
+    return "low";
+  if (cores <= 8 || memory_gb <= 16.0)
+    return "medium";
+  return "high";
+}
+
 json App::SettingsJson() {
   return json{
       {"security", json{{"webMaxFailures", GetSettingInt("security.web_max_failures", 10)},
@@ -2438,6 +2624,10 @@ json App::SettingsJson() {
                      {"preSeconds", GetSettingInt("event.pre_seconds", 10)},
                      {"postSeconds", GetSettingInt("event.post_seconds", 30)},
                      {"maxSeconds", GetSettingInt("event.max_seconds", 300)}}},
+      {"motion", json{{"enabled", GetSettingInt("motion.enabled", 1) != 0},
+                      {"sensitivity", GetSettingInt("motion.sensitivity", 50)},
+                      {"cooldownSeconds", GetSettingInt("motion.cooldown_seconds", 60)},
+                      {"region", MotionRegionJson(GetSetting("motion.region", "0,0,100,100"))}}},
       {"system", json{{"timezone", GetSetting("system.timezone", "UTC")},
                       {"language", GetSetting("system.language", "auto")},
                       {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0},
@@ -3211,6 +3401,258 @@ void App::RegisterProtectedRoutes() {
                 });
           },
           "log.view"));
+
+  web_.get(
+      "/api/v1/audit/export",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string category = req.query("category") ? *req.query("category") : "";
+            const std::string level = req.query("level") ? *req.query("level") : "";
+            const std::string keyword = req.query("q") ? *req.query("q") : "";
+            int64_t from = 0;
+            int64_t to = 0;
+            if (const std::string* value = req.query("from"))
+              ParseIntParam(value, &from);
+            if (const std::string* value = req.query("to"))
+              ParseIntParam(value, &to);
+            auto csv = std::make_shared<std::string>();
+            auto failed = std::make_shared<bool>(false);
+            const std::string filename = "audit-" + std::to_string(NowSeconds()) + ".csv";
+            RunWork(
+                [this, category, level, keyword, from, to, csv, failed] {
+                  std::string where = " WHERE 1=1";
+                  uvcpp::uvcpp_db_params params;
+                  if (!category.empty()) {
+                    where += " AND category = ?";
+                    params.add(category);
+                  }
+                  if (!level.empty()) {
+                    where += " AND level = ?";
+                    params.add(level);
+                  }
+                  if (!keyword.empty()) {
+                    where += " AND (actor LIKE ? OR action LIKE ? OR detail LIKE ?)";
+                    const std::string like = "%" + keyword + "%";
+                    params.add(like);
+                    params.add(like);
+                    params.add(like);
+                  }
+                  if (from > 0) {
+                    where += " AND ts >= ?";
+                    params.add(from);
+                  }
+                  if (to > 0) {
+                    where += " AND ts <= ?";
+                    params.add(to);
+                  }
+                  uvcpp::uvcpp_db_table table;
+                  std::string error;
+                  if (!Query("SELECT id, ts, category, level, actor, ip, user_agent, object_type, "
+                             "object_id, action, result, error_code, detail FROM audit_log" +
+                                 where + " ORDER BY ts DESC LIMIT 100000",
+                             params, &table, &error)) {
+                    *failed = true;
+                    return;
+                  }
+                  std::string out = "\xEF\xBB\xBF";
+                  out += "id,ts,category,level,actor,ip,userAgent,objectType,objectId,action,"
+                         "result,errorCode,detail\r\n";
+                  for (size_t i = 0; i < table.rows().size(); ++i) {
+                    out += std::to_string(TableInt(table, i, "id")) + ",";
+                    out += std::to_string(TableInt(table, i, "ts")) + ",";
+                    out += CsvField(TableText(table, i, "category")) + ",";
+                    out += CsvField(TableText(table, i, "level")) + ",";
+                    out += CsvField(TableText(table, i, "actor")) + ",";
+                    out += CsvField(TableText(table, i, "ip")) + ",";
+                    out += CsvField(TableText(table, i, "user_agent")) + ",";
+                    out += CsvField(TableText(table, i, "object_type")) + ",";
+                    out += CsvField(TableText(table, i, "object_id")) + ",";
+                    out += CsvField(TableText(table, i, "action")) + ",";
+                    out += CsvField(TableText(table, i, "result")) + ",";
+                    out += CsvField(TableText(table, i, "error_code")) + ",";
+                    out += CsvField(TableText(table, i, "detail")) + "\r\n";
+                  }
+                  *csv = std::move(out);
+                },
+                [csv, failed, filename, &resp, next] {
+                  if (*failed) {
+                    SendError(resp, 500, "database_error", "the audit log could not be exported");
+                    next();
+                    return;
+                  }
+                  resp.set_header("Content-Type", "text/csv; charset=utf-8");
+                  resp.set_header("Content-Disposition",
+                                  "attachment; filename=\"" + filename + "\"");
+                  resp.set_header("Cache-Control", "no-store");
+                  resp.status(200).body(*csv, "text/csv; charset=utf-8");
+                  resp.end();
+                  next();
+                });
+          },
+          "log.view"));
+
+  web_.post("/api/v1/audit/purge",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  if (!RequireMaintenance(req, resp)) {
+                    next();
+                    return;
+                  }
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object() ||
+                      JsonString(body, "confirm") != "purge") {
+                    SendError(resp, 400, "confirm_required",
+                              "send {\"confirm\":\"purge\"} to delete audit entries");
+                    next();
+                    return;
+                  }
+                  const int64_t before = std::max<int64_t>(0, JsonInt(body, "before", 0));
+                  const UserContext actor = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, before, actor, ip, ua, op] {
+                        uvcpp::uvcpp_db_table count;
+                        uvcpp::uvcpp_db_params params;
+                        std::string where;
+                        if (before > 0) {
+                          where = " WHERE ts < ?";
+                          params.add(before);
+                        }
+                        std::string error;
+                        if (!Query("SELECT COUNT(*) AS n FROM audit_log" + where, params, &count,
+                                   &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        const int64_t deleted = count.empty() ? 0 : TableInt(count, 0, "n");
+                        if (!Exec("DELETE FROM audit_log" + where, params, nullptr, &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        Audit("maintenance", "warning", actor.username, ip, ua, "audit", "",
+                              "purge", "success", "",
+                              json{{"before", before}, {"deleted", deleted}}.dump());
+                        op->data = json{{"deleted", deleted}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "log.view"));
+
+  web_.put("/api/v1/system/serial",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!RequireMaintenance(req, resp)) {
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 const std::string serial = JsonString(body, "serial");
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, serial, actor, ip, ua, op] {
+                       std::string error;
+                       if (!SetSerial(serial, &error)) {
+                         op->ok = false;
+                         op->status = 400;
+                         op->code = "invalid_serial";
+                         op->message = error;
+                         return;
+                       }
+                       Audit("maintenance", "warning", actor.username, ip, ua, "system", "serial",
+                             "update", "success", "", json{{"serial", serial}}.dump());
+                       op->data = json{{"serial", serial}};
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "system.manage"));
+
+  web_.put(
+      "/api/v1/system/version",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            if (!RequireMaintenance(req, resp)) {
+              next();
+              return;
+            }
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const std::string version = JsonString(body, "version");
+            if (version.size() > 64 ||
+                (!version.empty() &&
+                 !std::regex_match(version, std::regex(R"(^[A-Za-z0-9._+-]+$)")))) {
+              SendError(resp, 400, "invalid_version",
+                        "version must be empty or contain letters, digits, dot, dash, underscore "
+                        "and plus");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, version, actor, ip, ua, op] {
+                  std::string error;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(version);
+                  if (version.empty()) {
+                    if (!Exec("DELETE FROM system_meta WHERE key = 'version_override'", {}, nullptr,
+                              &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = error;
+                      return;
+                    }
+                  } else if (!Exec("INSERT OR REPLACE INTO system_meta(key, value) VALUES("
+                                   "'version_override', ?)",
+                                   params, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  Audit("maintenance", "warning", actor.username, ip, ua, "system", "version",
+                        "update", "success", "", json{{"version", version}}.dump());
+                  op->data = json{{"version", EffectiveVersion()}, {"buildVersion", UVNVR_VERSION}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "system.manage"));
 
   // API tokens ------------------------------------------------------------
   web_.get(
@@ -5884,6 +6326,214 @@ void App::RegisterStorageRoutes() {
 }
 
 void App::RegisterRecordingRoutes() {
+  web_.post("/api/v1/storage/format",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  if (!RequireMaintenance(req, resp)) {
+                    next();
+                    return;
+                  }
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  const int64_t volume_id = JsonInt(body, "volumeId", 0);
+                  const std::string confirm = JsonString(body, "confirm");
+                  if (volume_id <= 0) {
+                    SendError(resp, 400, "invalid_volume", "a valid volumeId is required");
+                    next();
+                    return;
+                  }
+                  const UserContext actor = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, volume_id, confirm, actor, ip, ua, op] {
+                        uvcpp::uvcpp_db_table table;
+                        uvcpp::uvcpp_db_params params;
+                        params.add(volume_id);
+                        std::string error;
+                        if (!Query("SELECT path FROM storage_volumes WHERE id = ?", params, &table,
+                                   &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        if (table.empty()) {
+                          op->ok = false;
+                          op->status = 404;
+                          op->code = "not_found";
+                          op->message = "storage volume not found";
+                          return;
+                        }
+                        const std::string path = TableText(table, 0, "path");
+                        const std::filesystem::path base =
+                            std::filesystem::path(path).lexically_normal();
+                        if (base.empty() || base == base.root_path()) {
+                          op->ok = false;
+                          op->status = 400;
+                          op->code = "unsafe_target";
+                          op->message = "the filesystem root cannot be formatted";
+                          return;
+                        }
+                        if (confirm != path) {
+                          op->ok = false;
+                          op->status = 400;
+                          op->code = "confirm_mismatch";
+                          op->message = "confirm must repeat the volume path exactly";
+                          return;
+                        }
+                        uvcpp::uvcpp_db_table count;
+                        if (!Query("SELECT COUNT(*) AS n FROM recordings WHERE volume_id = ?",
+                                   params, &count, &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        const int64_t deleted = count.empty() ? 0 : TableInt(count, 0, "n");
+                        std::error_code ec;
+                        std::filesystem::remove_all(base / "uvnvr", ec);
+                        if (ec) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "format_failed";
+                          op->message = "cannot remove the recording files: " + ec.message();
+                          return;
+                        }
+                        if (!Exec("DELETE FROM recordings WHERE volume_id = ?", params, nullptr,
+                                  &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        Audit("maintenance", "warning", actor.username, ip, ua, "volume",
+                              std::to_string(volume_id), "format", "success", "",
+                              json{{"path", path}, {"recordings", deleted}}.dump());
+                        op->data = json{{"ok", true}, {"recordings", deleted}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "storage.manage"));
+
+  web_.del(
+      "/api/v1/recordings/:id",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            if (!RequireMaintenance(req, resp)) {
+              next();
+              return;
+            }
+            const std::string* id_param = req.param("id");
+            int64_t recording_id = 0;
+            if (!ParseIntParam(id_param, &recording_id) || recording_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid recording id");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, recording_id, actor, ip, ua, op] {
+                  uvcpp::uvcpp_db_table table;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(recording_id);
+                  std::string error;
+                  if (!Query("SELECT path, channel_id, stream, start_ms, size_bytes FROM "
+                             "recordings WHERE id = ?",
+                             params, &table, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  if (table.empty()) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "recording not found";
+                    return;
+                  }
+                  const std::string path = TableText(table, 0, "path");
+                  const std::filesystem::path target =
+                      std::filesystem::path(path).lexically_normal();
+                  uvcpp::uvcpp_db_table volumes;
+                  if (!Query("SELECT path FROM storage_volumes", {}, &volumes, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  bool inside_volume = false;
+                  if (target.extension() == ".ts") {
+                    for (size_t i = 0; i < volumes.rows().size(); ++i) {
+                      const std::filesystem::path base =
+                          std::filesystem::path(TableText(volumes, i, "path")).lexically_normal();
+                      const std::filesystem::path relative = target.lexically_relative(base);
+                      const std::string text = relative.string();
+                      if (!text.empty() && text.rfind("..", 0) != 0) {
+                        inside_volume = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (!inside_volume) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "unsafe_path";
+                    op->message = "the recording is not inside a configured storage volume";
+                    return;
+                  }
+                  std::error_code ec;
+                  std::filesystem::remove(target, ec);
+                  if (ec) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "delete_failed";
+                    op->message = "cannot delete the recording file: " + ec.message();
+                    return;
+                  }
+                  if (!Exec("DELETE FROM recordings WHERE id = ?", params, nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  Audit("maintenance", "warning", actor.username, ip, ua, "recording",
+                        std::to_string(recording_id), "delete", "success", "",
+                        json{{"path", path},
+                             {"channelId", TableInt(table, 0, "channel_id")},
+                             {"stream", TableText(table, 0, "stream")},
+                             {"startMs", TableInt(table, 0, "start_ms")},
+                             {"sizeBytes", TableInt(table, 0, "size_bytes")}}
+                            .dump());
+                  op->data = json{{"deleted", true}, {"path", path}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "storage.manage"));
+
   web_.get("/api/v1/recordings/status",
            Protected(
                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
@@ -6260,6 +6910,18 @@ void App::MonitorRun() {
     std::string error;
     const auto channels = LoadChannels(&error);
     int64_t now = NowSeconds();
+    const bool motion_enabled = GetSettingInt("motion.enabled", 1) != 0;
+    const int64_t sensitivity =
+        std::clamp<int64_t>(GetSettingInt("motion.sensitivity", 50), 1, 100);
+    const int64_t motion_cooldown =
+        std::clamp<int64_t>(GetSettingInt("motion.cooldown_seconds", 60), 10, 3600);
+    MotionRegion motion_region;
+    ParseMotionRegion(GetSetting("motion.region", "0,0,100,100"), &motion_region);
+    // Sensitivity 50 keeps the historical threshold of 6.0; higher values make
+    // the detector more sensitive.
+    const double motion_threshold = 10.0 - 0.08 * static_cast<double>(sensitivity);
+    const std::string tier = PerformanceTier();
+    const int motion_limit = tier == "low" ? 2 : (tier == "medium" ? 4 : 8);
     for (const auto& channel : channels) {
       if (!channel.enabled)
         continue;
@@ -6302,7 +6964,7 @@ void App::MonitorRun() {
       }
       last_channel_state_[channel.id] = state;
 
-      if (state != "online" || motion_channels >= 4)
+      if (!motion_enabled || state != "online" || motion_channels >= motion_limit)
         continue;
       std::string url_error;
       const bool use_sub = channel.sub_enabled;
@@ -6318,14 +6980,24 @@ void App::MonitorRun() {
       auto previous_frame = last_motion_frame_.find(channel.id);
       if (previous_frame != last_motion_frame_.end() &&
           previous_frame->second.size() == frame.size()) {
+        const int left = motion_region.x * width / 100;
+        const int top = motion_region.y * height / 100;
+        const int right = std::max(left + 1, (motion_region.x + motion_region.width) * width / 100);
+        const int bottom =
+            std::max(top + 1, (motion_region.y + motion_region.height) * height / 100);
         int64_t diff = 0;
-        for (size_t i = 0; i < frame.size(); ++i) {
-          diff +=
-              std::abs(static_cast<int>(frame[i]) - static_cast<int>(previous_frame->second[i]));
+        size_t samples = 0;
+        for (int row = top; row < bottom && row < height; ++row) {
+          for (int column = left; column < right && column < width; ++column) {
+            const size_t index = static_cast<size_t>(row * width + column);
+            diff += std::abs(static_cast<int>(frame[index]) -
+                             static_cast<int>(previous_frame->second[index]));
+            ++samples;
+          }
         }
-        const double mean = static_cast<double>(diff) / frame.size();
+        const double mean = samples == 0 ? 0.0 : static_cast<double>(diff) / samples;
         const int64_t last = motion_cooldown_[channel.id];
-        if (mean > 6.0 && now - last > 60) {
+        if (mean > motion_threshold && now - last > motion_cooldown) {
           std::string jpeg;
           std::string jpeg_error;
           std::string snapshot_path;
@@ -6342,7 +7014,7 @@ void App::MonitorRun() {
         }
       }
       last_motion_frame_[channel.id] = std::move(frame);
-      if (motion_channels >= 4)
+      if (motion_channels >= motion_limit)
         break;
     }
 

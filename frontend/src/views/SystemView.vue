@@ -21,6 +21,12 @@ interface Settings {
     postSeconds: number
     maxSeconds: number
   }
+  motion: {
+    enabled: boolean
+    sensitivity: number
+    cooldownSeconds: number
+    region: { x: number; y: number; width: number; height: number }
+  }
   system: {
     timezone: string
     language: string
@@ -42,6 +48,7 @@ interface Settings {
 
 interface Summary {
   version: string
+  buildVersion?: string
   commit: string
   serial: string
   hostname: string
@@ -112,6 +119,12 @@ const settings = reactive<Settings>({
     postSeconds: 30,
     maxSeconds: 300,
   },
+  motion: {
+    enabled: true,
+    sensitivity: 50,
+    cooldownSeconds: 60,
+    region: { x: 0, y: 0, width: 100, height: 100 },
+  },
   system: {
     timezone: 'UTC',
     language: 'auto',
@@ -140,6 +153,8 @@ const error = ref('')
 const notice = ref('')
 const newToken = reactive({ name: '', expiresInDays: 0, scopes: [] as string[] })
 const createdToken = ref('')
+const serialEdit = ref('')
+const versionEdit = ref('')
 
 const canManage = () => auth.hasPermission('system.manage')
 const canUseApi = () => auth.hasPermission('api.access')
@@ -171,9 +186,13 @@ async function load() {
     Object.assign(settings.security, settingsResponse.security)
     Object.assign(settings.audit, settingsResponse.audit)
     Object.assign(settings.event, settingsResponse.event)
+    Object.assign(settings.motion, settingsResponse.motion)
+    if (settingsResponse.motion?.region) Object.assign(settings.motion.region, settingsResponse.motion.region)
     Object.assign(settings.system, settingsResponse.system)
     Object.assign(settings.smtp, settingsResponse.smtp)
     summary.value = summaryResponse
+    serialEdit.value = summaryResponse.serial
+    versionEdit.value = summaryResponse.version
     tokens.value = tokensResponse
     startup.value = startupResponse
   } catch (caught) {
@@ -199,6 +218,17 @@ async function save() {
           postSeconds: Number(settings.event.postSeconds),
           maxSeconds: Number(settings.event.maxSeconds),
         },
+        motion: {
+          enabled: settings.motion.enabled,
+          sensitivity: Number(settings.motion.sensitivity),
+          cooldownSeconds: Number(settings.motion.cooldownSeconds),
+          region: {
+            x: Number(settings.motion.region.x),
+            y: Number(settings.motion.region.y),
+            width: Number(settings.motion.region.width),
+            height: Number(settings.motion.region.height),
+          },
+        },
         system: settings.system,
         smtp: {
           enabled: settings.smtp.enabled,
@@ -214,6 +244,7 @@ async function save() {
     Object.assign(settings.security, updated.security)
     Object.assign(settings.audit, updated.audit)
     Object.assign(settings.event, updated.event)
+    Object.assign(settings.motion, updated.motion)
     Object.assign(settings.system, updated.system)
     Object.assign(settings.smtp, updated.smtp)
     smtpPassword.value = ''
@@ -222,6 +253,34 @@ async function save() {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
   } finally {
     saving.value = false
+  }
+}
+
+async function saveSerial() {
+  error.value = ''
+  try {
+    const result = await api<{ serial: string }>('/api/v1/system/serial', {
+      method: 'PUT',
+      body: JSON.stringify({ serial: serialEdit.value }),
+    })
+    if (summary.value) summary.value.serial = result.serial
+    flash(t('system.maintenanceSaved'))
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
+async function saveVersion() {
+  error.value = ''
+  try {
+    await api('/api/v1/system/version', {
+      method: 'PUT',
+      body: JSON.stringify({ version: versionEdit.value }),
+    })
+    await load()
+    flash(t('system.maintenanceSaved'))
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
 }
 
@@ -517,6 +576,74 @@ onMounted(load)
 
       <form class="panel settings-card" @submit.prevent="save">
         <div class="section-title">
+          <AppIcon name="camera" :size="20" />
+          <h3>{{ t('system.motionDetection') }}</h3>
+        </div>
+        <label class="check-row">
+          <input v-model="settings.motion.enabled" type="checkbox" />
+          <span>{{ t('system.motionEnabled') }}</span>
+        </label>
+        <div class="form-grid">
+          <label class="field">
+            <span>{{ t('system.motionSensitivity') }}</span>
+            <input
+              v-model.number="settings.motion.sensitivity"
+              class="input"
+              type="number"
+              min="1"
+              max="100"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.motionCooldown') }}</span>
+            <input
+              v-model.number="settings.motion.cooldownSeconds"
+              class="input"
+              type="number"
+              min="10"
+              max="3600"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.motionRegionX') }}</span>
+            <input v-model.number="settings.motion.region.x" class="input" type="number" min="0" max="100" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.motionRegionY') }}</span>
+            <input v-model.number="settings.motion.region.y" class="input" type="number" min="0" max="100" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.motionRegionWidth') }}</span>
+            <input
+              v-model.number="settings.motion.region.width"
+              class="input"
+              type="number"
+              min="1"
+              max="100"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.motionRegionHeight') }}</span>
+            <input
+              v-model.number="settings.motion.region.height"
+              class="input"
+              type="number"
+              min="1"
+              max="100"
+            />
+          </label>
+        </div>
+        <p class="small-note">{{ t('system.motionHint') }}</p>
+        <div class="modal-actions">
+          <button class="button primary" type="submit" :disabled="saving || !canManage()">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.save') }}
+          </button>
+        </div>
+      </form>
+
+      <form class="panel settings-card" @submit.prevent="save">
+        <div class="section-title">
           <AppIcon name="bell" :size="20" />
           <h3>{{ t('system.email') }}</h3>
         </div>
@@ -611,6 +738,36 @@ onMounted(load)
           </div>
         </dl>
         <p class="small-note">{{ t('system.startupConfigHint') }}</p>
+      </article>
+
+      <article v-if="summary?.maintenance" class="panel settings-card">
+        <div class="section-title">
+          <AppIcon name="shield" :size="20" />
+          <h3>{{ t('system.maintenanceOps') }}</h3>
+        </div>
+        <div class="form-grid">
+          <label class="field">
+            <span>{{ t('system.maintenanceSerial') }}</span>
+            <input v-model="serialEdit" class="input" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.maintenanceVersion') }}</span>
+            <input v-model="versionEdit" class="input" :placeholder="summary.buildVersion" />
+          </label>
+        </div>
+        <p class="small-note">
+          {{ t('system.maintenanceHint', { version: summary.buildVersion || summary.version }) }}
+        </p>
+        <div class="modal-actions">
+          <button class="button" @click="saveSerial">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.maintenanceSaveSerial') }}
+          </button>
+          <button class="button primary" @click="saveVersion">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.maintenanceSaveVersion') }}
+          </button>
+        </div>
       </article>
     </div>
 

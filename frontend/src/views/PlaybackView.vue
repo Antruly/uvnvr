@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import PlaybackPlayer from '@/components/PlaybackPlayer.vue'
 import { api, getCsrfToken } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'PlaybackView' })
@@ -29,7 +30,9 @@ interface Recording {
 const { t } = useI18n()
 const route = useRoute()
 const auth = useAuthStore()
+const app = useAppStore()
 const canDownload = computed(() => auth.hasPermission('playback.download'))
+const canMaintain = computed(() => app.server?.maintenance === true)
 const channels = ref<Channel[]>([])
 const channelId = ref(0)
 const stream = ref<'main' | 'sub'>('main')
@@ -259,6 +262,18 @@ async function loadRecordings() {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
     loading.value = false
+  }
+}
+
+async function removeRecording(recording: Recording) {
+  if (!window.confirm(t('playback.deleteConfirm', { time: formatTime(recording.startMs) }))) return
+  error.value = ''
+  try {
+    await api(`/api/v1/recordings/${recording.id}`, { method: 'DELETE' })
+    if (selected.value?.id === recording.id) selected.value = null
+    await loadRecordings()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : t('common.error')
   }
 }
 
@@ -520,6 +535,14 @@ onMounted(async () => {
               <button class="button small" @click="playFrom(recording)">
                 <AppIcon name="playback" :size="14" />
                 {{ t('playback.play') }}
+              </button>
+              <button
+                v-if="canMaintain"
+                class="button small danger"
+                @click="removeRecording(recording)"
+              >
+                <AppIcon name="trash" :size="14" />
+                {{ t('common.delete') }}
               </button>
             </td>
           </tr>

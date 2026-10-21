@@ -5,6 +5,7 @@ export interface ServerInfo {
   name: string
   version: string
   commit: string
+  maintenance: boolean
 }
 
 export const useAppStore = defineStore('app', {
