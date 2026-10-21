@@ -2204,6 +2204,21 @@ std::string CsvField(const std::string& value) {
   return out;
 }
 
+std::string EncoderProtocolForChannel(const ChannelRow& channel) {
+  if (channel.protocol == "onvif" || channel.protocol == "hikvision" ||
+      channel.protocol == "dahua") {
+    return channel.protocol;
+  }
+  std::string brand = channel.brand;
+  for (char& c : brand)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (brand.find("hikvision") != std::string::npos)
+    return "hikvision";
+  if (brand.find("dahua") != std::string::npos)
+    return "dahua";
+  return {};
+}
+
 bool UnsafeVolumePath(const std::string& path) {
   if (path.empty())
     return true;
@@ -5009,17 +5024,35 @@ void App::RegisterChannelRoutes() {
                          op->message = "channel not found";
                          return;
                        }
-                       if (channel.protocol != "onvif") {
+                       const std::string protocol = EncoderProtocolForChannel(channel);
+                       if (protocol.empty()) {
                          op->ok = false;
                          op->status = 400;
                          op->code = "unsupported_protocol";
-                         op->message =
-                             "camera encoder control is available for ONVIF channels only";
+                         op->message = "camera encoder control is available for ONVIF, "
+                                       "Hikvision and Dahua channels only";
                          return;
                        }
                        const std::string password = DecryptSecret(channel.password_enc, &error);
-                       OnvifEncoderConfig config;
-                       if (!GetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
+                       if (protocol == "onvif") {
+                         OnvifEncoderConfig config;
+                         if (!GetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
+                                                    channel.username, password, &config, &error)) {
+                           op->ok = false;
+                           op->status = 502;
+                           op->code = "encoder_failed";
+                           op->message = error.empty() ? "cannot read the camera encoder" : error;
+                           return;
+                         }
+                         op->data =
+                             json{{"token", config.token},    {"encoding", config.encoding},
+                                  {"width", config.width},    {"height", config.height},
+                                  {"fps", config.fps},        {"bitrateKbps", config.bitrate_kbps},
+                                  {"quality", config.quality}};
+                         return;
+                       }
+                       BrandEncoderConfig config;
+                       if (!GetBrandEncoderConfig(protocol, channel.host, ChannelHttpPort(channel),
                                                   channel.username, password, &config, &error)) {
                          op->ok = false;
                          op->status = 502;
@@ -5027,11 +5060,20 @@ void App::RegisterChannelRoutes() {
                          op->message = error.empty() ? "cannot read the camera encoder" : error;
                          return;
                        }
-                       op->data =
-                           json{{"token", config.token},    {"encoding", config.encoding},
-                                {"width", config.width},    {"height", config.height},
-                                {"fps", config.fps},        {"bitrateKbps", config.bitrate_kbps},
-                                {"quality", config.quality}};
+                       std::string encoding = config.encoding;
+                       encoding.erase(std::remove(encoding.begin(), encoding.end(), '.'),
+                                      encoding.end());
+                       std::transform(
+                           encoding.begin(), encoding.end(), encoding.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                       op->data = json{{"token", ""},
+                                       {"encoding", encoding},
+                                       {"width", config.width},
+                                       {"height", config.height},
+                                       {"fps", config.fps},
+                                       {"bitrateKbps", config.bitrate_kbps},
+                                       {"quality", config.quality},
+                                       {"protocol", protocol}};
                      },
                      [op, &resp, next] {
                        SendOp(resp, *op);
@@ -5083,12 +5125,21 @@ void App::RegisterChannelRoutes() {
                    next();
                    return;
                  }
+                 BrandEncoderConfig brand_config;
+                 brand_config.encoding = config.encoding == "H264"
+                                             ? "H.264"
+                                             : (config.encoding == "H265" ? "H.265" : "");
+                 brand_config.width = config.width;
+                 brand_config.height = config.height;
+                 brand_config.fps = config.fps;
+                 brand_config.bitrate_kbps = config.bitrate_kbps;
+                 brand_config.quality = config.quality;
                  const UserContext actor = UserFromRequest(req);
                  const std::string ip = req.peer_ip();
                  const std::string ua = req.header("User-Agent", "");
                  auto op = std::make_shared<OpResult>();
                  RunWork(
-                     [this, channel_id, config, actor, ip, ua, op] {
+                     [this, channel_id, config, brand_config, actor, ip, ua, op] {
                        ChannelRow channel;
                        std::string error;
                        if (!LoadChannel(channel_id, &channel, &error)) {
@@ -5098,32 +5149,48 @@ void App::RegisterChannelRoutes() {
                          op->message = "channel not found";
                          return;
                        }
-                       if (channel.protocol != "onvif") {
+                       const std::string protocol = EncoderProtocolForChannel(channel);
+                       if (protocol.empty()) {
                          op->ok = false;
                          op->status = 400;
                          op->code = "unsupported_protocol";
-                         op->message =
-                             "camera encoder control is available for ONVIF channels only";
+                         op->message = "camera encoder control is available for ONVIF, "
+                                       "Hikvision and Dahua channels only";
                          return;
                        }
                        const std::string password = DecryptSecret(channel.password_enc, &error);
-                       if (!SetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
-                                                  channel.username, password, config, &error)) {
+                       const bool applied =
+                           protocol == "onvif"
+                               ? SetOnvifEncoderConfig(channel.host, ChannelHttpPort(channel),
+                                                       channel.username, password, config, &error)
+                               : SetBrandEncoderConfig(protocol, channel.host,
+                                                       ChannelHttpPort(channel), channel.username,
+                                                       password, brand_config, &error);
+                       if (!applied) {
                          op->ok = false;
                          op->status = 502;
                          op->code = "encoder_failed";
                          op->message = error.empty() ? "cannot apply the camera encoder" : error;
                          return;
                        }
+                       json stored = protocol == "onvif"
+                                         ? json{{"encoding", config.encoding},
+                                                {"width", config.width},
+                                                {"height", config.height},
+                                                {"fps", config.fps},
+                                                {"bitrateKbps", config.bitrate_kbps},
+                                                {"quality", config.quality}}
+                                         : json{{"encoding", config.encoding},
+                                                {"width", brand_config.width},
+                                                {"height", brand_config.height},
+                                                {"fps", brand_config.fps},
+                                                {"bitrateKbps", brand_config.bitrate_kbps},
+                                                {"quality", 0},
+                                                {"protocol", protocol}};
                        json media = json::parse(channel.media_json, nullptr, false);
                        if (!media.is_object())
                          media = json::object();
-                       media["encoder"] = json{{"encoding", config.encoding},
-                                               {"width", config.width},
-                                               {"height", config.height},
-                                               {"fps", config.fps},
-                                               {"bitrateKbps", config.bitrate_kbps},
-                                               {"quality", config.quality}};
+                       media["encoder"] = stored;
                        uvcpp::uvcpp_db_params update;
                        update.add(media.dump());
                        update.add(NowSeconds());
@@ -6027,30 +6094,29 @@ void App::RegisterOnvifRoutes() {
 }
 
 void App::RegisterStreamRoutes() {
-  web_.post(
-      "/api/v1/events/ticket",
-      Protected(
-          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
-                 uvcpp::uvcpp_web_next next) {
-            const UserContext user = UserFromRequest(req);
-            auto op = std::make_shared<OpResult>();
-            std::string token;
-            std::string error;
-            int64_t expires_at = 0;
-            if (!CreateEventsTicket(user.id, &token, &expires_at, &error)) {
-              op->ok = false;
-              op->status = 500;
-              op->code = "ticket_failed";
-              op->message = error;
-            } else {
-              op->data = json{{"ticket", token},
-                              {"wsPath", "/ws/events?ticket=" + token},
-                              {"expiresAt", expires_at}};
-            }
-            SendOp(resp, *op);
-            next();
-          },
-          "alert.view"));
+  web_.post("/api/v1/events/ticket",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const UserContext user = UserFromRequest(req);
+                  auto op = std::make_shared<OpResult>();
+                  std::string token;
+                  std::string error;
+                  int64_t expires_at = 0;
+                  if (!CreateEventsTicket(user.id, &token, &expires_at, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "ticket_failed";
+                    op->message = error;
+                  } else {
+                    op->data = json{{"ticket", token},
+                                    {"wsPath", "/ws/events?ticket=" + token},
+                                    {"expiresAt", expires_at}};
+                  }
+                  SendOp(resp, *op);
+                  next();
+                },
+                "alert.view"));
 
   web_.post("/api/v1/streams/ticket",
             Protected(
@@ -6208,7 +6274,8 @@ void App::RegisterStreamRoutes() {
   web_.websocket("/ws/events", [this](uvcpp::uvcpp_web_ws_request& ws) {
     const std::string* ticket_value = ws.query("ticket");
     StreamTicket ticket;
-    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) || !ticket.events) {
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) ||
+        !ticket.events) {
       if (auto* connection = ws.connection()) {
         const std::string message = R"({"error":"invalid_ticket"})";
         connection->send_text(message.data(), message.size());
@@ -6498,10 +6565,8 @@ void App::RegisterStorageRoutes() {
                         roots.push_back(base);
                     }
 #endif
-                    op->data = json{{"path", ""},
-                                    {"parent", ""},
-                                    {"entries", entries},
-                                    {"roots", roots}};
+                    op->data =
+                        json{{"path", ""}, {"parent", ""}, {"entries", entries}, {"roots", roots}};
                     return;
                   }
                   std::error_code ec;
@@ -7346,16 +7411,14 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
             params, nullptr, &error)) {
     std::fprintf(stderr, "alert insert failed: %s\n", error.c_str());
   }
-  BroadcastEvent(json{
-      {"type", "alert"},
-      {"alert",
-       json{{"channelId", channel_id},
-            {"type", type},
-            {"level", level},
-            {"message", message},
-            {"snapshotPath", snapshot_path},
-            {"acknowledged", false},
-            {"createdAt", NowSeconds()}}}});
+  BroadcastEvent(json{{"type", "alert"},
+                      {"alert", json{{"channelId", channel_id},
+                                     {"type", type},
+                                     {"level", level},
+                                     {"message", message},
+                                     {"snapshotPath", snapshot_path},
+                                     {"acknowledged", false},
+                                     {"createdAt", NowSeconds()}}}});
   if (recording_ && channel_id > 0 &&
       (type == "motion" || type == "person" || type == "tamper" || type == "intrusion")) {
     recording_->OnEvent(channel_id);

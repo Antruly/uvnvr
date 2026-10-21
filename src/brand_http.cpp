@@ -473,7 +473,206 @@ bool ProbeDahua(const std::string& host, int port, const std::string& username,
   return true;
 }
 
+bool ReplaceXmlTag(std::string* xml, const std::string& tag, const std::string& value) {
+  const std::string open = "<" + tag;
+  size_t pos = xml->find(open);
+  if (pos == std::string::npos)
+    return false;
+  const size_t open_end = xml->find('>', pos);
+  if (open_end == std::string::npos)
+    return false;
+  const size_t close = xml->find("</" + tag, open_end);
+  if (close == std::string::npos)
+    return false;
+  xml->replace(open_end + 1, close - open_end - 1, value);
+  return true;
+}
+
+int IntValue(const std::string& text) {
+  return std::atoi(Trim(text).c_str());
+}
+
+bool HikvisionEncoder(const std::string& host, int port, const std::string& username,
+                      const std::string& password, BrandEncoderConfig* config, std::string* error) {
+  HttpResponse response;
+  if (!HttpRequest(host, port, "GET", "/ISAPI/Streaming/channels/101", "", "", username, password,
+                   &response, error))
+    return false;
+  if (response.status != 200 || response.body.find("<Video>") == std::string::npos) {
+    if (error != nullptr)
+      *error = "the camera rejected the ISAPI streaming-channel request (HTTP " +
+               std::to_string(response.status) + ")";
+    return false;
+  }
+  config->encoding = ExtractTag(response.body, "videoCodecType");
+  config->width = IntValue(ExtractTag(response.body, "videoResolutionWidth"));
+  config->height = IntValue(ExtractTag(response.body, "videoResolutionHeight"));
+  int frame_rate = IntValue(ExtractTag(response.body, "videoFrameRate"));
+  if (frame_rate <= 0)
+    frame_rate = IntValue(ExtractTag(response.body, "maxFrameRate"));
+  config->fps = frame_rate > 120 ? frame_rate / 100 : frame_rate;
+  config->bitrate_kbps = IntValue(ExtractTag(response.body, "vbrUpperCap"));
+  if (config->bitrate_kbps <= 0)
+    config->bitrate_kbps = IntValue(ExtractTag(response.body, "videoBitrate"));
+  config->quality = IntValue(ExtractTag(response.body, "videoQuality"));
+  return config->width > 0 && config->height > 0;
+}
+
+bool SetHikvisionEncoder(const std::string& host, int port, const std::string& username,
+                         const std::string& password, const BrandEncoderConfig& config,
+                         std::string* error) {
+  HttpResponse current;
+  if (!HttpRequest(host, port, "GET", "/ISAPI/Streaming/channels/101", "", "", username, password,
+                   &current, error))
+    return false;
+  if (current.status != 200) {
+    if (error != nullptr)
+      *error = "cannot read the current ISAPI streaming-channel settings";
+    return false;
+  }
+  std::string xml = current.body;
+  if (!config.encoding.empty() && !ReplaceXmlTag(&xml, "videoCodecType", config.encoding)) {
+    if (error != nullptr)
+      *error = "the camera does not expose videoCodecType";
+    return false;
+  }
+  if (config.width > 0 &&
+      !ReplaceXmlTag(&xml, "videoResolutionWidth", std::to_string(config.width))) {
+    if (error != nullptr)
+      *error = "the camera does not expose videoResolutionWidth";
+    return false;
+  }
+  if (config.height > 0 &&
+      !ReplaceXmlTag(&xml, "videoResolutionHeight", std::to_string(config.height))) {
+    if (error != nullptr)
+      *error = "the camera does not expose videoResolutionHeight";
+    return false;
+  }
+  if (config.fps > 0) {
+    const std::string value = std::to_string(config.fps * 100);
+    const bool replaced = ReplaceXmlTag(&xml, "videoFrameRate", value);
+    ReplaceXmlTag(&xml, "maxFrameRate", value);
+    if (!replaced) {
+      if (error != nullptr)
+        *error = "the camera does not expose videoFrameRate";
+      return false;
+    }
+  }
+  if (config.bitrate_kbps > 0) {
+    const std::string value = std::to_string(config.bitrate_kbps);
+    const bool replaced = ReplaceXmlTag(&xml, "vbrUpperCap", value);
+    if (!replaced && !ReplaceXmlTag(&xml, "videoBitrate", value)) {
+      if (error != nullptr)
+        *error = "the camera does not expose a bitrate field";
+      return false;
+    }
+  }
+  HttpResponse response;
+  if (!HttpRequest(host, port, "PUT", "/ISAPI/Streaming/channels/101", xml, "application/xml",
+                   username, password, &response, error))
+    return false;
+  if (response.status != 200 || response.body.find("statusCode>4") != std::string::npos) {
+    if (error != nullptr)
+      *error = "the camera rejected the ISAPI encoder update (HTTP " +
+               std::to_string(response.status) + ")";
+    return false;
+  }
+  return true;
+}
+
+const std::string* FindDahuaValue(const std::map<std::string, std::string>& values,
+                                  const std::string& suffix) {
+  for (const auto& [key, value] : values) {
+    if (key.size() >= suffix.size() &&
+        key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+        key.find("MainFormat[0].Video.") != std::string::npos) {
+      return &value;
+    }
+  }
+  return nullptr;
+}
+
+bool DahuaEncoder(const std::string& host, int port, const std::string& username,
+                  const std::string& password, BrandEncoderConfig* config, std::string* error) {
+  HttpResponse response;
+  if (!HttpRequest(host, port, "GET", "/cgi-bin/configManager.cgi?action=getConfig&name=Encode", "",
+                   "", username, password, &response, error))
+    return false;
+  if (response.status != 200) {
+    if (error != nullptr)
+      *error = "the camera rejected the Dahua Encode config request (HTTP " +
+               std::to_string(response.status) + ")";
+    return false;
+  }
+  const auto values = ParseKeyValues(response.body);
+  const std::string* encoding = FindDahuaValue(values, ".Video.Compression");
+  const std::string* width = FindDahuaValue(values, ".Video.Width");
+  const std::string* height = FindDahuaValue(values, ".Video.Height");
+  const std::string* fps = FindDahuaValue(values, ".Video.FPS");
+  const std::string* bitrate = FindDahuaValue(values, ".Video.BitRate");
+  if (width == nullptr || height == nullptr || fps == nullptr) {
+    if (error != nullptr)
+      *error = "the camera returned no main-stream encoder fields";
+    return false;
+  }
+  config->encoding = encoding != nullptr ? *encoding : "H.264";
+  config->width = IntValue(*width);
+  config->height = IntValue(*height);
+  config->fps = IntValue(*fps);
+  config->bitrate_kbps = bitrate != nullptr ? IntValue(*bitrate) : 0;
+  return true;
+}
+
+bool SetDahuaEncoder(const std::string& host, int port, const std::string& username,
+                     const std::string& password, const BrandEncoderConfig& config,
+                     std::string* error) {
+  std::string path = "/cgi-bin/configManager.cgi?action=setConfig";
+  if (!config.encoding.empty())
+    path += "&Encode[0].MainFormat[0].Video.Compression=" + config.encoding;
+  if (config.width > 0)
+    path += "&Encode[0].MainFormat[0].Video.Width=" + std::to_string(config.width);
+  if (config.height > 0)
+    path += "&Encode[0].MainFormat[0].Video.Height=" + std::to_string(config.height);
+  if (config.fps > 0)
+    path += "&Encode[0].MainFormat[0].Video.FPS=" + std::to_string(config.fps);
+  if (config.bitrate_kbps > 0)
+    path += "&Encode[0].MainFormat[0].Video.BitRate=" + std::to_string(config.bitrate_kbps);
+  HttpResponse response;
+  if (!HttpRequest(host, port, "GET", path, "", "", username, password, &response, error))
+    return false;
+  if (response.status != 200 || Lower(response.body).find("error") != std::string::npos) {
+    if (error != nullptr)
+      *error = "the camera rejected the Dahua encoder update";
+    return false;
+  }
+  return true;
+}
+
 } // namespace
+
+bool GetBrandEncoderConfig(const std::string& protocol, const std::string& host, int port,
+                           const std::string& username, const std::string& password,
+                           BrandEncoderConfig* config, std::string* error) {
+  if (protocol == "hikvision")
+    return HikvisionEncoder(host, port, username, password, config, error);
+  if (protocol == "dahua")
+    return DahuaEncoder(host, port, username, password, config, error);
+  if (error != nullptr)
+    *error = "the channel has no supported brand encoder API";
+  return false;
+}
+
+bool SetBrandEncoderConfig(const std::string& protocol, const std::string& host, int port,
+                           const std::string& username, const std::string& password,
+                           const BrandEncoderConfig& config, std::string* error) {
+  if (protocol == "hikvision")
+    return SetHikvisionEncoder(host, port, username, password, config, error);
+  if (protocol == "dahua")
+    return SetDahuaEncoder(host, port, username, password, config, error);
+  if (error != nullptr)
+    *error = "the channel has no supported brand encoder API";
+  return false;
+}
 
 bool ProbeBrandHttp(const std::string& host, int port, const std::string& username,
                     const std::string& password, const std::string& preferred,
