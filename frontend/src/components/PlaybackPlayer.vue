@@ -11,6 +11,7 @@ const props = defineProps<{
   startMs: number
   endMs: number
   speed: number
+  stepMs: number
   title: string
 }>()
 
@@ -162,8 +163,16 @@ function togglePlay() {
   }
 }
 
-function skip(deltaSeconds: number) {
-  emit('seek', positionMs() + deltaSeconds * 1000)
+function skip(steps: number) {
+  emit('seek', positionMs() + steps * Math.max(1000, props.stepMs))
+}
+
+function formatDuration(ms: number) {
+  const seconds = Math.max(1, Math.round(ms / 1000))
+  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600}h`
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+  return `${seconds}s`
 }
 
 function setSpeed(value: number) {
@@ -226,30 +235,27 @@ onBeforeUnmount(() => {
       <span>{{ message }}</span>
     </div>
     <div class="playback-controls">
-      <button class="icon-button small" :title="t('playback.rewind30')" @click="skip(-30)">
-        <span class="transport-label">«30</span>
-      </button>
-      <button class="icon-button small" :title="t('playback.rewind10')" @click="skip(-10)">
-        <span class="transport-label">«10</span>
+      <button class="icon-button small" :title="t('playback.rewind30')" @click="skip(-1)">
+        <span class="transport-label">«{{ formatDuration(stepMs) }}</span>
       </button>
       <button class="icon-button small" :title="t('playback.playPause')" @click="togglePlay">
         <AppIcon :name="state === 'playing' ? 'pause' : 'playback'" :size="15" />
       </button>
-      <button class="icon-button small" :title="t('playback.forward10')" @click="skip(10)">
-        <span class="transport-label">10»</span>
-      </button>
-      <button class="icon-button small" :title="t('playback.forward30')" @click="skip(30)">
-        <span class="transport-label">30»</span>
+      <button class="icon-button small" :title="t('playback.forward30')" @click="skip(1)">
+        <span class="transport-label">{{ formatDuration(stepMs) }}»</span>
       </button>
       <span class="transport-clock">{{ formatClock(position) }}</span>
       <label class="transport-speed">
         <span>{{ t('playback.speed') }}</span>
         <select :value="activeSpeed" @change="setSpeed(Number(($event.target as HTMLSelectElement).value))">
+          <option :value="0.25">0.25×</option>
           <option :value="0.5">0.5×</option>
           <option :value="1">1×</option>
           <option :value="2">2×</option>
           <option :value="4">4×</option>
           <option :value="8">8×</option>
+          <option :value="16">16×</option>
+          <option :value="32">32×</option>
         </select>
       </label>
     </div>

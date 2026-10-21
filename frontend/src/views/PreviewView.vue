@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import LiveTile, { type LiveChannel } from '@/components/LiveTile.vue'
 import { api } from '@/api/client'
@@ -8,6 +9,7 @@ import { api } from '@/api/client'
 defineOptions({ name: 'PreviewView' })
 
 const { t } = useI18n()
+const router = useRouter()
 
 interface ChannelGroup {
   id: number
@@ -46,6 +48,8 @@ const selectedChannelId = ref<number | null>(null)
 const streamMode = ref<'main' | 'sub'>('sub')
 const layouts = ref<Layout[]>([])
 const activeLayoutId = ref('')
+const playing = ref(true)
+const page = ref(0)
 const draggingId = ref<number | null>(null)
 
 function defaultLayout(): Layout {
@@ -168,6 +172,43 @@ function saveLayouts() {
 const activeLayout = computed(
   () => layouts.value.find((layout) => layout.id === activeLayoutId.value) ?? layouts.value[0],
 )
+
+const cellCount = computed(
+  () => (activeLayout.value?.cols ?? 2) * (activeLayout.value?.rows ?? 2),
+)
+
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(channels.value.length / Math.max(1, cellCount.value))),
+)
+
+function playAll(fill = true) {
+  const layout = activeLayout.value
+  if (!layout) return
+  if (fill) {
+    const start = page.value * cellCount.value
+    const pageChannels = channels.value.slice(start, start + cellCount.value)
+    layout.cells = Array.from(
+      { length: cellCount.value },
+      (_, index) => pageChannels[index]?.id ?? null,
+    )
+    saveLayouts()
+  }
+  playing.value = true
+}
+
+function stopAll() {
+  playing.value = false
+}
+
+function openPlayback() {
+  if (selectedChannelId.value == null) return
+  void router.push({ path: '/playback', query: { channelId: String(selectedChannelId.value) } })
+}
+
+function changePage(delta: number) {
+  page.value = Math.max(0, Math.min(pageCount.value - 1, page.value + delta))
+  if (playing.value) playAll(true)
+}
 
 const gridStyle = computed(() => ({
   gridTemplateColumns: `repeat(${activeLayout.value?.cols ?? 2}, minmax(0, 1fr))`,
@@ -375,6 +416,23 @@ onMounted(() => {
           SUB
         </button>
       </div>
+      <button class="button primary" @click="playAll()">
+        <AppIcon name="playback" :size="16" />
+        {{ t('preview.playAll') }}
+      </button>
+      <button class="button" @click="stopAll">
+        <AppIcon name="close" :size="16" />
+        {{ t('preview.stopAll') }}
+      </button>
+      <div v-if="pageCount > 1" class="locale-switch" role="group">
+        <button class="locale-button" :disabled="page <= 0" @click="changePage(-1)">‹</button>
+        <span class="page-label">{{ page + 1 }} / {{ pageCount }}</span>
+        <button class="locale-button" :disabled="page >= pageCount - 1" @click="changePage(1)">›</button>
+      </div>
+      <button class="button" :disabled="selectedChannelId == null" @click="openPlayback">
+        <AppIcon name="playback" :size="16" />
+        {{ t('preview.recordings') }}
+      </button>
       <button class="button" @click="reloadAll">
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
@@ -515,10 +573,15 @@ onMounted(() => {
           @click="onCellClick(index)"
         >
           <LiveTile
-            v-if="channelById(cell)"
+            v-if="playing && channelById(cell)"
             :channel="channelById(cell)!"
             :stream="streamMode"
           />
+          <div v-else-if="channelById(cell)" class="preview-empty paused">
+            <AppIcon name="playback" :size="24" />
+            <span>{{ channelById(cell)!.name }}</span>
+            <small>{{ t('preview.paused') }}</small>
+          </div>
           <div v-else class="preview-empty">
             <AppIcon name="camera" :size="24" />
             <span>{{ t('preview.emptyCell') }}</span>

@@ -7,6 +7,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useTabsStore } from '@/stores/tabs'
+import { useTheme } from '@/stores/theme'
 
 const app = useAppStore()
 const auth = useAuthStore()
@@ -44,6 +45,9 @@ const localeOptions = [
   { value: 'zh-CN', label: '中文' },
   { value: 'en-US', label: 'EN' },
 ] as const
+
+const themeOptions = ['auto', 'light', 'dark'] as const
+const { mode: themeMode, apply: applyTheme } = useTheme()
 
 function switchLocale(value: 'zh-CN' | 'en-US') {
   locale.value = value
@@ -207,6 +211,19 @@ onMounted(() => {
             @click="switchLocale(option.value)"
           >
             {{ option.label }}
+          </button>
+        </div>
+
+        <div class="locale-switch theme-switch" role="group" :aria-label="t('common.theme')">
+          <button
+            v-for="option in themeOptions"
+            :key="option"
+            class="locale-button"
+            :class="{ active: themeMode === option }"
+            :title="t(`common.theme${option[0].toUpperCase()}${option.slice(1)}`)"
+            @click="applyTheme(option)"
+          >
+            {{ t(`common.theme${option[0].toUpperCase()}${option.slice(1)}`) }}
           </button>
         </div>
 

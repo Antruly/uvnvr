@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { ApiError } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { useTheme } from '@/stores/theme'
 
 defineOptions({ name: 'LoginView' })
 
@@ -12,6 +13,8 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const { t, locale } = useI18n()
+const themeOptions = ['auto', 'light', 'dark'] as const
+const { mode: themeMode, apply: applyTheme } = useTheme()
 
 const form = reactive({ username: 'admin', password: '' })
 const error = ref('')
@@ -85,7 +88,7 @@ onBeforeUnmount(() => {
       <div class="auth-meta">
         <span>{{ t('dashboard.serial') }}</span>
         <strong>{{ auth.serial || '—' }}</strong>
-        <span>{{ t('common.version') }} {{ auth.version || '0.1.0' }}</span>
+        <span>{{ t('common.version') }} {{ auth.version }}</span>
       </div>
       <div class="auth-locales">
         <button
@@ -101,6 +104,17 @@ onBeforeUnmount(() => {
           @click="switchLocale('en-US')"
         >
           EN
+        </button>
+        <span class="locale-separator"></span>
+        <button
+          v-for="option in themeOptions"
+          :key="option"
+          class="locale-button"
+          :class="{ active: themeMode === option }"
+          :title="t(`common.theme${option[0].toUpperCase()}${option.slice(1)}`)"
+          @click="applyTheme(option)"
+        >
+          {{ t(`common.theme${option[0].toUpperCase()}${option.slice(1)}`) }}
         </button>
       </div>
     </section>

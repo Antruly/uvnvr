@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { api, ApiError } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'ChannelsView' })
 
@@ -62,6 +63,11 @@ interface ChannelGroup {
 }
 
 const { t } = useI18n()
+const auth = useAuthStore()
+const canSnapshot = computed(() => auth.hasPermission('api.snapshot'))
+const failedThumbs = ref<Set<number>>(new Set())
+const thumbVersion = reactive<Record<number, number>>({})
+const previewImage = ref('')
 const channels = ref<Channel[]>([])
 const groups = ref<ChannelGroup[]>([])
 const groupsOpen = ref(false)
@@ -111,6 +117,25 @@ function flash(message: string) {
   window.setTimeout(() => {
     if (notice.value === message) notice.value = ''
   }, 3500)
+}
+
+function snapshotUrl(channel: Channel) {
+  return `/api/v1/channels/${channel.id}/snapshot?t=${thumbVersion[channel.id] ?? 0}`
+}
+
+function thumbFailed(channel: Channel) {
+  failedThumbs.value = new Set([...failedThumbs.value, channel.id])
+}
+
+function capture(channel: Channel) {
+  const version = Date.now()
+  thumbVersion[channel.id] = version
+  failedThumbs.value = new Set([...failedThumbs.value].filter((id) => id !== channel.id))
+  previewImage.value = `/api/v1/channels/${channel.id}/snapshot?t=${version}`
+}
+
+function closePreview() {
+  previewImage.value = ''
 }
 
 function groupName(id: number) {
@@ -455,9 +480,19 @@ onMounted(load)
         <tr v-for="channel in channels" :key="channel.id">
           <td>
             <div class="table-primary">
-              <span class="user-avatar small"><AppIcon name="camera" :size="15" /></span>
+              <span class="channel-thumb" @dblclick="capture(channel)">
+                <img
+                  v-if="canSnapshot && !failedThumbs.has(channel.id)"
+                  :src="snapshotUrl(channel)"
+                  loading="lazy"
+                  alt=""
+                  @error="thumbFailed(channel)"
+                />
+                <AppIcon v-else name="camera" :size="15" />
+              </span>
               <div>
                 <strong>{{ channel.name }}</strong>
+                <small class="block muted">#{{ channel.id }}</small>
                 <small v-if="channel.groupId" class="block muted">{{ groupName(channel.groupId) }}</small>
                 <small>{{ channel.host || '—' }}<span v-if="channel.port">:{{ channel.port }}</span></small>
               </div>
@@ -489,6 +524,14 @@ onMounted(load)
               <button class="icon-button small" :title="t('common.edit')" @click="openEdit(channel)">
                 <AppIcon name="edit" :size="15" />
               </button>
+              <button
+                class="icon-button small"
+                :title="t('channels.snapshot')"
+                :disabled="!canSnapshot"
+                @click="capture(channel)"
+              >
+                <AppIcon name="camera" :size="15" />
+              </button>
               <button class="icon-button small" :title="t('channels.reconnect')" @click="reconnect(channel)">
                 <AppIcon name="refresh" :size="15" />
               </button>
@@ -506,6 +549,18 @@ onMounted(load)
   </section>
 
   <Teleport to="body">
+    <div v-if="previewImage" class="modal-backdrop" @click.self="closePreview">
+      <div class="modal panel snapshot-modal">
+        <div class="modal-head">
+          <h3>{{ t('channels.snapshot') }}</h3>
+          <button type="button" class="icon-button small" @click="closePreview">
+            <AppIcon name="close" :size="16" />
+          </button>
+        </div>
+        <img :src="previewImage" class="snapshot-large" alt="" />
+      </div>
+    </div>
+
     <div v-if="modal.open" class="modal-backdrop" @click.self="modal.open = false">
       <form class="modal panel modal-wide" @submit.prevent="save">
         <div class="modal-head">

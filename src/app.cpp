@@ -4938,8 +4938,8 @@ void App::RegisterStreamRoutes() {
                     next();
                     return;
                   }
-                  if (speed < 0.25 || speed > 8.0) {
-                    SendError(resp, 400, "invalid_speed", "speed must be between 0.25 and 8");
+                  if (speed < 0.25 || speed > 32.0) {
+                    SendError(resp, 400, "invalid_speed", "speed must be between 0.25 and 32");
                     next();
                     return;
                   }

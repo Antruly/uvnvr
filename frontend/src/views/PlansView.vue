@@ -33,7 +33,7 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
 const notice = ref('')
-const painting = ref(false)
+const selection = reactive({ active: false, day1: 0, slot1: 0, day2: 0, slot2: 0 })
 const syncOpen = ref(false)
 const syncTargets = ref<number[]>([])
 
@@ -101,23 +101,44 @@ async function loadPlans() {
   }
 }
 
-function paint(day: number, slot: number) {
-  if (!painting.value && !window.event) return
-  const value: CellMode = brush.value === 'erase' ? '' : brush.value
-  grid.value[day][slot] = value
-}
-
 function onDown(day: number, slot: number) {
-  painting.value = true
-  paint(day, slot)
+  Object.assign(selection, {
+    active: true,
+    day1: day,
+    slot1: slot,
+    day2: day,
+    slot2: slot,
+  })
 }
 
 function onEnter(day: number, slot: number) {
-  if (painting.value) paint(day, slot)
+  if (!selection.active) return
+  selection.day2 = day
+  selection.slot2 = slot
 }
 
-function stopPainting() {
-  painting.value = false
+function isSelected(day: number, slot: number) {
+  if (!selection.active) return false
+  const firstDay = Math.min(selection.day1, selection.day2)
+  const lastDay = Math.max(selection.day1, selection.day2)
+  const firstSlot = Math.min(selection.slot1, selection.slot2)
+  const lastSlot = Math.max(selection.slot1, selection.slot2)
+  return day >= firstDay && day <= lastDay && slot >= firstSlot && slot <= lastSlot
+}
+
+function finishSelection() {
+  if (!selection.active) return
+  const value: CellMode = brush.value === 'erase' ? '' : brush.value
+  const firstDay = Math.min(selection.day1, selection.day2)
+  const lastDay = Math.max(selection.day1, selection.day2)
+  const firstSlot = Math.min(selection.slot1, selection.slot2)
+  const lastSlot = Math.max(selection.slot1, selection.slot2)
+  for (let day = firstDay; day <= lastDay; day += 1) {
+    for (let slot = firstSlot; slot <= lastSlot; slot += 1) {
+      grid.value[day][slot] = value
+    }
+  }
+  selection.active = false
 }
 
 function collectPlans(): Plan[] {
@@ -191,7 +212,7 @@ function toggleTarget(id: number) {
 watch(channelId, () => void loadPlans())
 
 onMounted(async () => {
-  window.addEventListener('mouseup', stopPainting)
+  window.addEventListener('mouseup', finishSelection)
   try {
     await loadChannels()
     await loadPlans()
@@ -201,7 +222,7 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => window.removeEventListener('mouseup', stopPainting))
+onBeforeUnmount(() => window.removeEventListener('mouseup', finishSelection))
 </script>
 
 <template>
@@ -283,7 +304,7 @@ onBeforeUnmount(() => window.removeEventListener('mouseup', stopPainting))
             v-for="slot in 48"
             :key="slot"
             class="plan-cell"
-            :class="grid[day][slot - 1]"
+            :class="[grid[day][slot - 1], { selected: isSelected(day, slot - 1) }]"
             :title="`${name} ${String(Math.floor((slot - 1) / 2)).padStart(2, '0')}:${(slot - 1) % 2 === 0 ? '00' : '30'}`"
             @mousedown.prevent="onDown(day, slot - 1)"
             @mouseenter="onEnter(day, slot - 1)"
