@@ -12,6 +12,7 @@
 | [`user-guide.md`](user-guide.md) | End-user manual |
 | [`user-guide.zh-CN.md`](user-guide.zh-CN.md) | 使用手册（中文） |
 | [`faq.md`](faq.md) | Frequently asked questions |
+| [`release-notes-0.9.0.md`](release-notes-0.9.0.md) | 0.9.0 release notes |
 | [`release-notes-0.8.0.md`](release-notes-0.8.0.md) | 0.8.0 release notes |
 | [`release-notes-0.7.0.md`](release-notes-0.7.0.md) | 0.7.0 release notes |
 | [`release-notes-0.6.0.md`](release-notes-0.6.0.md) | 0.6.0 release notes |

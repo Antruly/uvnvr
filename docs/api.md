@@ -131,12 +131,14 @@ recorder and the volume new segments will use:
     {
       "channelId": 1,
       "stream": "main",
+      "recordType": "event",
       "active": true,
       "path": "/var/lib/uvnvr/recordings/uvnvr/1/2026-10-21/1_main_...ts",
       "bytes": 1048576,
       "startMs": 1792564800000,
       "volumeId": 1,
-      "volumePath": "/var/lib/uvnvr/recordings"
+      "volumePath": "/var/lib/uvnvr/recordings",
+      "untilMs": 1792564860000
     }
   ],
   "volume": { "id": 1, "path": "/var/lib/uvnvr/recordings", "mode": "loop" }
@@ -145,11 +147,13 @@ recorder and the volume new segments will use:
 
 `active` is true while a segment file is open; `path` and `startMs` are empty or
 zero for idle recorders, and `bytes` counts data written to the current
-segment. `volume` is the volume selected for the next segment (`{}` when none is
-available). The endpoint reads in-memory recorder state and does not scan the
+segment. `recordType` is `timed` for scheduled plans and `event` for
+alert-triggered clips; `untilMs` is the event deadline (zero for scheduled
+recorders). `volume` is the volume selected for the next segment (`{}` when none
+is available). The endpoint reads in-memory recorder state and does not scan the
 file system, so it is safe to poll; the Storage page refreshes it every five
-seconds. Event clips are not produced yet, so `recordings` covers scheduled
-recorders only.
+seconds. A channel can have a scheduled and an event recorder in the list at the
+same time when both plans are active.
 
 ## API tokens and scopes
 
@@ -237,8 +241,11 @@ Recognized topics become alerts (`type`):
 | `LineDetector`, `FieldDetector` | `intrusion` |
 
 Notifications with `IsMotion`/state values of false are ignored. Each type has a
-60-second per-channel cooldown. Subscriptions are renewed before the camera's
-termination time, and the poller reconnects with backoff when the camera is
+60-second per-channel cooldown. Motion alerts (including the experimental
+frame-difference detector) and the four ONVIF types above also start an event
+clip when the channel has an active `event`/`both` plan. Subscriptions are
+renewed before the camera's termination time, and the poller reconnects with
+backoff when the camera is
 unreachable.
 
 ## Channel groups
@@ -290,6 +297,29 @@ secrets:
 
 Ports and the data directory are applied at startup. See
 [`configuration.md`](configuration.md) for the file format and precedence.
+
+## Runtime settings
+
+`GET /api/v1/settings` returns the editable groups (`security`, `audit`,
+`event`, `system`, `smtp`); `PUT` accepts any subset of them. Event recording
+uses:
+
+```json
+{
+  "event": {
+    "enabled": true,
+    "preSeconds": 10,
+    "postSeconds": 30,
+    "maxSeconds": 300
+  }
+}
+```
+
+`preSeconds` is 0–60, `postSeconds` and `maxSeconds` are 1–3600 and
+`postSeconds` cannot exceed `maxSeconds`; invalid values return 400 and nothing
+is written. When the global switch is off, alerts still create alert records but
+no event clips. Per-channel event plans (`mode` `event` or `both`) decide which
+channels and streams react to alerts.
 
 ## Errors
 

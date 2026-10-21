@@ -6,7 +6,7 @@
 ${StrRep}
 
 !ifndef VERSION
-  !define VERSION "0.8.0"
+  !define VERSION "0.9.0"
 !endif
 !ifndef ARCH
   !define ARCH "x64"

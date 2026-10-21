@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.8.0)
+# UvNVR User Guide (0.9.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -185,6 +185,16 @@ Recording is plan-driven: a channel writes only while the current weekday and
 half-hour slot is painted. Without a storage volume and an enabled plan nothing
 is recorded.
 
+**Event** and **Timed + event** cells also record on demand. When motion is
+detected or the camera sends an ONVIF person, tamper or line-crossing event,
+UvNVR starts a clip from the buffered pre-roll and keeps recording for the
+post-roll. Follow-up alerts extend the clip up to the maximum length, and the
+clip is finalized after the post-roll even if the stream goes quiet. Configure
+the toggle and durations under **System → Event recording** (defaults: enabled,
+10 s pre-roll, 30 s post-roll, 300 s maximum), or through the `event` group in
+`GET/PUT /api/v1/settings`. Event segments are indexed with `record_type=event`
+and play back like scheduled segments.
+
 Recording defaults can be changed in **System** settings:
 
 - `recording.segment_minutes` (default 5): time-based slicing.
@@ -208,8 +218,9 @@ Open **Storage** to manage recording volumes.
 
 The **Active recordings** panel below the volume list refreshes every five
 seconds. It shows the volume new segments are written to and, for each plan
-recorder, whether it is recording, the current file, bytes written and the
-segment start time. Idle recorders show **Idle** with no current file. This
+recorder, whether it is recording, whether the clip is **Scheduled** or
+**Event**, the current file, bytes written and the segment start time. Idle
+recorders show **Idle** with no current file. This
 panel reflects the in-memory recorder state, so it confirms that data is
 actually being written without scanning the disk.
 

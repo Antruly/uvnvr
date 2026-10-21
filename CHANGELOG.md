@@ -4,6 +4,27 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-10-21
+
+### Added
+
+- **Event-triggered recording.** Motion alerts and ONVIF person, tamper and
+  line/field-crossing events now produce clips for channels whose active plan
+  includes event recording. A clip starts with buffered pre-roll, is extended by
+  follow-up alerts and stops after the configured post-roll.
+- Event recording settings under **System → Event recording** and in
+  `GET/PUT /api/v1/settings` (`event.enabled`, `event.preSeconds`,
+  `event.postSeconds`, `event.maxSeconds`).
+- The recording-status API reports `recordType` and `untilMs`; the Storage page
+  distinguishes scheduled and event clips while they are written.
+
+### Changed
+
+- Event plans (`event`/`both`) now actually record. They were stored and shown in
+  the weekly planner before, but did not start a recorder.
+- Event clips are indexed with `record_type=event`, so playback can identify
+  them alongside scheduled segments.
+
 ## [0.8.0] - 2026-10-21
 
 ### Added
