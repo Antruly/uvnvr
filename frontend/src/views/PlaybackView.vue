@@ -176,6 +176,16 @@ function onSpeedChange(value: number) {
   }
 }
 
+function onEnded() {
+  // The server closes the stream at a codec boundary; continue with the next
+  // segment in a fresh player so H.264/H.265 can switch automatically.
+  const boundary = selected.value?.endMs ?? positionMs.value
+  const next = recordings.value.find(
+    (recording) => recording.startMs >= boundary - 1000 && recording.id !== selected.value?.id,
+  )
+  if (next) void playFrom(next)
+}
+
 function onPosition(value: number) {
   positionMs.value = value
 }
@@ -442,6 +452,7 @@ onMounted(async () => {
         @seek="onSeek"
         @speed-change="onSpeedChange"
         @position="onPosition"
+        @ended="onEnded"
       />
       <div v-else class="empty-state">
         <AppIcon name="playback" :size="28" />
