@@ -146,8 +146,13 @@ else()
   # MSVC builds get libuv through the libuvcpp archive; only add an explicit
   # library when one is available.
   find_library(UV_LIBRARY NAMES uv libuv)
-  target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} ${UV_LIBRARY} OpenSSL::Crypto
-                                     OpenSSL::SSL)
+  if(UV_LIBRARY)
+    target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} ${UV_LIBRARY} OpenSSL::Crypto
+                                       OpenSSL::SSL)
+  else()
+    # The libuvcpp archive may provide libuv transitively on some platforms.
+    target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
+  endif()
 endif()
 if(WIN32)
   # uvcpp's Windows headers pull in <windows.h>; keep its min/max macros from

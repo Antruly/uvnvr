@@ -378,7 +378,7 @@ jobs:
         shell: pwsh
         run: |
           $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
-          & "$vcpkgRoot\vcpkg.exe" install openssl:arm64-windows --clean-after-build
+          & "$vcpkgRoot\vcpkg.exe" install openssl:arm64-windows libuv:arm64-windows --clean-after-build
       - name: Fetch dependencies
         shell: pwsh
         run: |
