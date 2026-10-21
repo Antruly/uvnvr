@@ -835,6 +835,15 @@ bool App::Init(std::string* error) {
     return false;
   }
 
+  // Exports are temporary; remove leftovers from a previous crash so an
+  // interrupted job cannot fill the data volume.
+  {
+    std::error_code export_ec;
+    const std::filesystem::path exports = std::filesystem::path(config_.data_dir) / "exports";
+    for (const auto& entry : std::filesystem::directory_iterator(exports, export_ec))
+      std::filesystem::remove_all(entry.path(), export_ec);
+  }
+
   const std::string url = "sqlite://" + config_.db_path;
   const auto status = db_.init(url, 1, 4);
   if (!uvcpp::uvcpp_db_ok(status)) {
