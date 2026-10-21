@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.5.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.6.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,18 +22,19 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.5.0 — camera-side events.** The recorder supports
+**0.6.0 — recording reliability and operator workflow.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.5.0 adds ONVIF PullPoint event subscriptions: motion, person, tamper and
-line-crossing notifications become alerts, with per-channel cooldowns. It builds on
-0.4.0's channel groups and server-side layouts, 0.3.0's Range downloads, MP4 export
-and playback cache, 0.2.0's startup configuration and installer port selection, and
-the core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain
-out of scope. Track the milestones in
+0.6.0 fixes plan/volume recording reliability and adds plan box selection,
+auto/light/dark themes, channel thumbnails, brand auto-detect/quick add, preview
+paging and play-all, 0.25×–32× zoomed/reverse playback, per-token API scopes and
+camera time synchronization. It builds on 0.5.0's ONVIF events, 0.4.0's channel
+groups and layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration,
+and the core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics
+remain out of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -66,6 +67,13 @@ output.
   server-side preview layouts with a default layout and offline browser cache.
 - ONVIF PullPoint events (motion/person/tamper/line crossing) mapped to alerts,
   with a per-channel toggle and 60-second cooldowns.
+- Plan rectangle selection, auto/light/dark themes, channel thumbnails/snapshots,
+  brand auto-detect and one-click add, preview play-all/paging, and a Recordings
+  shortcut.
+- Playback 0.25×–32×, timeline zoom down to 5 minutes, reverse step mode and
+  time-range MP4 download.
+- Per-token API scopes with a grouped selector; camera time sync from browser/NTP
+  updates; codec-change segment roll and codec-aware playback.
 
 ### Delivered scope
 
@@ -164,7 +172,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.5.0)
+## Known limitations (0.6.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -180,6 +188,11 @@ and `/ws` to `127.0.0.1:8080`).
   by drag and drop. Layouts are private to each account.
 - ONVIF event names vary by manufacturer; unrecognized topics are ignored. Events
   currently create alerts but not a dedicated event recording clip.
+- Auto-detect and brand one-click add require ONVIF on the camera; pure RTSP devices
+  still use the manual URL form.
+- Reverse playback is implemented as timed backward seeks (choppy); decoders cannot
+  play a reversed GOP smoothly. Camera time sync covers ONVIF-capable devices only.
+- The Windows installer is NSIS; an MSI/MSIX package is not produced yet.
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -246,6 +259,7 @@ tests/             unit/integration/e2e tests
 | 0.3.0 | ✅ Range downloads, MP4 export, shared playback cache with read-ahead |
 | 0.4.0 | ✅ Channel groups/tree, per-user server-side preview layouts |
 | 0.5.0 | ✅ ONVIF PullPoint camera events integrated with the alert center |
+| 0.6.0 | ✅ Recording fixes, themes, thumbnails, brand detect, token scopes, camera time sync |
 
 ## Contributing and security
 

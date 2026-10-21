@@ -52,7 +52,8 @@ Command-line flags override environment variables, which override the file.
 ```
 
 Useful options are `--version`, `--help`, `--print-config`, `--tls-self-signed`
-and `--maintenance`.
+and `--maintenance`. The top bar and login page switch between **Auto** (follow
+the operating system), **Light** and **Dark** themes; the choice is remembered.
 If the data directory cannot be created, pass a writable location explicitly:
 
 ```bat
@@ -107,8 +108,14 @@ network, add the channel manually with the protocol **ONVIF** and the device hos
    notifications into alerts.
 6. Save. The channel begins connecting immediately.
 
-Use **Reconnect** to retry a channel now instead of waiting for the exponential
-backoff. **Sync** copies selected channel fields and/or recording plans to other
+Use **Auto detect** in the channel form to probe an ONVIF camera at the entered
+host and fill the protocol, stream paths and name automatically. From **Scan
+ONVIF**, **Add now** creates the channel in one click. Hikvision and Dahua
+manufacturers are recognized and use their generated main/sub stream templates,
+so no RTSP URL is needed; other ONVIF cameras use the profile URI, and manual
+RTSP remains available. Channel rows show the numeric `#id` and a snapshot
+thumbnail; the camera button refreshes it and double-clicking the thumbnail
+opens a large view. **Reconnect** retries immediately. **Sync** copies selected channel fields and/or recording plans to other
 channels after showing a diff.
 
 Use **Groups** to organize channels into a tree. Create a group, optionally
@@ -140,6 +147,10 @@ Open **Preview**. It is the second page after the dashboard.
 5. Name and save layouts. Layouts are stored per user account on the server, so
    they follow the account across browsers; the browser keeps a local cache for
    offline use. Use the layout tabs to switch, and the **×** tab to delete.
+6. **Play all** fills the active layout and starts every cell; **Stop all**
+   unmounts the players without losing the layout. When there are more channels
+   than cells, the page arrows show the next/previous page. **Recordings** opens
+   Playback for the selected channel.
 
 Every consumer shares one camera connection. Live clients have independent
 bounded queues: a slow client drops to the next keyframe or is disconnected and
@@ -151,7 +162,9 @@ Open **Plans**.
 
 1. Select a channel and the recording stream (main or sub).
 2. Pick a brush: **Timed**, **Event**, **Timed + event**, or **Erase**.
-3. Drag across the 7 × 48 grid (one cell per half hour) to paint the schedule.
+3. Drag a rectangle across the 7 × 48 grid (one cell per half hour) to paint
+   many days/cells at once; the erase brush clears a rectangle. A plan painted to
+   midnight is stored with an end of 24:00.
 4. Save. Use **Sync** to copy the plan to other channels.
 
 Recording is plan-driven: a channel writes only while the current weekday and
@@ -175,7 +188,8 @@ Open **Storage** to manage recording volumes.
   - **Loop**: delete the oldest segments when the volume reaches its limit.
   - **Alert**: stop recording and raise an alert at the limit.
 - Configure the maximum usage percentage (default 90), reserved space and
-  retention days (default 30).
+  retention days (default 30; **0 means keep forever**). Expired segments are
+  deleted automatically.
 - Volumes can be disabled without deleting existing files.
 
 Manual deletion of video files is not available outside maintenance mode.
@@ -192,13 +206,17 @@ Open **Playback**.
 4. Seeking starts a new ticket at the target time, so only the required segment
    and a small read-ahead window are read from disk. Click a recorded interval
    on the timeline to jump to that time.
-5. The player toolbar has **−30s / −10s / +10s / +30s** seek buttons and
-   **0.5×–8×** speed control. The server paces the stream to the selected rate;
+5. The player toolbar has proportional skip buttons and **0.25×–32×** speed
+   control. The timeline zooms from 24 hours down to 5 minutes; the skip step is
+   the visible window divided by 24 (24h → 1h, 1h → 2.5m). **Reverse** steps
+   backward at the selected rate. The server paces the stream to the selected rate;
    fast-forward is forward playback at a higher rate, and rewind is repeated
    backward seeks (browsers cannot decode a reversed GOP).
 6. **Download** fetches a single MPEG-TS segment with HTTP Range support, so
    interrupted transfers can resume. **Export MP4** remuxes the selected segment
-   to a fast-start MP4 with the bundled FFmpeg; no transcoding is performed.
+   to a fast-start MP4; the **From/To** fields download an MP4 for an arbitrary
+   time range. No transcoding is performed. A codec switch starts a new segment;
+   playback stops at that boundary, so seek to the next segment to change codec.
 7. Playback and downloads share a 64 KiB-block LRU cache (128 MB by default) and
    preload the next segment while the current one plays. Cache hits, misses and
    memory use are shown in **System settings**; tune them with
@@ -217,9 +235,12 @@ falls back to CPU.
 1. Create a token in **System → API Token**. The token is shown once; only its
    hash is stored.
 2. Send `Authorization: Bearer <token>`.
-3. Endpoints are under `/api/v1`; see [`api.md`](api.md) for the full list.
-   Permissions such as `api.access`, `api.snapshot`, `api.stream` and
-   `api.download` are checked against the token owner's role.
+3. Choose **API scopes** when creating a token: preview, snapshots, channel
+   query/add/delete/manage, playback/download, alerts, plans, storage, time,
+   system, RTSP, audit and users. Group checkboxes and the **All scopes** box
+   select children in one click; an empty selection inherits the account role.
+   Scopes are intersected with the role.
+4. Endpoints are under `/api/v1`; see [`api.md`](api.md) for the full list.
 
 API authentication failures count toward the independent API lockout policy.
 
@@ -299,7 +320,10 @@ are always audited. Outside maintenance mode they return forbidden.
 - Security: lockout thresholds, audit retention (default 180 days), time zone,
   UI language and GPU enable/disable.
 - Time: current server time, NTP enable/server/offset, immediate NTP sync, and
-  "use browser time" calibration. The page clock updates every second.
+  "use browser time" calibration. The page clock updates every second. Both
+  sync actions also set the clock on ONVIF-capable cameras (Hikvision/Dahua via
+  ONVIF) and report how many cameras were synchronized; pure RTSP cameras are
+  skipped.
 - Performance: detected tier (low/medium/high), GPU devices and active FFmpeg
   mode. Low-tier systems default to the sub stream off; the tier can be
   overridden.

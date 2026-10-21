@@ -31,8 +31,10 @@ An explicitly requested file is used as-is. Without `--config`, UvNVR checks
 | macOS | `/Library/Application Support/UvNVR/uvnvr.json` |
 | Linux | `/etc/uvnvr/uvnvr.json` |
 
-The Windows installer writes the ProgramData file and starts the service with
-`--config` pointing at it. Linux packages use `/etc/uvnvr/uvnvr.json`; the
+The Windows installer writes the ProgramData config file and starts the service
+with `--config` pointing at it. The config's `dataDir` is `%ProgramData%\UvNVR`
+for a C: install and `<install>\data` when UvNVR is installed on another drive;
+the uninstaller preserves the data directory. Linux packages use `/etc/uvnvr/uvnvr.json`; the
 macOS pkg uses the Application Support file. Portable Windows zips contain
 `uvnvr.json` next to `bin\`.
 
@@ -76,7 +78,7 @@ All keys are optional.
 | `http.tls.cert` / `http.tls.key` | empty | Both must be set to enable HTTPS. |
 | `http.tls.selfSigned` | `false` | Generates a localhost certificate when no cert/key is set. |
 | `rtsp.port` | `554` | Falls back to 8554/8555 when the port cannot be bound. |
-| `dataDir` | `./data` | Database, secret key, alerts and default recordings root. Installed Windows builds default to `%ProgramData%\UvNVR`. |
+| `dataDir` | `./data` | Database, secret key, alerts and default recordings root. Windows installs under Program Files default to `%ProgramData%\UvNVR`; installs on another drive default to `<install>\data`. |
 | `maintenance` | `false` | Enables destructive operations. Prefer `--maintenance`. |
 | `ffmpeg.path` | auto-detected | FFmpeg executable; `UVNVR_FFMPEG` overrides it. |
 | `logging.level` | `info` | `trace`, `debug`, `info`, `warn` or `error`. |

@@ -30,7 +30,9 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/system/email/test` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
 | GET | `/api/v1/preview/channels` | preview.view |
-| POST/PUT/DELETE | `/api/v1/channels[/{id}]` | channel.manage |
+| POST | `/api/v1/channels` | channel.create |
+| PUT | `/api/v1/channels/{id}` | channel.manage |
+| DELETE | `/api/v1/channels/{id}` | channel.delete |
 | GET | `/api/v1/channel-groups` | session |
 | POST | `/api/v1/channel-groups` | channel.manage |
 | PUT/DELETE | `/api/v1/channel-groups/{id}` | channel.manage |
@@ -87,6 +89,11 @@ starts at the nearest keyframe.
 
 ## Downloads and export
 
+`GET /api/v1/recordings` returns `path`, `codec`, `startMs`, `endMs`,
+`durationMs`, `sizeBytes` and `recordType` for each segment. A codec change starts
+a new segment; playback sessions stop at that boundary so one player never
+receives mixed H.264/H.265 data. Seek to the next segment to switch codecs.
+
 `GET /api/v1/recordings/{id}/download` streams the segment without buffering
 the whole file in memory and supports HTTP Range:
 
@@ -110,6 +117,63 @@ hours and 4 GiB of input, and temporary files are removed after the response.
 `GET /api/v1/preview/channels` returns the display metadata and stream state
 needed by preview-only roles (no usernames, URLs or stored error text) and
 requires only `preview.view`.
+
+## API tokens and scopes
+
+Create tokens with `POST /api/v1/tokens`:
+
+```json
+{
+  "name": "wall display",
+  "expiresInDays": 365,
+  "scopes": ["preview", "channels.read"]
+}
+```
+
+`scopes` is optional; an empty/omitted list inherits the account role. Scopes
+are intersected with the role, so a token can never grant more than its owner.
+Scopes are returned by `GET /api/v1/tokens`.
+
+| Scope | Grants |
+|---|---|
+| `all` | The account role's full permission set |
+| `preview` | Live streams |
+| `snapshots` | JPEG snapshots |
+| `channels.read` | Query channels |
+| `channels.create` | Add channels |
+| `channels.delete` | Delete channels |
+| `channels.manage` | Edit channels, ONVIF discovery (implies read/create/delete) |
+| `playback` | Query recordings and playback |
+| `download` | Download/export video |
+| `alerts` | Query/acknowledge alerts |
+| `plans` | Recording plans |
+| `storage` | Storage volumes |
+| `time` | Read/set recorder time and sync cameras |
+| `system` | System information |
+| `rtsp` | RTSP output |
+| `audit` | Audit log |
+| `users` | Users and roles |
+
+## Time synchronization
+
+`POST /api/v1/system/time/sync` with `{ "epochMs": ... }` sets the recorder
+clock and then attempts to set the clock on every enabled ONVIF-capable camera
+(ONVIF channels, plus Hikvision/Dahua devices when ONVIF is enabled). It returns:
+
+```json
+{
+  "ok": true,
+  "serverMs": 0,
+  "serverTimeApplied": true,
+  "applyError": "",
+  "cameras": { "synced": 1, "failed": 0, "skipped": 0, "cameras": [] }
+}
+```
+
+`POST /api/v1/system/ntp/sync` queries the configured NTP server, applies the
+offset and performs the same camera synchronization; it returns `offsetMs`,
+`applied`, `applyError` and `cameras`. Pure RTSP cameras have no control channel
+and are reported as skipped.
 
 ## ONVIF events
 

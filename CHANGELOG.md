@@ -4,6 +4,49 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-10-21
+
+### Fixed
+
+- Recording now uses the storage volume the operator configured. The
+  auto-created volume under the data directory is only a fallback, and the
+  newest explicit volume wins.
+- Plans can cover a full day (`endMin` 1440); previously a schedule painted to
+  midnight was silently rejected, which left channels online but recording
+  nothing.
+- Retention `0` means unlimited; retention cleanup now actually deletes expired
+  segments (the setting was previously unused).
+- Segments are flushed as they are written, and directory/open/finalize errors
+  are logged instead of failing silently.
+- A codec change (H.264 ↔ H.265) finalizes the current segment and starts a new
+  one, so a file never mixes codecs; the recordings API exposes the codec and
+  playback stops at a codec boundary.
+- Windows installs on a non-C: drive default to `<install>\data`; the installer
+  writes that path and preserves it on uninstall. The Windows console uses UTF-8.
+- The Windows installer creates a desktop shortcut.
+
+### Added
+
+- Drag a rectangle in the recording plan grid to paint many rows/cells at once.
+- Auto / light / dark theme with system-preference following, persisted in the
+  browser; switches on the login page and top bar.
+- Channel thumbnails captured on first load, a per-channel snapshot button and a
+  large preview (double-click the thumbnail); channel `#id` is shown in the list.
+- ONVIF discovery quick-add and an **Auto detect** action: Hikvision/Dahua
+  manufacturers are detected and use their generated main/sub stream templates
+  (no manual RTSP URL); the channel name comes from the profile/model.
+- Preview **Play all** / **Stop all**, page navigation when there are more
+  channels than cells, a Recordings shortcut, and a time-range MP4 download
+  form in Playback.
+- Playback speeds 0.25×–32×, zoomable timeline (24h down to 5m) with a
+  proportional skip step, and a reverse mode (backward seek stepping).
+- Per-token API scopes with a grouped, select-all selector; granular
+  `channel.create` / `channel.delete` permissions (manage implies both).
+- Time synchronization now also updates ONVIF-capable cameras (including
+  Hikvision/Dahua through their ONVIF endpoint) after browser-time or NTP
+  updates; the NTP sync endpoint is implemented and reports camera results.
+- MediaMTX-backed recording integration test and API token scope test.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

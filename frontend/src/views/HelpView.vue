@@ -46,6 +46,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'Main and sub streams are independent. Sub stream is recommended for multi-cell preview.',
         'Use Groups to build a channel tree; the Live preview rail shows the same groups and can collapse them.',
         'Enable Use camera ONVIF events to receive motion, person, tamper and line-crossing notifications from the camera in Alerts.',
+        'Use Auto detect in the channel form or Add now in the ONVIF scan results. Hikvision/Dahua are recognized and use generated main/sub paths; names come from the camera profile/model.',
       ],
     },
     {
@@ -64,7 +65,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       body: [
         'The playback player streams recorded segments over a WebSocket; it can cross file boundaries without a gap.',
         'Seeking starts a new ticket at the target time. Click the timeline or use the −30s / −10s / +10s / +30s buttons.',
-        'Use the speed selector for 0.5×–8× playback. The server paces the stream to the selected rate; rewind is implemented as repeated backward seeks.',
+        'Use the speed selector for 0.25×–32× playback. Zoom the timeline from 24h to 5m; the skip step scales with the visible window. Reverse steps backward at the selected rate.',
+        'Use From/To and Download by time for an arbitrary MP4 range. A codec switch starts a new segment; seek to the next segment to change codec.',
         'Use Download segment to fetch a single MPEG-TS file (HTTP Range/resume is supported), or Export MP4 to remux it with the bundled FFmpeg.',
         'Playback and downloads share an LRU block cache and preload the next segment. Tune storage.cacheMb and storage.readaheadMb in the startup configuration.',
       ],
@@ -84,6 +86,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: 'Users and security',
       body: [
         'The first account is admin. Create roles with only the Web/API permissions they need.',
+        'API tokens can be limited with grouped scopes (preview, channels, download, alerts, time and more); select all or leave empty to inherit the role.',
         'Web login failures and API failures lock the recorder independently; thresholds are in System settings.',
         'Camera passwords are encrypted with a key file in the data directory. Back up data/secret.key with the database.',
         'Video files cannot be deleted manually. Only maintenance mode exposes deletion/format/serial operations.',
@@ -140,6 +143,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         '海康/大华：URL 可留空，填写 IP、端口和凭据后由系统生成路径模板。',
         '主码流与子码流独立配置；多画面预览建议使用子码流。',
         '使用“通道分组”构建通道树；实时预览左侧会按分组展示并支持折叠。',
+        '在通道编辑中点击“自动识别”，或在 ONVIF 扫描结果中点击“立即添加”。海康/大华会自动使用主/子码流路径，名称来自摄像头 Profile/型号。',
         '启用“使用摄像头 ONVIF 事件”后，摄像头推送的移动、人形、遮挡与越线事件会进入预警中心。',
       ],
     },
@@ -159,7 +163,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       body: [
         '回放通过 WebSocket 顺序发送录像切片，可以跨文件无缝播放。',
         '跳转会从目标时间创建新的播放票据；可点击时间轴或使用 −30s / −10s / +10s / +30s 按钮。',
-        '倍速支持 0.5×–8×，服务端按所选速率控制发送节奏；快退通过连续向后跳转实现。',
+        '倍速支持 0.25×–32×；时间轴可从 24 小时放大到 5 分钟，跳转步长随窗口等比变化；倒放按所选倍速向后步进。',
+        '可用“开始/结束 + 按时间下载”导出任意时间范围的 MP4。码流切换会开始新切片，跳到下一段即可切换编码。',
         '“下载切片”返回单个 MPEG-TS 文件，支持 HTTP Range 断点续传；“导出 MP4”使用随包 FFmpeg 转封装。',
         '回放与下载共享 LRU 块缓存并预读下一片，可通过启动配置的 storage.cacheMb / storage.readaheadMb 调整。',
       ],
@@ -179,6 +184,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: '用户与安全',
       body: [
         '首个账户为 admin。创建角色时只勾选实际需要的 Web/API 权限。',
+        'API Token 可按分组勾选权限（预览、通道、下载、预警、时间等），支持全选；不勾选则继承账户角色。',
         'Web 登录失败与 API 失败分别锁定；阈值在系统设置中配置。',
         '摄像头密码使用数据目录中的密钥文件加密；请将 data/secret.key 与数据库一起备份。',
         '视频文件不能手动删除；只有运维模式开放删除、格式化、序列号修改等操作。',
