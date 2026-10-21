@@ -177,7 +177,7 @@ onMounted(load)
         </label>
         <label class="field">
           <span>{{ t('storage.retentionDays') }}</span>
-          <input v-model.number="volume.retentionDays" class="input" type="number" min="1" max="3650" />
+          <input v-model.number="volume.retentionDays" class="input" type="number" min="0" max="3650" />
         </label>
       </div>
 
@@ -234,7 +234,7 @@ onMounted(load)
           </label>
           <label class="field">
             <span>{{ t('storage.retentionDays') }}</span>
-            <input v-model.number="modal.retentionDays" class="input" type="number" min="1" max="3650" />
+            <input v-model.number="modal.retentionDays" class="input" type="number" min="0" max="3650" />
           </label>
         </div>
         <div class="modal-actions">

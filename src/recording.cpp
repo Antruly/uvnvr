@@ -169,6 +169,12 @@ struct RecordingService::Impl {
                                         std::to_string(channel_id) / LocalDatePath(now_ms);
       std::error_code ec;
       std::filesystem::create_directories(dir, ec);
+      if (ec) {
+        std::fprintf(stderr, "[recording] cannot create %s: %s\n", dir.string().c_str(),
+                     ec.message().c_str());
+        has_segment = false;
+        return;
+      }
       Segment value;
       value.volume_id = volume.id;
       value.channel_id = channel_id;
@@ -183,8 +189,15 @@ struct RecordingService::Impl {
       value.path = (dir / (base + ".ts")).string();
       value.part_path = (dir / (base + ".ts.part")).string();
       value.file.open(value.part_path, std::ios::binary | std::ios::trunc);
+      if (!value.file.is_open()) {
+        std::fprintf(stderr, "[recording] cannot open %s\n", value.part_path.c_str());
+        has_segment = false;
+        return;
+      }
       segment = std::move(value);
       has_segment = true;
+      std::fprintf(stderr, "[recording] channel %lld %s -> %s\n",
+                   static_cast<long long>(channel_id), stream.c_str(), segment.path.c_str());
       (void)start_offset;
     }
 
@@ -198,10 +211,14 @@ struct RecordingService::Impl {
       std::error_code ec;
       std::filesystem::rename(segment.part_path, segment.path, ec);
       if (ec) {
+        std::fprintf(stderr, "[recording] cannot finalize %s: %s\n",
+                     segment.part_path.c_str(), ec.message().c_str());
         std::filesystem::remove(segment.part_path, ec);
         has_segment = false;
         return;
       }
+      std::fprintf(stderr, "[recording] finalized %s (%lld bytes)\n", segment.path.c_str(),
+                   static_cast<long long>(segment.bytes));
       const int64_t end_ms = NowMs();
       uvcpp::uvcpp_db_params params;
       params.add(segment.channel_id);
@@ -258,6 +275,7 @@ struct RecordingService::Impl {
             segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
                                static_cast<std::streamsize>(split_at - offset));
             segment.bytes += static_cast<int64_t>(split_at - offset);
+            segment.file.flush();
           }
           offset = split_at;
           Finalize();
@@ -270,6 +288,7 @@ struct RecordingService::Impl {
         segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
                            static_cast<std::streamsize>(count));
         segment.bytes += static_cast<int64_t>(count);
+        segment.file.flush();
         offset = chunk->size();
         if (due && now - segment.start_ms > segment.limit_ms + 5000) {
           Finalize();
@@ -315,11 +334,20 @@ struct RecordingService::Impl {
   }
 
   bool ActiveVolume(VolumeInfo* volume) {
+    std::error_code absolute_ec;
+    const std::string default_path =
+        std::filesystem::absolute(std::filesystem::path(data_dir) / "recordings", absolute_ec)
+            .string();
     uvcpp::uvcpp_db_table table;
+    uvcpp::uvcpp_db_params params;
+    params.add(default_path);
+    // The auto-created volume under the data directory is a fallback. A volume
+    // the user configured explicitly wins, and among those the newest wins.
     if (!uvcpp::uvcpp_db_ok(
             db->query("SELECT id, path, mode, max_usage_pct, reserve_gb, retention_days "
-                      "FROM storage_volumes WHERE enabled = 1 ORDER BY id LIMIT 1",
-                      {}, &table)) ||
+                      "FROM storage_volumes WHERE enabled = 1 "
+                      "ORDER BY CASE WHEN path = ? THEN 1 ELSE 0 END, id DESC LIMIT 1",
+                      params, &table)) ||
         table.empty()) {
       return false;
     }
@@ -402,8 +430,8 @@ struct RecordingService::Impl {
     last_cleanup_ms = now;
     uvcpp::uvcpp_db_table volumes;
     if (!uvcpp::uvcpp_db_ok(
-            db->query("SELECT id, path, mode, max_usage_pct, reserve_gb FROM storage_volumes "
-                      "WHERE enabled = 1",
+            db->query("SELECT id, path, mode, max_usage_pct, reserve_gb, retention_days "
+                      "FROM storage_volumes WHERE enabled = 1",
                       {}, &volumes))) {
       return;
     }
@@ -411,7 +439,40 @@ struct RecordingService::Impl {
       const int64_t id = volumes.at(i, "id").to_int64();
       const std::string path = volumes.at(i, "path").to_text();
       const std::string mode = volumes.at(i, "mode").to_text();
-      if (mode != "loop" || path.empty())
+      if (path.empty())
+        continue;
+
+      // Retention applies to every volume; 0 means unlimited.
+      const int64_t retention_days = volumes.at(i, "retention_days").to_int64();
+      if (retention_days > 0) {
+        const int64_t cutoff = now - retention_days * 24LL * 60 * 60 * 1000;
+        while (true) {
+          uvcpp::uvcpp_db_table expired;
+          uvcpp::uvcpp_db_params params;
+          params.add(id);
+          params.add(cutoff);
+          if (!uvcpp::uvcpp_db_ok(db->query(
+                  "SELECT id, path FROM recordings WHERE volume_id = ? AND end_ms < ? "
+                  "ORDER BY start_ms ASC LIMIT 100",
+                  params, &expired)) ||
+              expired.rows().empty()) {
+            break;
+          }
+          for (size_t row = 0; row < expired.rows().size(); ++row) {
+            const int64_t recording_id = expired.at(row, "id").to_int64();
+            const std::string file = expired.at(row, "path").to_text();
+            std::error_code ec;
+            std::filesystem::remove(file, ec);
+            uvcpp::uvcpp_db_params del;
+            del.add(recording_id);
+            db->execute("DELETE FROM recordings WHERE id = ?", del, nullptr);
+          }
+          if (expired.rows().size() < 100)
+            break;
+        }
+      }
+
+      if (mode != "loop")
         continue;
       const int64_t max_pct = volumes.at(i, "max_usage_pct").to_int64();
 #ifdef _WIN32

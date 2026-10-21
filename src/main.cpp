@@ -13,6 +13,10 @@
 #include <uvcpp/uvcpp_threadpool.h>
 #include <uvnvr/version.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 struct Options {
@@ -59,6 +63,15 @@ std::string DefaultDataDir() {
         program_data != nullptr && program_data[0] != '\0') {
       return std::string(program_data) + "\\UvNVR";
     }
+  }
+  // Installs on another drive keep their recordings next to the application
+  // instead of silently using C:.
+  if (!executable.empty()) {
+    std::filesystem::path directory = std::filesystem::path(executable).parent_path();
+    const std::string leaf = directory.filename().string();
+    if (leaf == "bin" || leaf == "Bin" || leaf == "BIN")
+      directory = directory.parent_path();
+    return (directory / "data").string();
   }
 #endif
   return "./data";
@@ -340,6 +353,12 @@ Options ParseOptions(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  // The service logs and help text contain UTF-8 Chinese; make the console
+  // display it instead of mojibake.
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
   // Must happen before the first work item reaches libuv's thread pool.
   (void)uvcpp::uvcpp_set_threadpool_size(0);
 

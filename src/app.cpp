@@ -5106,7 +5106,7 @@ void App::RegisterPlanRoutes() {
                    plan.stream = JsonString(item, "stream", "main");
                    plan.enabled = JsonBool(item, "enabled", true);
                    if (plan.weekday < 0 || plan.weekday > 6 || plan.start_min < 0 ||
-                       plan.start_min > 1439 || plan.end_min < 0 || plan.end_min > 1439) {
+                       plan.start_min > 1439 || plan.end_min < 0 || plan.end_min > 1440) {
                      continue;
                    }
                    if (plan.mode != "timed" && plan.mode != "event" && plan.mode != "both")
@@ -5316,7 +5316,7 @@ void App::RegisterStorageRoutes() {
             const int64_t retention = JsonInt(body, "retentionDays", 30);
             if (path.empty() || path.size() > 1024 || (mode != "loop" && mode != "alert") ||
                 max_usage < 50 || max_usage > 99 || reserve < 0 || reserve > 1000 ||
-                retention < 1 || retention > 3650) {
+                retention < 0 || retention > 3650) {
               SendError(resp, 400, "invalid_volume", "invalid volume settings");
               next();
               return;

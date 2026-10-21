@@ -62,6 +62,7 @@ Var HttpPortEdit
 Var RtspPortEdit
 Var PortsExisting
 Var ProgramDataDir
+Var DataDir
 
 Function .onInit
   ReadEnvStr $ProgramDataDir "PROGRAMDATA"
@@ -139,12 +140,19 @@ Section "UvNVR" SecMain
 
   CreateDirectory "$ProgramDataDir\UvNVR"
   ${IfNot} ${FileExists} "$ProgramDataDir\UvNVR\uvnvr.json"
-    ${StrRep} $0 "$ProgramDataDir" "\" "/"
+    StrCpy $2 "$INSTDIR" 1
+    ${If} $2 == "C"
+    ${OrIf} $2 == "c"
+      ${StrRep} $DataDir "$ProgramDataDir" "\" "/"
+      StrCpy $DataDir "$DataDir/UvNVR"
+    ${Else}
+      ${StrRep} $DataDir "$INSTDIR\data" "\" "/"
+    ${EndIf}
     FileOpen $1 "$ProgramDataDir\UvNVR\uvnvr.json" w
     FileWrite $1 "{$\r$\n"
     FileWrite $1 '  "http": { "port": $HttpPort, "host": "0.0.0.0" },$\r$\n'
     FileWrite $1 '  "rtsp": { "port": $RtspPort },$\r$\n'
-    FileWrite $1 '  "dataDir": "$0/UvNVR"$\r$\n'
+    FileWrite $1 '  "dataDir": "$DataDir"$\r$\n'
     FileWrite $1 "}$\r$\n"
     FileClose $1
   ${EndIf}
@@ -153,6 +161,7 @@ Section "UvNVR" SecMain
   CreateShortCut "$SMPROGRAMS\UvNVR\UvNVR Web UI.lnk" "http://127.0.0.1:$HttpPort/"
   CreateShortCut "$SMPROGRAMS\UvNVR\UvNVR Configuration.lnk" "$WINDIR\notepad.exe" '"$ProgramDataDir\UvNVR\uvnvr.json"'
   CreateShortCut "$SMPROGRAMS\UvNVR\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+  CreateShortCut "$DESKTOP\UvNVR Web UI.lnk" "http://127.0.0.1:$HttpPort/"
 
   WriteRegStr HKLM "Software\UvNVR" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\UvNVR" "HttpPort" "$HttpPort"
@@ -179,8 +188,15 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\UvNVR\UvNVR Web UI.lnk"
   Delete "$SMPROGRAMS\UvNVR\UvNVR Configuration.lnk"
   Delete "$SMPROGRAMS\UvNVR\Uninstall.lnk"
+  Delete "$DESKTOP\UvNVR Web UI.lnk"
   RMDir "$SMPROGRAMS\UvNVR"
-  RMDir /r "$INSTDIR"
+  RMDir /r "$INSTDIR\bin"
+  RMDir /r "$INSTDIR\share"
+  Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
+  Delete "$INSTDIR\uvnvr.json"
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\UvNVR"
   DeleteRegKey HKLM "Software\UvNVR"
   ; $ProgramDataDir\UvNVR is intentionally preserved, including uvnvr.json.
