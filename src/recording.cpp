@@ -66,6 +66,21 @@ std::string LocalDatePath(int64_t timestamp_ms) {
   return buffer;
 }
 
+std::string DetectCodec(const uint8_t* data, size_t len) {
+  for (size_t i = 0; i + 4 <= len; ++i) {
+    if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1)
+      continue;
+    const uint8_t nal = data[i + 3];
+    const int h264_type = nal & 0x1f;
+    if (h264_type == 5 || h264_type == 7)
+      return "h264";
+    const int h265_type = (nal >> 1) & 0x3f;
+    if (h265_type == 19 || h265_type == 20 || h265_type == 32 || h265_type == 33)
+      return "h265";
+  }
+  return {};
+}
+
 std::vector<size_t> KeyframeOffsets(const uint8_t* data, size_t len) {
   std::vector<size_t> offsets;
   for (size_t i = 0; i + 4 <= len; ++i) {
@@ -104,6 +119,7 @@ struct RecordingService::Impl {
     int64_t limit_bytes = 0;
     int64_t limit_ms = 0;
     int64_t seq = 0;
+    std::string codec;
     std::string path;
     std::string part_path;
     std::ofstream file;
@@ -125,6 +141,7 @@ struct RecordingService::Impl {
     std::thread thread;
     Segment segment;
     bool has_segment = false;
+    std::string current_codec;
 
     Recorder(Impl* owner_in, int64_t channel, std::string stream_kind, VolumeInfo vol,
              int64_t minutes, int64_t size_mb, std::string mode)
@@ -184,6 +201,7 @@ struct RecordingService::Impl {
       value.limit_bytes = segment_size_mb * 1024 * 1024;
       value.limit_ms = segment_minutes * 60 * 1000;
       value.seq = static_cast<int64_t>(now_ms);
+      value.codec = current_codec;
       const std::string base = std::to_string(channel_id) + "_" + stream + "_" +
                                std::to_string(now_ms) + "_" + std::to_string(value.seq);
       value.path = (dir / (base + ".ts")).string();
@@ -229,7 +247,7 @@ struct RecordingService::Impl {
       params.add(end_ms);
       params.add(std::max<int64_t>(0, end_ms - segment.start_ms));
       params.add(segment.bytes);
-      params.add("");
+      params.add(segment.codec);
       params.add("timed");
       params.add(end_ms / 1000);
       std::string error;
@@ -246,6 +264,21 @@ struct RecordingService::Impl {
     }
 
     void WriteChunk(const std::shared_ptr<std::vector<uint8_t>>& chunk) {
+      const std::string detected = DetectCodec(chunk->data(), chunk->size());
+      if (!detected.empty()) {
+        if (!current_codec.empty() && detected != current_codec) {
+          // A camera that switches H.264/H.265 must start a new file; the two
+          // codecs cannot share an index row or a player session.
+          if (has_segment)
+            Finalize();
+          current_codec = detected;
+          OpenSegment(NowMs());
+        } else if (current_codec.empty()) {
+          current_codec = detected;
+          if (has_segment)
+            segment.codec = current_codec;
+        }
+      }
       if (!has_segment)
         OpenSegment(NowMs());
       if (!segment.file.is_open())

@@ -143,10 +143,14 @@ struct PlaybackService::Impl {
 
       const double rate = speed > 0.0 ? speed : 1.0;
       const bool bounded = end_ms > 0 && end_ms < (1LL << 59);
+      std::string expected_codec = table.at(0, "codec").to_text();
       const auto clock_start = std::chrono::steady_clock::now();
       double media_ms = 0.0;
 
       for (size_t row = 0; row < table.rows().size() && alive.load(); ++row) {
+        const std::string codec = table.at(row, "codec").to_text();
+        if (row > 0 && !expected_codec.empty() && !codec.empty() && codec != expected_codec)
+          break; // a codec switch needs a new player/session
         const std::string path = table.at(row, "path").to_text();
         const int64_t segment_start = table.at(row, "start_ms").to_int64();
         const int64_t segment_end = table.at(row, "end_ms").to_int64();
