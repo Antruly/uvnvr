@@ -355,8 +355,16 @@ bool ChannelEventsEnabled(const ChannelRow& channel) {
 
 int ChannelHttpPort(const ChannelRow& channel) {
   const json media = json::parse(channel.media_json, nullptr, false);
-  const int port = media.is_object() ? media.value("httpPort", 80) : 80;
-  return port >= 1 && port <= 65535 ? port : 80;
+  if (media.is_object() && media.contains("httpPort")) {
+    const int port = media.value("httpPort", 80);
+    if (port >= 1 && port <= 65535)
+      return port;
+  }
+  // ONVIF channels created before httpPort existed stored the ONVIF service
+  // port in `port`; keep that behavior unless httpPort is explicit.
+  if (channel.protocol == "onvif" && channel.port > 0 && channel.port <= 65535)
+    return channel.port;
+  return 80;
 }
 
 std::vector<std::string> ParsePermissions(const std::string& text) {
