@@ -4,6 +4,26 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-10-22
+
+### Added
+
+- **RTSP Digest authentication.** The RTSP server now advertises both Digest
+  (MD5, `qop=auth`, per-process nonce, stored HA1) and Basic during the 401
+  challenge. HA1 is derived from the password on setup, user create/update and
+  the next successful login for upgraded installations, and both paths enforce
+  `rtsp.access`.
+- **Real-time event push.** `POST /api/v1/events/ticket` issues a single-use
+  ticket for `/ws/events`; the socket pushes `hello`, `alert` and `channel`
+  messages. The web UI connects after login, shows a toast for new alerts and
+  refreshes the Alerts page in place. Alerts also appear in the main navigation.
+- The OpenAPI document includes the events-ticket endpoint.
+
+### Changed
+
+- The Alerts page is now linked from the primary navigation instead of being
+  listed as a planned, disabled item.
+
 ## [0.11.0] - 2026-10-22
 
 ### Added

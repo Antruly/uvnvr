@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.11.0)
+# UvNVR User Guide (0.12.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -292,15 +292,24 @@ rtsp://user:pass@host:554/live/{channel}/{main|sub}
 rtsp://user:pass@host:554/live/{channel}        # main stream
 ```
 
-RTSP uses Basic authentication and H.264/H.265 RTP (payload type 96) over TCP
-interleaved or UDP unicast. The `rtsp.access` permission is required. If the sub
-stream is disabled, requesting it returns an explicit error.
+RTSP accepts Basic and Digest authentication (MD5, `qop=auth`) and outputs
+H.264/H.265 RTP (payload type 96) over TCP interleaved or UDP unicast. The
+`rtsp.access` permission is required. `DESCRIBE` waits up to two seconds for the
+stream's parameter sets and returns 503 while the channel is offline; video only
+is forwarded (audio is not packetized yet). If the sub stream is disabled,
+requesting it returns an explicit error.
 
 ### Live WebSocket
 
 `POST /api/v1/streams/ticket` returns a short-lived single-use ticket and a
 `/ws/live?ticket=...` path. Keeping credentials out of the URL avoids leaking
 camera passwords into browser history and proxy logs.
+
+A second socket, `/ws/events`, pushes alerts and channel state changes. Request
+a ticket with `POST /api/v1/events/ticket` (permission `alert.view`), then
+connect to the returned `wsPath`. The UI connects automatically after login: a
+toast appears for new alerts and the Alerts page refreshes in place. Event
+tickets are single-use and expire after 30 seconds.
 
 ## 9. Alerts and email
 

@@ -70,6 +70,7 @@ header for cookie-authenticated mutating requests.
 | POST | `/api/v1/playback/export` | playback.download |
 | POST | `/api/v1/playback/ticket` | playback.view |
 | WS | `/ws/playback?ticket=...` | playback.view |
+| POST | `/api/v1/events/ticket` | alert.view |
 | GET | `/api/v1/alerts` | alert.view |
 | POST | `/api/v1/alerts/{id}/ack` | alert.manage |
 | GET | `/api/v1/alerts/{id}/snapshot` | alert.view |
@@ -100,6 +101,11 @@ returns 503 while the channel is offline. Video only is forwarded (audio is not
 packetized yet). RTCP sender reports are sent every five seconds. If port 554
 cannot be bound, the service tries 8554/8555 and prints the active port.
 
+Authentication accepts **Basic** and **Digest** (MD5, `qop=auth`). The 401
+challenge advertises both schemes; Digest uses the stored HA1 and the per-process
+nonce, while Basic verifies the scrypt password hash. Both paths enforce the
+`rtsp.access` permission.
+
 ## Snapshots
 
 `GET /api/v1/channels/{id}/snapshot` returns `image/jpeg`. Optional query
@@ -125,6 +131,23 @@ paces the MPEG-TS stream by the segment bitrate, and the web player additionally
 sets the media element's playback rate. Seeking (fast-forward/rewind buttons,
 timeline clicks) requests a new ticket starting at the target time; the server
 starts at the nearest keyframe.
+
+## Real-time events
+
+`POST /api/v1/events/ticket` (permission `alert.view`) returns a single-use
+ticket and `wsPath` valid for 30 seconds. Connect to
+`/ws/events?ticket=...`; the server pushes JSON messages:
+
+```json
+{ "type": "hello", "version": "0.12.0" }
+{ "type": "alert", "alert": { "channelId": 1, "type": "motion", "level": "warning", "message": "Motion detected on channel Front door", "snapshotPath": "", "acknowledged": false, "createdAt": 1792600000 } }
+{ "type": "channel", "channelId": 1, "name": "Front door", "state": "online", "error": "" }
+```
+
+Tickets are single-use and short-lived; reconnect by requesting a new ticket.
+Alert messages are emitted as soon as the alert row is written, and channel
+messages when the online/offline state changes. The Alerts page refreshes itself
+while this socket is connected.
 
 ## Downloads and export
 

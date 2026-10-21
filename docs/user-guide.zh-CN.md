@@ -1,4 +1,4 @@
-# UvNVR 使用手册（0.11.0）
+# UvNVR 使用手册（0.12.0）
 
 本手册覆盖从安装到完整的摄像头接入、预览、录像、回放、API/RTSP、预警和系统管理流程。
 
@@ -227,11 +227,15 @@ rtsp://user:pass@host:554/live/{channel}/{main|sub}
 rtsp://user:pass@host:554/live/{channel}        # 主码流
 ```
 
-RTSP 使用 Basic 鉴权，输出 H.264/H.265 RTP（payload type 96），支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。`DESCRIBE` 最多等待 2 秒获取流的参数集，通道离线时返回 503；当前只转发视频，音频尚未封装，RTCP SR 每 5 秒发送一次。
+RTSP 支持 Basic 与 Digest 鉴权（MD5、`qop=auth`），输出 H.264/H.265 RTP（payload type 96），支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。`DESCRIBE` 最多等待 2 秒获取流的参数集，通道离线时返回 503；当前只转发视频，音频尚未封装，RTCP SR 每 5 秒发送一次。
 
 ### 实时 WebSocket
 
 `POST /api/v1/streams/ticket` 返回短期、单次使用的票据和 `/ws/live?ticket=...` 路径。凭据不放进 URL，避免摄像头密码进入浏览器历史或代理日志。
+
+另一个 `/ws/events` 连接用于推送预警和通道状态变化：先调用 `POST /api/v1/events/ticket`
+（需要 `alert.view`）取得票据，再连接返回的 `wsPath`。界面登录后会自动连接，
+新预警会弹出提示，预警中心会就地刷新。事件票据单次使用，30 秒后过期。
 
 ## 9. 预警与邮件
 
