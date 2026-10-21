@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.10.0)
+# UvNVR User Guide (0.11.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -278,6 +278,10 @@ falls back to CPU.
    select children in one click; an empty selection inherits the account role.
    Scopes are intersected with the role.
 4. Endpoints are under `/api/v1`; see [`api.md`](api.md) for the full list.
+5. The OpenAPI 3.1 document is at `/api/v1/openapi.json`, and
+   `http://<host>:8080/api/docs` serves a self-hosted Swagger UI. Both require
+   `api.access`; use **Authorize** with a bearer token when testing tokens, and
+   add the `X-CSRF-Token` header for cookie-authenticated writes.
 
 API authentication failures count toward the independent API lockout policy.
 
@@ -288,7 +292,7 @@ rtsp://user:pass@host:554/live/{channel}/{main|sub}
 rtsp://user:pass@host:554/live/{channel}        # main stream
 ```
 
-RTSP uses Basic authentication and RTP/MP2T (payload type 33) over TCP
+RTSP uses Basic authentication and H.264/H.265 RTP (payload type 96) over TCP
 interleaved or UDP unicast. The `rtsp.access` permission is required. If the sub
 stream is disabled, requesting it returns an explicit error.
 
@@ -411,7 +415,7 @@ Audit entries expire after the configured retention period.
 | Email test fails | QQ Mail requires an authorization code and STARTTLS/SMTPS; check host, port and TLS. |
 | Login locked | Wait for the configured lockout window. The remaining time is shown in the error and the event is audited. |
 | Disk fills up | Lower retention days, enable loop mode, or add a volume. Free space must exceed the reserve threshold. |
-| H.265 RTSP client has no video | 0.1.0 outputs RTP/MP2T; use a client that accepts payload type 33, or the browser preview for H.264. |
+| H.265 RTSP client has no video | The client must support H.265 RTP (RFC 7798). Use an H.264 sub stream or the browser preview when it does not. |
 
 More answers are in [`faq.md`](faq.md). For security-sensitive reports follow
 [`../SECURITY.md`](../SECURITY.md).

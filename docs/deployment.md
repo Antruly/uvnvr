@@ -6,8 +6,8 @@ Release packages install under `/opt/uvnvr` and bundle the application, static L
 
 ### Linux
 
-- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.10.0_amd64.deb`
-- RHEL/Fedora: `sudo rpm -i uvnvr-0.10.0-1.x86_64.rpm`
+- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.11.0_amd64.deb`
+- RHEL/Fedora: `sudo rpm -i uvnvr-0.11.0-1.x86_64.rpm`
 - Portable: extract the tar.gz and run `/opt/uvnvr/bin/uvnvr`.
 
 The systemd unit runs as `uvnvr`, stores data in `/var/lib/uvnvr`, binds HTTP 8080 and RTSP 554 (with `CAP_NET_BIND_SERVICE`). Open `http://<host>:8080` and complete first-run setup.

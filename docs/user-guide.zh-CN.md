@@ -1,4 +1,4 @@
-# UvNVR 使用手册（0.10.0）
+# UvNVR 使用手册（0.11.0）
 
 本手册覆盖从安装到完整的摄像头接入、预览、录像、回放、API/RTSP、预警和系统管理流程。
 
@@ -214,6 +214,9 @@ UvNVR 会从缓冲区带上预录开始一个片段，并持续录制后录；�
 3. 创建 Token 时可勾选 **API 权限**：预览、抓拍、通道查询/添加/删除/管理、回放/下载、预警、计划、存储、
    时间、系统、RTSP、审计、用户。分组复选框和“全选”可一键勾选子项；不勾选则继承账户角色权限，
    且 Token 权限不会超过账户角色。完整列表见 [`api.md`](api.md)。
+4. OpenAPI 3.1 文档位于 `/api/v1/openapi.json`，`http://<主机>:8080/api/docs` 提供自托管
+   Swagger UI。两者都需要 `api.access`；使用 Token 调试时点击 **Authorize** 填入 Bearer Token，
+   使用 Cookie 会话修改数据时需附加 `X-CSRF-Token` 请求头。
 
 API 鉴权失败计入独立的 API 锁定策略。
 
@@ -224,7 +227,7 @@ rtsp://user:pass@host:554/live/{channel}/{main|sub}
 rtsp://user:pass@host:554/live/{channel}        # 主码流
 ```
 
-RTSP 使用 Basic 鉴权，RTP/MP2T（payload type 33），支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。
+RTSP 使用 Basic 鉴权，输出 H.264/H.265 RTP（payload type 96），支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。`DESCRIBE` 最多等待 2 秒获取流的参数集，通道离线时返回 503；当前只转发视频，音频尚未封装，RTCP SR 每 5 秒发送一次。
 
 ### 实时 WebSocket
 
@@ -320,6 +323,6 @@ RTSP 使用 Basic 鉴权，RTP/MP2T（payload type 33），支持 TCP interleave
 | 邮件测试失败 | QQ 邮箱需要授权码，并启用 STARTTLS/SMTPS；检查主机、端口与 TLS。 |
 | 登录被锁定 | 等待配置的锁定时间；错误信息会显示剩余时间，事件已写入审计。 |
 | 磁盘占满 | 降低保留天数、启用循环录制或增加存储卷；可用空间需高于保留阈值。 |
-| H.265 RTSP 客户端无画面 | 0.1.0 输出 RTP/MP2T；请使用支持 payload type 33 的客户端，或改用 H.264 浏览器预览。 |
+| H.265 RTSP 客户端无画面 | 客户端需支持 H.265 RTP（RFC 7798）；否则请使用 H.264 子码流或浏览器预览。 |
 
 更多问题见 [`faq.md`](faq.md)。安全相关报告请遵循 [`../SECURITY.md`](../SECURITY.md)。

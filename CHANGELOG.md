@@ -4,6 +4,28 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-10-22
+
+### Added
+
+- **OpenAPI 3.1 and Swagger UI.** `GET /api/v1/openapi.json` returns the spec
+  (permission `api.access`) and `GET /api/docs` serves a self-hosted Swagger UI
+  that loads its assets from `/api-docs/`, with no external scripts or CDNs.
+- **Standard RTP output.** The RTSP server now packetizes H.264 (RFC 6184) and
+  H.265 (RFC 7798) as RTP payload type 96 with SDP parameter sets, FU-A/FU
+  fragmentation and RTCP sender reports, over TCP interleaved or UDP unicast.
+- **Snapshot sizing.** `GET /api/v1/channels/{id}/snapshot` accepts optional
+  `width` (0 or 16–4096), `height` (0 or 16–4096) and `quality` (1–31) query
+  parameters.
+
+### Changed
+
+- RTSP output no longer sends RTP/MP2T. It waits up to two seconds during
+  `DESCRIBE` for the stream's PAT/PMT and parameter sets and returns 503 while
+  the channel is offline. Audio is not packetized in this release.
+- The RTSP output advertises H.264/H.265 video only; clients that require the
+  former MP2T payload must use a different profile.
+
 ## [0.10.0] - 2026-10-21
 
 ### Added

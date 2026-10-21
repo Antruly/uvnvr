@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.10.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.11.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,17 +22,17 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.10.0 — 运维保障。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.11.0 — API 契约与标准 RTSP。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.10.0 补齐运维能力：运维模式现在真正限制录像删除、审计清理、序列号/显示版本修改与存储卷格式化；
-移动侦测支持灵敏度、冷却时间与区域配置；审计日志可导出 CSV；Windows 支持抓拍与移动侦测采样；
-GPU 抓拍失败时自动回退软件解码。0.9.0 的事件触发录像、0.8.0 的 CSV 批量导入与实时录像状态、
-0.7.0 的海康/大华 HTTP 后备、HTTP 端口、x64 MSI 与编码自动续播，0.6.0 的录像修复与运维 UI，
-0.5.0 的 ONVIF 事件，0.4.0 的通道分组与布局，0.3.0 的下载/导出/缓存，0.2.0 的启动配置继续保留。
-WebRTC、云平台与高级分析仍不在范围内。里程碑见
-[`docs/development-plan.md`](docs/development-plan.md)。
+0.11.0 发布 OpenAPI 3.1 文档与自托管 Swagger UI；RTSP 输出从 MP2T 改为标准
+H.264/H.265 RTP（SDP 参数集、分片与 RTCP SR）；抓拍 API 新增宽高与质量参数。
+0.10.0 的运维操作、移动侦测设置、审计导出、Windows 抓拍与 GPU 回退，0.9.0 的事件触发录像、
+0.8.0 的 CSV 批量导入与实时录像状态、0.7.0 的海康/大华 HTTP 后备、HTTP 端口、x64 MSI
+与编码自动续播，0.6.0 的录像修复与运维 UI，0.5.0 的 ONVIF 事件，0.4.0 的通道分组与布局，
+0.3.0 的下载/导出/缓存，0.2.0 的启动配置继续保留。WebRTC、云平台与高级分析仍不在范围内。
+里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -48,7 +48,7 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
 - 每通道每码流一个 FFmpeg 拉流进程；TS 共享分发给 WebSocket 客户端。
 - 计划录像、关键帧对齐切片、按时间/大小切片、循环/预警存储卷。
 - 回放时间轴、跨切片 WebSocket 播放、预读与切片下载。
-- RTSP 输出（`/live/{channel}/{main|sub}`，RTP/MP2T，TCP/UDP）与 Basic 鉴权。
+- RTSP 输出（`/live/{channel}/{main|sub}`，H.264/H.265 RTP，TCP/UDP）与 Basic 鉴权。
 - 抓拍、移动/离线/存储预警、SMTP 邮件（QQ 预设）、审计日志。
 - 性能档位、GPU 探测与开关、系统时间 API。
 - 中英文界面、多标签缓存、仪表盘、帮助手册与 API Token。
@@ -68,6 +68,8 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
   事件计划与 `record_type=event` 索引已完整接通。
 - 运维模式操作（录像删除、审计清理、序列号/显示版本修改、存储卷格式化），带管理员校验、
   二次确认与审计；可配置移动侦测；审计 CSV 导出；Windows 抓拍/移动侦测；GPU 抓拍与软件回退。
+- OpenAPI 3.1（`/api/v1/openapi.json`）与自托管 Swagger UI（`/api/docs`）；
+  H.264/H.265 RTP 输出（SDP 参数集、分片、RTCP SR）；抓拍宽高/质量参数。
 
 ### 已交付范围
 
@@ -163,12 +165,15 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.10.0 已知限制
+## 0.11.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
 - 浏览器回放使用 MSE；H.265 依赖浏览器/硬件，建议使用 H.264 子码流。
-- RTSP 输出使用 RTP/MP2T（payload type 33），部分客户端可能只接受 H.264 RTP；VLC/ffplay 可用。
+- RTSP 输出以 RTP payload type 96 发送 H.264/H.265 视频并发送 RTCP SR；音频尚未封装。
+  `DESCRIBE` 最多等待 2 秒获取参数集，通道离线时返回 503。
+- RTSP 鉴权目前仅支持 Basic，Digest 仍在计划中；H.265 客户端需支持 RFC 7798 分片。
+- OpenAPI 文档描述路由、权限与内容类型，请求/响应字段示例仍以 API 文档正文为准。
 - macOS 安装包为 ad-hoc 签名；未配置 Developer ID 时 Gatekeeper 可能要求右键打开。
 - 回退通过连续向后跳转实现（浏览器无法反向解码 GOP）；快进使用服务端限速与播放器倍速。
 - MP4 导出为转封装（`-c copy`）；无法放入 MP4 的源会直接报错，不做转码。
@@ -254,6 +259,7 @@ tests/             单元/集成/E2E 测试
 | 0.8.0 | ✅ CSV 批量导入、实时录像状态与生效存储卷显示 |
 | 0.9.0 | ✅ 事件触发录像（预录/后录）、事件计划、事件录像设置 |
 | 0.10.0 | ✅ 运维操作、移动侦测设置、审计导出、Windows 抓拍、GPU 回退 |
+| 0.11.0 | ✅ OpenAPI + Swagger UI、H.264/H.265 RTP 输出、抓拍尺寸参数 |
 
 ## 贡献与安全
 

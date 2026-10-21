@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.10.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.11.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,23 +22,23 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.10.0 — operational safeguards.** The recorder supports
+**0.11.0 — API contract and standard RTSP.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.10.0 closes the operational gaps: maintenance mode now gates recording deletion,
-audit purging, serial/display-version changes and volume formatting; motion
-detection has configurable sensitivity, cooldown and region; the audit log exports
-to CSV; Windows gains snapshot and motion capture; and GPU-assisted capture falls
-back to software. It builds on 0.9.0's event-triggered clips, 0.8.0's CSV bulk
-import and live recording status, 0.7.0's Hikvision/Dahua HTTP fallback,
-per-channel HTTP port, x64 MSI and codec-boundary continuation, 0.6.0's recording
-fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and layouts,
-0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the core NVR
-loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of
-scope. Track the milestones in
+0.11.0 publishes an OpenAPI 3.1 document with a self-hosted Swagger UI, replaces
+the RTSP MP2T output with standards-compliant H.264/H.265 RTP (SDP parameter
+sets, fragmentation and RTCP sender reports), and adds width/height/quality
+options to the snapshot API. It builds on 0.10.0's maintenance operations,
+motion settings, audit export, Windows capture and GPU fallback, 0.9.0's
+event-triggered clips, 0.8.0's CSV bulk import and live recording status, 0.7.0's
+Hikvision/Dahua HTTP fallback, per-channel HTTP port, x64 MSI and codec-boundary
+continuation, 0.6.0's recording fixes and operator UI, 0.5.0's ONVIF events,
+0.4.0's channel groups and layouts, 0.3.0's downloads/export/cache, 0.2.0's
+startup configuration, and the core NVR loop. Peer-to-peer/WebRTC, cloud access
+and advanced analytics remain out of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -57,7 +57,7 @@ output.
 - One FFmpeg ingest process per channel stream; shared TS fan-out to WebSocket clients.
 - Plan-driven recording, keyframe-aligned segments, time/size slicing, loop/alert volumes.
 - Playback timeline, WebSocket streaming across segments, read-ahead and segment download.
-- RTSP output (`/live/{channel}/{main|sub}`, RTP/MP2T over TCP/UDP) with Basic auth.
+- RTSP output (`/live/{channel}/{main|sub}`, H.264/H.265 RTP over TCP/UDP) with Basic auth.
 - Snapshots, motion/offline/storage alerts, SMTP email (QQ preset), audit log.
 - Performance tier, GPU detection and explicit GPU toggle; system time API.
 - Chinese/English UI, cached tabs, dashboard, help manual and API tokens.
@@ -91,6 +91,9 @@ output.
   display-version changes, volume formatting) with admin checks, confirmations
   and audit entries; configurable motion detection; CSV audit export; Windows
   snapshot/motion capture; GPU-assisted capture with software fallback.
+- OpenAPI 3.1 at `/api/v1/openapi.json` and a self-hosted Swagger UI at
+  `/api/docs`; H.264/H.265 RTP output with SDP parameter sets, fragmentation and
+  RTCP sender reports; snapshot width/height/quality options.
 
 ### Delivered scope
 
@@ -189,12 +192,19 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.10.0)
+## Known limitations (0.11.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
 - Browser playback uses MSE; H.265 depends on the browser/hardware. Prefer an H.264 sub stream.
-- RTSP output uses RTP/MP2T (payload type 33). Some clients expect H.264 RTP; VLC/ffplay work.
+- RTSP output sends H.264/H.265 video as RTP payload type 96 with RTCP sender
+  reports; audio is not packetized yet. `DESCRIBE` waits up to two seconds for
+  the stream's parameter sets and returns 503 while the channel is offline.
+- RTSP authentication is Basic only; Digest is still on the roadmap. H.265
+  clients must support RFC 7798 packetization.
+- The OpenAPI document describes routes, permissions and content types with
+  generic object schemas; per-field request/response examples live in this API
+  guide.
 - macOS packages are ad-hoc signed; Gatekeeper may require a right-click Open unless a
   Developer ID is configured.
 - Playback rewind is implemented as repeated backward seeks; browsers do not decode a
@@ -296,6 +306,7 @@ tests/             unit/integration/e2e tests
 | 0.8.0 | ✅ CSV bulk import, live recording status and active-volume visibility |
 | 0.9.0 | ✅ Event-triggered clipping (pre/post-roll), event plans, event settings |
 | 0.10.0 | ✅ Maintenance operations, motion settings, audit export, Windows capture, GPU fallback |
+| 0.11.0 | ✅ OpenAPI + Swagger UI, H.264/H.265 RTP output, snapshot sizing |
 
 ## Contributing and security
 

@@ -9,11 +9,22 @@ All endpoints are under `/api/v1` unless noted.
 - RTSP: `rtsp://user:pass@host:554/live/{channel}/{main|sub}` using RTSP Basic authentication.
 - A short-lived WebSocket ticket is required for live/playback streams.
 
+## OpenAPI and Swagger UI
+
+`GET /api/v1/openapi.json` returns the OpenAPI 3.1 document (permission
+`api.access`). `GET /api/docs` serves a self-hosted Swagger UI that loads the
+spec and its assets from `/api-docs/`; no external scripts or CDNs are used.
+Both endpoints require an authenticated session or API token. Use the **Authorize**
+button for a bearer token when testing with a token, and the `X-CSRF-Token`
+header for cookie-authenticated mutating requests.
+
 ## Core endpoints
 
 | Method | Path | Permission |
 |---|---|---|
 | GET | `/healthz` | public |
+| GET | `/api/v1/openapi.json` | api.access |
+| GET | `/api/docs` | api.access |
 | GET | `/api/v1/setup/status` | public |
 | POST | `/api/v1/setup` | first run |
 | POST | `/api/v1/auth/login` | public |
@@ -81,7 +92,27 @@ rtsp://user:password@host:554/live/1/main
 rtsp://user:password@host:554/live/1/sub
 ```
 
-RTP payload is MPEG-TS (payload type 33) over TCP interleaved or UDP unicast. If port 554 cannot be bound, the service tries 8554/8555 and prints the active port.
+RTP payload is H.264 (RFC 6184) or H.265 (RFC 7798) with payload type 96 over
+TCP interleaved or UDP unicast. `DESCRIBE` waits up to two seconds for the
+stream's PAT/PMT and parameter sets, then returns SDP with
+`packetization-mode=1` and `sprop-parameter-sets`/`sprop-vps,sps,pps`; it
+returns 503 while the channel is offline. Video only is forwarded (audio is not
+packetized yet). RTCP sender reports are sent every five seconds. If port 554
+cannot be bound, the service tries 8554/8555 and prints the active port.
+
+## Snapshots
+
+`GET /api/v1/channels/{id}/snapshot` returns `image/jpeg`. Optional query
+parameters:
+
+| Parameter | Range | Default | Effect |
+|---|---|---|---|
+| `width` | 0 or 16–4096 | 0 (source) | Scale to this width; `0` keeps the aspect ratio when only `height` is set. |
+| `height` | 0 or 16–4096 | 0 (source) | Scale to this height. |
+| `quality` | 1–31 | 2 | FFmpeg MJPEG quality (lower is better). |
+
+Out-of-range values return `400 invalid_snapshot_options`. The capture uses
+hardware decoding with a software fallback when GPU acceleration is enabled.
 
 ## Streaming tickets
 
