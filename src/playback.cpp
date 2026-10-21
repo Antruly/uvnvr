@@ -67,8 +67,7 @@ int64_t FindKeyframeOffset(std::ifstream& file, int64_t approximate, int64_t fil
   std::vector<uint8_t> window(static_cast<size_t>(kTsPacket) * 2048);
   int64_t scanned = 0;
   while (file && scanned < kKeyframeScanLimit) {
-    file.read(reinterpret_cast<char*>(window.data()),
-              static_cast<std::streamsize>(window.size()));
+    file.read(reinterpret_cast<char*>(window.data()), static_cast<std::streamsize>(window.size()));
     const std::streamsize got = file.gcount();
     if (got < kTsPacket)
       break;
@@ -98,6 +97,8 @@ struct PlaybackService::Impl {
     std::atomic<bool> alive{true};
     std::atomic<bool> pending{false};
     uvcpp::uvcpp_db_pool* db = nullptr;
+    BlockCache* cache = nullptr;
+    size_t readahead_bytes = 0;
 
     void Post(const std::vector<uint8_t>& bytes) {
       auto copy = std::make_shared<std::vector<uint8_t>>(bytes);
@@ -124,11 +125,11 @@ struct PlaybackService::Impl {
       params.add(start_ms > 0 ? start_ms : 0);
       params.add(end_ms > 0 ? end_ms : (1LL << 60));
       std::string error;
-      if (!uvcpp::uvcpp_db_ok(db->query(
-              "SELECT path, start_ms, end_ms, size_bytes FROM recordings "
-              "WHERE channel_id = ? AND stream = ? AND end_ms > ? AND start_ms < ? "
-              "ORDER BY start_ms",
-              params, &table)) ||
+      if (!uvcpp::uvcpp_db_ok(
+              db->query("SELECT path, start_ms, end_ms, size_bytes FROM recordings "
+                        "WHERE channel_id = ? AND stream = ? AND end_ms > ? AND start_ms < ? "
+                        "ORDER BY start_ms",
+                        params, &table)) ||
           table.empty()) {
         const std::string message = R"({"error":"no_recordings"})";
         web->post([self = shared_from_this(), message] {
@@ -156,51 +157,49 @@ struct PlaybackService::Impl {
           file_size = static_cast<int64_t>(actual_size);
         const int64_t duration_ms = std::max<int64_t>(1, segment_end - segment_start);
 
-        std::ifstream file(path, std::ios::binary);
-        if (!file)
-          continue;
-
         int64_t offset = 0;
         int64_t read_start_ms = segment_start;
         if (row == 0 && start_ms > segment_start && file_size > 0) {
-          const double fraction =
-              std::clamp(static_cast<double>(start_ms - segment_start) /
-                             static_cast<double>(duration_ms),
-                         0.0, 1.0);
-          const int64_t approximate = static_cast<int64_t>(fraction * file_size);
-          offset = FindKeyframeOffset(file, approximate, file_size);
-          if (offset <= 0)
-            offset = 0;
-          if (offset > 0) {
-            read_start_ms =
-                segment_start + static_cast<int64_t>(fraction * duration_ms);
-            file.clear();
-            file.seekg(offset);
-          } else {
-            file.clear();
-            file.seekg(0);
+          std::ifstream scan_file(path, std::ios::binary);
+          if (scan_file) {
+            const double fraction = std::clamp(static_cast<double>(start_ms - segment_start) /
+                                                   static_cast<double>(duration_ms),
+                                               0.0, 1.0);
+            const int64_t approximate = static_cast<int64_t>(fraction * file_size);
+            offset = FindKeyframeOffset(scan_file, approximate, file_size);
+            if (offset <= 0)
+              offset = 0;
+            if (offset > 0)
+              read_start_ms = segment_start + static_cast<int64_t>(fraction * duration_ms);
           }
         }
         if (file_size <= 0)
           file_size = 1;
-        const double ms_per_byte = static_cast<double>(duration_ms) / static_cast<double>(file_size);
+        const double ms_per_byte =
+            static_cast<double>(duration_ms) / static_cast<double>(file_size);
         int64_t position_ms = read_start_ms;
 
-        std::vector<uint8_t> buffer(kReadChunk);
+        // Fill the cache for the next segment while this one is streaming.
+        if (cache != nullptr && readahead_bytes > 0 && row + 1 < table.rows().size()) {
+          cache->Preload(table.at(row + 1, "path").to_text(), 0, readahead_bytes);
+        }
+
+        uint64_t read_offset = static_cast<uint64_t>(offset);
+        std::vector<uint8_t> buffer;
+        std::string read_error;
         while (alive.load()) {
           while (alive.load() && pending.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
           }
           if (!alive.load())
             break;
-          file.read(reinterpret_cast<char*>(buffer.data()),
-                    static_cast<std::streamsize>(buffer.size()));
-          const std::streamsize got = file.gcount();
-          if (got <= 0)
+          if (cache == nullptr || !cache->Read(path, read_offset, kReadChunk, &buffer, &read_error))
             break;
-          buffer.resize(static_cast<size_t>(got));
+          const size_t got = buffer.size();
+          if (got == 0)
+            break;
           Post(buffer);
-          buffer.resize(kReadChunk);
+          read_offset += got;
           position_ms += static_cast<int64_t>(static_cast<double>(got) * ms_per_byte);
           media_ms += static_cast<double>(got) * ms_per_byte;
 
@@ -228,10 +227,15 @@ struct PlaybackService::Impl {
     }
   };
 
-  Impl(uvcpp::uvcpp_web_app* web_in, uvcpp::uvcpp_db_pool* db_in) : web(web_in), db(db_in) {}
+  Impl(uvcpp::uvcpp_web_app* web_in, uvcpp::uvcpp_db_pool* db_in, size_t cache_bytes,
+       size_t readahead_bytes_in)
+      : web(web_in), db(db_in), cache(std::make_unique<BlockCache>(cache_bytes)),
+        readahead_bytes(readahead_bytes_in) {}
 
   uvcpp::uvcpp_web_app* web;
   uvcpp::uvcpp_db_pool* db;
+  std::unique_ptr<BlockCache> cache;
+  size_t readahead_bytes;
 
   void Open(uvcpp::uvcpp_ws_connection* connection, int64_t channel_id, const std::string& stream,
             int64_t start_ms, int64_t end_ms, double speed) {
@@ -244,6 +248,8 @@ struct PlaybackService::Impl {
     session->end_ms = end_ms;
     session->speed = speed;
     session->db = db;
+    session->cache = cache.get();
+    session->readahead_bytes = readahead_bytes;
     std::weak_ptr<Session> weak = session;
     connection->on_close([weak](uvcpp::ws_close_code, const std::string&) {
       if (auto self = weak.lock()) {
@@ -255,8 +261,9 @@ struct PlaybackService::Impl {
   }
 };
 
-PlaybackService::PlaybackService(uvcpp::uvcpp_web_app* web, uvcpp::uvcpp_db_pool* db)
-    : impl_(std::make_unique<Impl>(web, db)) {}
+PlaybackService::PlaybackService(uvcpp::uvcpp_web_app* web, uvcpp::uvcpp_db_pool* db,
+                                 size_t cache_bytes, size_t readahead_bytes)
+    : impl_(std::make_unique<Impl>(web, db, cache_bytes, readahead_bytes)) {}
 
 PlaybackService::~PlaybackService() = default;
 
@@ -264,6 +271,10 @@ void PlaybackService::Open(uvcpp::uvcpp_ws_connection* connection, int64_t chann
                            const std::string& stream, int64_t start_ms, int64_t end_ms,
                            double speed) {
   impl_->Open(connection, channel_id, stream, start_ms, end_ms, speed);
+}
+
+BlockCache::Stats PlaybackService::CacheStats() const {
+  return impl_->cache->GetStats();
 }
 
 } // namespace uvnvr

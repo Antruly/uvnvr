@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "exporter.h"
 #include "onvif.h"
 #include "platform.h"
 
@@ -372,6 +373,110 @@ bool ParseIntParam(const std::string* value, int64_t* out) {
     return false;
   const auto result = std::from_chars(value->data(), value->data() + value->size(), *out);
   return result.ec == std::errc() && result.ptr == value->data() + value->size();
+}
+
+struct ExportResult {
+  bool ok = false;
+  int status = 500;
+  std::string code = "export_failed";
+  std::string message;
+  std::string path;
+  std::string work_dir;
+  std::string filename;
+  uint64_t size = 0;
+};
+
+struct ByteRange {
+  bool present = false;
+  bool syntactically_valid = true;
+  bool satisfiable = true;
+  uint64_t first = 0;
+  uint64_t last = 0;
+};
+
+// Parses a single-range `Range: bytes=...` header. Multiple ranges are treated
+// as unsupported rather than silently returning only the first one.
+ByteRange ParseByteRange(const std::string& header, uint64_t size) {
+  ByteRange range;
+  range.present = true;
+  const std::string prefix = "bytes=";
+  if (header.size() < prefix.size() || header.compare(0, prefix.size(), prefix) != 0) {
+    range.syntactically_valid = false;
+    return range;
+  }
+  std::string spec = header.substr(prefix.size());
+  const auto trim = [](std::string& value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+      value.erase(value.begin());
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+      value.pop_back();
+  };
+  trim(spec);
+  if (spec.find(',') != std::string::npos) {
+    range.syntactically_valid = false;
+    return range;
+  }
+  const size_t dash = spec.find('-');
+  if (dash == std::string::npos) {
+    range.syntactically_valid = false;
+    return range;
+  }
+  const std::string first_text = spec.substr(0, dash);
+  const std::string last_text = spec.substr(dash + 1);
+  if (size == 0) {
+    range.satisfiable = false;
+    return range;
+  }
+
+  if (first_text.empty()) {
+    // Suffix range: the final N bytes.
+    uint64_t suffix = 0;
+    if (last_text.empty()) {
+      range.syntactically_valid = false;
+      return range;
+    }
+    const auto result =
+        std::from_chars(last_text.data(), last_text.data() + last_text.size(), suffix);
+    if (result.ec != std::errc() || result.ptr != last_text.data() + last_text.size()) {
+      range.syntactically_valid = false;
+      return range;
+    }
+    if (suffix == 0) {
+      range.satisfiable = false;
+      return range;
+    }
+    range.first = suffix >= size ? 0 : size - suffix;
+    range.last = size - 1;
+    return range;
+  }
+
+  uint64_t first = 0;
+  auto result = std::from_chars(first_text.data(), first_text.data() + first_text.size(), first);
+  if (result.ec != std::errc() || result.ptr != first_text.data() + first_text.size()) {
+    range.syntactically_valid = false;
+    return range;
+  }
+  if (first >= size) {
+    range.satisfiable = false;
+    return range;
+  }
+  uint64_t last = size - 1;
+  if (!last_text.empty()) {
+    result = std::from_chars(last_text.data(), last_text.data() + last_text.size(), last);
+    if (result.ec != std::errc() || result.ptr != last_text.data() + last_text.size()) {
+      range.syntactically_valid = false;
+      return range;
+    }
+    if (last < first) {
+      range.syntactically_valid = false;
+      return range;
+    }
+    if (last >= size)
+      last = size - 1;
+  }
+  range.first = first;
+  range.last = last;
+  return range;
 }
 
 const std::vector<std::string>& AllPermissions() {
@@ -1427,6 +1532,16 @@ json App::BuildSummary() {
                           {"alerts", alert_count.empty() ? 0 : TableInt(alert_count, 0, "n")},
                           {"channels", 0},
                           {"recordings", 0}};
+  if (playback_) {
+    const BlockCache::Stats cache = playback_->CacheStats();
+    result["cache"] = json{{"hits", cache.hits},
+                           {"misses", cache.misses},
+                           {"bytesRead", cache.bytes_read},
+                           {"bytesCached", cache.bytes_cached},
+                           {"entries", cache.entries},
+                           {"capacityBytes", cache.capacity_bytes},
+                           {"blockSize", cache.block_size}};
+  }
   return result;
 }
 
@@ -1626,9 +1741,8 @@ int App::Run() {
   }
 
   const std::string display_host =
-      config_.host.empty() || config_.host == "0.0.0.0" || config_.host == "::"
-          ? "127.0.0.1"
-          : config_.host;
+      config_.host.empty() || config_.host == "0.0.0.0" || config_.host == "::" ? "127.0.0.1"
+                                                                                : config_.host;
   std::printf("UvNVR %s (%s) listening on %s://%s:%d\n", UVNVR_VERSION, UVNVR_GIT_SHA,
               tls_enabled ? "https" : "http", display_host.c_str(), web_.bound_port());
   std::printf("config: %s\n",
@@ -1648,7 +1762,9 @@ int App::Run() {
           recording_->OnTs(channel_id, stream, data, len);
       });
   recording_->Start();
-  playback_ = std::make_unique<PlaybackService>(&web_, &db_);
+  playback_ = std::make_unique<PlaybackService>(
+      &web_, &db_, static_cast<size_t>(config_.cache_mb) * 1024 * 1024,
+      static_cast<size_t>(config_.readahead_mb) * 1024 * 1024);
   rtsp_ = std::make_unique<RtspServer>(
       [this](const std::string& user, const std::string& password) {
         return VerifyRtspCredentials(user, password);
@@ -1672,8 +1788,7 @@ int App::Run() {
 
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
   std::error_code data_ec;
-  const std::filesystem::path data_path =
-      std::filesystem::absolute(config_.data_dir, data_ec);
+  const std::filesystem::path data_path = std::filesystem::absolute(config_.data_dir, data_ec);
   std::printf("data: %s\n", (data_ec ? config_.data_dir : data_path.string()).c_str());
   std::printf("ffmpeg: %s (%s)\n", media_->FfmpegPath().c_str(),
               media_->Available() ? "available" : "not found");
@@ -4716,11 +4831,13 @@ void App::RegisterRecordingRoutes() {
               next();
               return;
             }
-            auto payload = std::make_shared<std::string>();
+            const std::string range_header = req.header("Range");
+            auto path = std::make_shared<std::string>();
+            auto file_size = std::make_shared<uint64_t>(0);
             auto status = std::make_shared<int>(200);
             auto message = std::make_shared<std::string>();
             RunWork(
-                [this, recording_id, payload, status, message] {
+                [this, recording_id, path, file_size, status, message] {
                   uvcpp::uvcpp_db_table table;
                   uvcpp::uvcpp_db_params params;
                   params.add(recording_id);
@@ -4731,36 +4848,190 @@ void App::RegisterRecordingRoutes() {
                     *message = "recording not found";
                     return;
                   }
-                  const std::string path = TableText(table, 0, "path");
-                  std::ifstream file(path, std::ios::binary);
-                  if (!file) {
+                  *path = TableText(table, 0, "path");
+                  std::error_code size_error;
+                  const uintmax_t size = std::filesystem::file_size(*path, size_error);
+                  if (size_error || size == 0) {
                     *status = 404;
-                    *message = "recording file is missing";
+                    *message = "recording file is missing or empty";
                     return;
                   }
-                  file.seekg(0, std::ios::end);
-                  const auto size = file.tellg();
-                  if (size < 0 || size > 512LL * 1024 * 1024) {
-                    *status = 413;
-                    *message = "recording is too large to download in one response";
-                    return;
-                  }
-                  file.seekg(0, std::ios::beg);
-                  payload->assign(std::istreambuf_iterator<char>(file),
-                                  std::istreambuf_iterator<char>());
+                  *file_size = static_cast<uint64_t>(size);
                 },
-                [payload, status, message, recording_id, &resp, next] {
+                [path, file_size, status, message, range_header, recording_id, &resp, next] {
                   if (*status != 200) {
                     SendError(resp, *status, "download_failed", *message);
                     next();
                     return;
                   }
+                  const uint64_t size = *file_size;
+                  ByteRange range;
+                  if (!range_header.empty())
+                    range = ParseByteRange(range_header, size);
+
+                  resp.set_header("Accept-Ranges", "bytes");
                   resp.set_header("Content-Type", "video/mp2t");
                   resp.set_header("Content-Disposition", "attachment; filename=\"uvnvr-" +
                                                              std::to_string(recording_id) +
                                                              ".ts\"");
-                  resp.status(200).body(*payload, "video/mp2t");
-                  resp.end();
+                  resp.set_header("Cache-Control", "no-store");
+
+                  if (range.present && (!range.syntactically_valid || !range.satisfiable)) {
+                    resp.status(416);
+                    resp.set_header("Content-Range", "bytes */" + std::to_string(size));
+                    resp.set_header("Content-Length", "0");
+                    resp.end();
+                    next();
+                    return;
+                  }
+                  if (range.present) {
+                    resp.status(206);
+                    resp.set_header("Content-Range", "bytes " + std::to_string(range.first) + "-" +
+                                                         std::to_string(range.last) + "/" +
+                                                         std::to_string(size));
+                    resp.send_file_range(*path, range.first, range.last);
+                  } else {
+                    resp.status(200);
+                    resp.send_file(*path, static_cast<int64_t>(size));
+                  }
+                  next();
+                });
+          },
+          "playback.download"));
+
+  web_.post(
+      "/api/v1/playback/export",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            const int64_t channel_id = JsonInt(body, "channelId", 0);
+            const std::string stream = JsonString(body, "stream", "main");
+            const int64_t start_ms = JsonInt(body, "startMs", 0);
+            const int64_t end_ms = JsonInt(body, "endMs", 0);
+            if (channel_id <= 0 || (stream != "main" && stream != "sub") || start_ms <= 0 ||
+                end_ms <= start_ms) {
+              SendError(resp, 400, "invalid_range",
+                        "channelId, stream, startMs and endMs are required");
+              next();
+              return;
+            }
+            if (end_ms - start_ms > 6LL * 60 * 60 * 1000) {
+              SendError(resp, 400, "range_too_large", "the export range is limited to 6 hours");
+              next();
+              return;
+            }
+            if (!media_ || !media_->Available()) {
+              SendError(resp, 503, "ffmpeg_unavailable", "FFmpeg is required for MP4 export");
+              next();
+              return;
+            }
+            const std::string ffmpeg = media_->FfmpegPath();
+            const UserContext user = UserFromRequest(req);
+            auto result = std::make_shared<ExportResult>();
+            RunWork(
+                [this, user, channel_id, stream, start_ms, end_ms, ffmpeg, result] {
+                  uvcpp::uvcpp_db_table table;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(channel_id);
+                  params.add(stream);
+                  params.add(start_ms);
+                  params.add(end_ms);
+                  std::string error;
+                  if (!Query("SELECT path, start_ms, end_ms, size_bytes FROM recordings "
+                             "WHERE channel_id = ? AND stream = ? AND end_ms > ? AND start_ms < ? "
+                             "ORDER BY start_ms",
+                             params, &table, &error)) {
+                    result->message = error;
+                    return;
+                  }
+                  if (table.empty()) {
+                    result->status = 404;
+                    result->code = "no_recordings";
+                    result->message = "no recordings in the requested range";
+                    return;
+                  }
+                  std::vector<std::string> paths;
+                  paths.reserve(table.rows().size());
+                  uint64_t total_bytes = 0;
+                  int64_t first_start = 0;
+                  for (size_t row = 0; row < table.rows().size(); ++row) {
+                    paths.push_back(table.at(row, "path").to_text());
+                    if (first_start == 0)
+                      first_start = table.at(row, "start_ms").to_int64();
+                    total_bytes += static_cast<uint64_t>(
+                        std::max<int64_t>(0, table.at(row, "size_bytes").to_int64()));
+                  }
+                  if (total_bytes > 4ULL * 1024 * 1024 * 1024) {
+                    result->status = 413;
+                    result->code = "range_too_large";
+                    result->message = "the export range exceeds 4 GiB";
+                    return;
+                  }
+                  const std::string id = std::to_string(NowSeconds()) + "-" +
+                                         std::to_string(channel_id) + "-" + RandomHex(4);
+                  result->work_dir =
+                      (std::filesystem::path(config_.data_dir) / "exports" / id).string();
+                  result->path = (std::filesystem::path(result->work_dir) / "export.mp4").string();
+                  result->filename = "uvnvr-" + std::to_string(channel_id) + "-" +
+                                     std::to_string(start_ms) + ".mp4";
+                  ExportJob job;
+                  job.segments = std::move(paths);
+                  job.first_segment_start_ms = first_start;
+                  job.start_ms = start_ms;
+                  job.end_ms = end_ms;
+                  job.ffmpeg_path = ffmpeg;
+                  job.work_dir = result->work_dir;
+                  job.output_path = result->path;
+                  if (!ExportMp4(job, &error)) {
+                    result->message = error.empty() ? "MP4 export failed" : error;
+                    return;
+                  }
+                  std::error_code size_error;
+                  const uintmax_t size = std::filesystem::file_size(result->path, size_error);
+                  if (size_error || size == 0) {
+                    result->message = "the exported file is missing";
+                    return;
+                  }
+                  result->size = static_cast<uint64_t>(size);
+                  result->ok = true;
+                  Audit("record", "info", user.username, "", "", "recording",
+                        std::to_string(channel_id), "export", "success", "",
+                        json{{"channelId", channel_id},
+                             {"stream", stream},
+                             {"startMs", start_ms},
+                             {"endMs", end_ms},
+                             {"bytes", result->size}}
+                            .dump());
+                },
+                [result, &resp, next] {
+                  if (!result->ok) {
+                    if (!result->work_dir.empty()) {
+                      std::error_code ec;
+                      std::filesystem::remove_all(result->work_dir, ec);
+                    }
+                    SendError(resp, result->status, result->code, result->message);
+                    next();
+                    return;
+                  }
+                  resp.set_header("Content-Type", "video/mp4");
+                  resp.set_header("Content-Disposition",
+                                  "attachment; filename=\"" + result->filename + "\"");
+                  resp.set_header("Cache-Control", "no-store");
+                  resp.status(200);
+                  const std::string work_dir = result->work_dir;
+                  resp.send_file(result->path, static_cast<int64_t>(result->size),
+                                 [work_dir](int, uint64_t) {
+                                   std::thread([work_dir] {
+                                     std::error_code ec;
+                                     std::filesystem::remove_all(work_dir, ec);
+                                   }).detach();
+                                 });
                   next();
                 });
           },

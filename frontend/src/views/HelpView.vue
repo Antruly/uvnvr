@@ -63,7 +63,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'The playback player streams recorded segments over a WebSocket; it can cross file boundaries without a gap.',
         'Seeking starts a new ticket at the target time. Click the timeline or use the −30s / −10s / +10s / +30s buttons.',
         'Use the speed selector for 0.5×–8× playback. The server paces the stream to the selected rate; rewind is implemented as repeated backward seeks.',
-        'Use Download segment to fetch a single MPEG-TS file. It can be opened in VLC or remuxed to MP4.',
+        'Use Download segment to fetch a single MPEG-TS file (HTTP Range/resume is supported), or Export MP4 to remux it with the bundled FFmpeg.',
+        'Playback and downloads share an LRU block cache and preload the next segment. Tune storage.cacheMb and storage.readaheadMb in the startup configuration.',
       ],
     },
     {
@@ -155,7 +156,8 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         '回放通过 WebSocket 顺序发送录像切片，可以跨文件无缝播放。',
         '跳转会从目标时间创建新的播放票据；可点击时间轴或使用 −30s / −10s / +10s / +30s 按钮。',
         '倍速支持 0.5×–8×，服务端按所选速率控制发送节奏；快退通过连续向后跳转实现。',
-        '“下载切片”返回单个 MPEG-TS 文件，可用 VLC 打开或转封装为 MP4。',
+        '“下载切片”返回单个 MPEG-TS 文件，支持 HTTP Range 断点续传；“导出 MP4”使用随包 FFmpeg 转封装。',
+        '回放与下载共享 LRU 块缓存并预读下一片，可通过启动配置的 storage.cacheMb / storage.readaheadMb 调整。',
       ],
     },
     {

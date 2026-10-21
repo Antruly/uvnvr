@@ -20,6 +20,8 @@ struct Config {
   bool maintenance = false;
   std::string ffmpeg_path;
   std::string log_level = "info";
+  int cache_mb = 128;
+  int readahead_mb = 4;
 
   // Resolved startup-config file, for diagnostics and the system API.
   std::string config_path;

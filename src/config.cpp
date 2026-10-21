@@ -65,16 +65,14 @@ std::vector<std::string> DefaultConfigCandidates() {
   std::vector<std::string> candidates;
   const std::string executable = platform::ExecutablePath();
   if (!executable.empty()) {
-    const std::filesystem::path directory =
-        std::filesystem::path(executable).parent_path();
+    const std::filesystem::path directory = std::filesystem::path(executable).parent_path();
     candidates.push_back((directory / "uvnvr.json").string());
     candidates.push_back((directory.parent_path() / "uvnvr.json").string());
   }
 #ifdef _WIN32
   if (const char* program_data = std::getenv("ProgramData");
       program_data != nullptr && program_data[0] != '\0') {
-    candidates.push_back(
-        (std::filesystem::path(program_data) / "UvNVR" / "uvnvr.json").string());
+    candidates.push_back((std::filesystem::path(program_data) / "UvNVR" / "uvnvr.json").string());
   }
 #elif defined(__APPLE__)
   candidates.push_back("/Library/Application Support/UvNVR/uvnvr.json");
@@ -106,6 +104,8 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       !ReadString(document, "host", &config->host, error) ||
       !ReadString(document, "ffmpegPath", &config->ffmpeg_path, error) ||
       !ReadString(document, "logLevel", &config->log_level, error) ||
+      !ReadInt(document, "cacheMb", &config->cache_mb, error) ||
+      !ReadInt(document, "readaheadMb", &config->readahead_mb, error) ||
       !ReadBool(document, "maintenance", &config->maintenance, error) ||
       !ReadBool(document, "tlsSelfSigned", &config->tls_self_signed, error) ||
       !ReadString(document, "tlsCert", &config->tls_cert, error) ||
@@ -158,6 +158,16 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       return false;
   }
 
+  if (const auto storage = document.find("storage"); storage != document.end()) {
+    if (!storage->is_object()) {
+      *error = "storage must be an object";
+      return false;
+    }
+    if (!ReadInt(*storage, "cacheMb", &config->cache_mb, error) ||
+        !ReadInt(*storage, "readaheadMb", &config->readahead_mb, error))
+      return false;
+  }
+
   return true;
 }
 
@@ -198,25 +208,31 @@ bool ValidateConfig(const Config& config, std::string* error) {
     return fail("dataDir must not be empty");
   if (config.tls_cert.empty() != config.tls_key.empty())
     return fail("tls.cert and tls.key must be configured together");
-  if (config.log_level != "trace" && config.log_level != "debug" &&
-      config.log_level != "info" && config.log_level != "warn" &&
-      config.log_level != "error") {
+  if (config.log_level != "trace" && config.log_level != "debug" && config.log_level != "info" &&
+      config.log_level != "warn" && config.log_level != "error") {
     return fail("logging.level must be trace, debug, info, warn or error");
   }
+  if (config.cache_mb < 0 || config.cache_mb > 8192)
+    return fail("storage.cacheMb must be between 0 and 8192");
+  if (config.readahead_mb < 0 || config.readahead_mb > 1024)
+    return fail("storage.readaheadMb must be between 0 and 1024");
   return true;
 }
 
 json ConfigToJson(const Config& config) {
   json document;
-  document["http"] = {{"port", config.port}, {"host", config.host},
-                      {"tls", {{"cert", config.tls_cert},
-                               {"key", config.tls_key},
-                               {"selfSigned", config.tls_self_signed}}}};
+  document["http"] = {{"port", config.port},
+                      {"host", config.host},
+                      {"tls",
+                       {{"cert", config.tls_cert},
+                        {"key", config.tls_key},
+                        {"selfSigned", config.tls_self_signed}}}};
   document["rtsp"] = {{"port", config.rtsp_port}};
   document["dataDir"] = config.data_dir;
   document["maintenance"] = config.maintenance;
   document["ffmpeg"] = {{"path", config.ffmpeg_path}};
   document["logging"] = {{"level", config.log_level}};
+  document["storage"] = {{"cacheMb", config.cache_mb}, {"readaheadMb", config.readahead_mb}};
   document["config"] = {{"path", config.config_path}, {"loaded", config.config_loaded}};
   return document;
 }

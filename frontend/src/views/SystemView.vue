@@ -46,6 +46,14 @@ interface Summary {
   disk: { path: string; usagePercent: number; usedBytes: number; totalBytes: number }
   counts: { users: number; sessions: number; audit: number }
   performance?: { tier: string; gpu: { available: boolean; vendor: string; enabled: boolean } }
+  cache?: {
+    hits: number
+    misses: number
+    bytesRead: number
+    bytesCached: number
+    entries: number
+    capacityBytes: number
+  }
 }
 
 interface TokenRow {
@@ -61,6 +69,7 @@ interface StartupConfig {
   rtsp: { port: number }
   dataDir: string
   maintenance: boolean
+  storage: { cacheMb: number; readaheadMb: number }
   config: { path: string; loaded: boolean }
 }
 
@@ -414,6 +423,10 @@ onMounted(load)
           <div><dt>{{ t('system.maintenance') }}</dt><dd>{{ summary.maintenance ? t('common.yes') : t('common.no') }}</dd></div>
           <div v-if="summary.performance"><dt>{{ t('system.performance') }}</dt><dd>{{ summary.performance.tier }}</dd></div>
           <div v-if="summary.performance"><dt>{{ t('system.gpu') }}</dt><dd>{{ summary.performance.gpu.available ? summary.performance.gpu.vendor : t('common.none') }}</dd></div>
+          <div v-if="summary.cache">
+            <dt>{{ t('system.cacheStats') }}</dt>
+            <dd>{{ summary.cache.hits }} / {{ summary.cache.misses }}</dd>
+          </div>
         </dl>
       </article>
 
@@ -427,6 +440,8 @@ onMounted(load)
           <div><dt>{{ t('system.rtspPort') }}</dt><dd>{{ startup.rtsp.port }}</dd></div>
           <div><dt>{{ t('system.httpHost') }}</dt><dd>{{ startup.http.host }}</dd></div>
           <div><dt>{{ t('system.dataDir') }}</dt><dd>{{ startup.dataDir }}</dd></div>
+          <div v-if="startup.storage"><dt>{{ t('system.cacheSize') }}</dt><dd>{{ startup.storage.cacheMb }} MB</dd></div>
+          <div v-if="startup.storage"><dt>{{ t('system.readahead') }}</dt><dd>{{ startup.storage.readaheadMb }} MB</dd></div>
           <div>
             <dt>{{ t('system.configPath') }}</dt>
             <dd>{{ startup.config.loaded ? startup.config.path : t('system.configDefaults') }}</dd>

@@ -3,7 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import PlaybackPlayer from '@/components/PlaybackPlayer.vue'
-import { api } from '@/api/client'
+import { api, getCsrfToken } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'PlaybackView' })
 
@@ -25,6 +26,8 @@ interface Recording {
 }
 
 const { t } = useI18n()
+const auth = useAuthStore()
+const canDownload = computed(() => auth.hasPermission('playback.download'))
 const channels = ref<Channel[]>([])
 const channelId = ref(0)
 const stream = ref<'main' | 'sub'>('main')
@@ -40,6 +43,8 @@ const speed = ref(1)
 const positionMs = ref(0)
 const loading = ref(false)
 const error = ref('')
+const notice = ref('')
+const exporting = ref(false)
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
 
 const dayStart = computed(() => new Date(`${day.value}T00:00:00`).getTime())
@@ -167,6 +172,53 @@ function download() {
   window.open(`/api/v1/recordings/${selected.value.id}/download`, '_blank')
 }
 
+async function exportMp4() {
+  if (!selected.value || exporting.value) return
+  exporting.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const response = await fetch('/api/v1/playback/export', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken(),
+      },
+      body: JSON.stringify({
+        channelId: channelId.value,
+        stream: stream.value,
+        startMs: selected.value.startMs,
+        endMs: selected.value.endMs,
+      }),
+    })
+    if (!response.ok) {
+      let message = response.statusText || t('common.error')
+      try {
+        const body = (await response.json()) as { message?: string }
+        if (body.message) message = body.message
+      } catch {
+        /* not JSON */
+      }
+      throw new Error(message)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `uvnvr-${channelId.value}-${selected.value.startMs}.mp4`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 10000)
+    notice.value = t('playback.exported')
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : t('common.error')
+  } finally {
+    exporting.value = false
+  }
+}
+
 watch([channelId, stream], () => void loadRecordings())
 watch(day, () => void loadRecordings())
 
@@ -195,6 +247,14 @@ onMounted(async () => {
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
       </button>
+      <button
+        class="button"
+        :disabled="!selected || !canDownload || exporting"
+        @click="exportMp4"
+      >
+        <AppIcon name="save" :size="16" />
+        {{ exporting ? t('playback.exporting') : t('playback.exportMp4') }}
+      </button>
       <button class="button" :disabled="!selected" @click="download">
         <AppIcon name="save" :size="16" />
         {{ t('playback.download') }}
@@ -202,6 +262,7 @@ onMounted(async () => {
     </div>
   </section>
 
+  <p v-if="notice" class="notice">{{ notice }}</p>
   <p v-if="error" class="form-error">{{ error }}</p>
 
   <section class="panel playback-filters">

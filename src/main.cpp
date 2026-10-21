@@ -4,6 +4,7 @@
 
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -92,6 +93,8 @@ void PrintUsage(const char* argv0) {
             << "  UVNVR_RTSP_PORT    RTSP port\n"
             << "  UVNVR_DATA_DIR     Data directory\n"
             << "  UVNVR_FFMPEG       FFmpeg executable\n"
+            << "  UVNVR_CACHE_MB     Playback LRU cache size in MiB (default: 128)\n"
+            << "  UVNVR_READAHEAD_MB Next-segment read-ahead in MiB (default: 4)\n"
             << "  UVNVR_TLS_CERT     PEM certificate; with UVNVR_TLS_KEY enables HTTPS\n"
             << "  UVNVR_TLS_KEY      PEM private key\n";
 }
@@ -156,6 +159,19 @@ void ApplyEnvironment(uvnvr::Config* config) {
   if (const char* log_level = std::getenv("UVNVR_LOG_LEVEL");
       log_level != nullptr && log_level[0] != '\0')
     config->log_level = log_level;
+  const auto read_int_env = [](const char* name, int* target) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+      return;
+    int parsed = 0;
+    const auto result = std::from_chars(value, value + std::strlen(value), parsed);
+    if (result.ec == std::errc() && result.ptr == value + std::strlen(value))
+      *target = parsed;
+    else
+      std::cerr << "ignoring invalid " << name << ": " << value << "\n";
+  };
+  read_int_env("UVNVR_CACHE_MB", &config->cache_mb);
+  read_int_env("UVNVR_READAHEAD_MB", &config->readahead_mb);
   if (const char* cert = std::getenv("UVNVR_TLS_CERT"); cert != nullptr && cert[0] != '\0')
     config->tls_cert = cert;
   if (const char* key = std::getenv("UVNVR_TLS_KEY"); key != nullptr && key[0] != '\0')

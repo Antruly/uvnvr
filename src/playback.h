@@ -1,5 +1,7 @@
 #pragma once
 
+#include "storage_cache.h"
+
 #include <cstdint>
 #include <db/uvcpp_db_pool.h>
 #include <memory>
@@ -13,7 +15,8 @@ namespace uvnvr {
 // owns the ticket and passes a validated channel/time range.
 class PlaybackService {
 public:
-  PlaybackService(uvcpp::uvcpp_web_app* web, uvcpp::uvcpp_db_pool* db);
+  PlaybackService(uvcpp::uvcpp_web_app* web, uvcpp::uvcpp_db_pool* db, size_t cache_bytes,
+                  size_t readahead_bytes);
   ~PlaybackService();
 
   PlaybackService(const PlaybackService&) = delete;
@@ -24,6 +27,8 @@ public:
   // requested range at once.
   void Open(uvcpp::uvcpp_ws_connection* connection, int64_t channel_id, const std::string& stream,
             int64_t start_ms, int64_t end_ms, double speed);
+
+  BlockCache::Stats CacheStats() const;
 
 private:
   struct Impl;

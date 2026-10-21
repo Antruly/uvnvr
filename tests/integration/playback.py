@@ -80,6 +80,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             process.kill()
 
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        os.environ["UVNVR_FFMPEG"] = ffmpeg
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
@@ -122,12 +125,91 @@ def main() -> int:
         "size_bytes,codec,record_type,created_at) VALUES(1,'main',1,?,?,?,60000,?,'','timed',?)",
         (str(segment), start_ms, now_ms, size, now_ms // 1000),
     )
+    export_start_ms = start_ms - 3_600_000
+    export_file = None
+    if ffmpeg:
+        export_file = data_dir / "export-source.ts"
+        encoded = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25",
+                "-t",
+                "20",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "25",
+                "-f",
+                "mpegts",
+                str(export_file),
+            ],
+            capture_output=True,
+        )
+        if encoded.returncode != 0:
+            print("skipping MP4 export: ffmpeg cannot encode the test stream")
+            export_file = None
+        else:
+            connection.execute(
+                "INSERT INTO recordings(channel_id,stream,volume_id,path,start_ms,end_ms,"
+                "duration_ms,size_bytes,codec,record_type,created_at) "
+                "VALUES(1,'main',2,?,?,?,20000,?,'h264','timed',?)",
+                (
+                    str(export_file),
+                    export_start_ms,
+                    export_start_ms + 20000,
+                    export_file.stat().st_size,
+                    now_ms // 1000,
+                ),
+            )
     connection.commit()
     connection.close()
 
     process = start()
     login = post("/api/v1/auth/login", {"username": "admin", "password": "Admin123!@#"})
     csrf = login["csrfToken"]
+
+    def get_json(path: str) -> dict:
+        with opener.open(f"http://127.0.0.1:{PORT}{path}", timeout=10) as response:
+            return json.loads(response.read())
+
+    def download(range_header: str | None = None):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/v1/recordings/1/download"
+        )
+        if range_header:
+            request.add_header("Range", range_header)
+        try:
+            with opener.open(request, timeout=20) as response:
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), error.read()
+
+    status, headers, body = download()
+    print(f"full download: {status} {len(body)} bytes")
+    assert status == 200 and len(body) == size
+    assert headers.get("Accept-Ranges") == "bytes"
+
+    status, headers, body = download("bytes=100-199")
+    print(f"range 100-199: {status} {len(body)} bytes {headers.get('Content-Range')}")
+    assert status == 206 and len(body) == 100
+    assert headers.get("Content-Range") == f"bytes 100-199/{size}"
+
+    status, headers, body = download("bytes=-50")
+    assert status == 206 and len(body) == 50
+    assert headers.get("Content-Range") == f"bytes {size - 50}-{size - 1}/{size}"
+
+    status, headers, body = download(f"bytes={size + 10}-")
+    print(f"unsatisfiable range: {status} {headers.get('Content-Range')}")
+    assert status == 416
 
     async def stream(start_at: int, speed: float) -> tuple[int, float]:
         import websockets
@@ -167,6 +249,45 @@ def main() -> int:
         print(f"seek to +30s at 8x: {total} bytes in {elapsed:.2f}s")
         assert 0 < total < size, total
         assert 2.0 <= elapsed <= 8.0, elapsed
+
+        cache = get_json("/api/v1/system/overview")["cache"]
+        print(f"cache: hits={cache['hits']} misses={cache['misses']} "
+              f"cached={cache['bytesCached']} entries={cache['entries']}")
+        assert cache["misses"] > 0
+        assert cache["hits"] > 0
+        assert cache["bytesCached"] > 0
+
+        if export_file is not None:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{PORT}/api/v1/playback/export",
+                method="POST",
+                data=json.dumps(
+                    {
+                        "channelId": 1,
+                        "stream": "main",
+                        "startMs": export_start_ms + 5_000,
+                        "endMs": export_start_ms + 15_000,
+                    }
+                ).encode(),
+            )
+            request.add_header("Content-Type", "application/json")
+            request.add_header("X-CSRF-Token", csrf)
+            with opener.open(request, timeout=60) as response:
+                exported = response.read()
+                assert response.status == 200
+            assert exported[4:8] == b"ftyp", exported[:16]
+            assert len(exported) > 10_000, len(exported)
+            exported_path = temp / "exported.mp4"
+            exported_path.write_bytes(exported)
+            check = subprocess.run(
+                [ffmpeg, "-v", "error", "-i", str(exported_path), "-f", "null", "-"],
+                capture_output=True,
+            )
+            assert check.returncode == 0, check.stderr[-500:]
+            print(f"MP4 export: {len(exported)} bytes")
+        else:
+            print("skipping MP4 export: ffmpeg not available")
+
         print("playback integration passed")
         return 0
     finally:
