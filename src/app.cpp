@@ -3643,6 +3643,46 @@ void App::RegisterChannelRoutes() {
                },
                "channel.view"));
 
+  web_.get("/api/v1/preview/channels",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 auto items = std::make_shared<json>(json::array());
+                 RunWork(
+                     [this, items] {
+                       std::string error;
+                       const auto channels = LoadChannels(&error);
+                       for (const auto& channel : channels) {
+                         json item = ChannelJson(channel);
+                         // Preview clients only need display metadata; URLs,
+                         // usernames and stored error text stay behind
+                         // channel.view.
+                         for (const char* key : {"username", "hasPassword", "mainUrl", "subUrl",
+                                                 "brand", "media", "lastStatus", "lastError"}) {
+                           item.erase(key);
+                         }
+                         StreamStatus main_status;
+                         StreamStatus sub_status;
+                         if (media_) {
+                           main_status = media_->Status(channel.id, "main");
+                           sub_status = media_->Status(channel.id, "sub");
+                         }
+                         item["mainState"] = main_status.state;
+                         item["mainError"] = main_status.error;
+                         item["mainHasKeyframe"] = main_status.has_keyframe;
+                         item["subState"] = sub_status.state;
+                         item["subError"] = sub_status.error;
+                         item["subHasKeyframe"] = sub_status.has_keyframe;
+                         items->push_back(std::move(item));
+                       }
+                     },
+                     [items, &resp, next] {
+                       SendJson(resp, 200, *items);
+                       next();
+                     });
+               },
+               "preview.view"));
+
   web_.post(
       "/api/v1/channels",
       Protected(
@@ -4174,7 +4214,7 @@ void App::RegisterGroupRoutes() {
                        next();
                      });
                },
-               "channel.view"));
+               ""));
 
   web_.post(
       "/api/v1/channel-groups",

@@ -159,6 +159,40 @@ def main() -> int:
 
         status, _ = call("DELETE", f"/api/v1/channels/{channel_id}")
         assert status == 200
+
+        # A preview-only role must see display metadata but not channel URLs.
+        status, _ = call(
+            "POST",
+            "/api/v1/users",
+            {"username": "viewer1", "password": "Viewer123!", "roleId": 3},
+        )
+        assert status in (200, 201), status
+        viewer_jar = http.cookiejar.CookieJar()
+        viewer = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(viewer_jar))
+
+        def viewer_call(method: str, path: str):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{PORT}{path}", method=method
+            )
+            try:
+                with viewer.open(request, timeout=10) as response:
+                    return response.status, json.loads(response.read() or b"null")
+            except urllib.error.HTTPError as error:
+                return error.code, json.loads(error.read() or b"null")
+
+        login_request = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/v1/auth/login",
+            data=json.dumps({"username": "viewer1", "password": "Viewer123!"}).encode(),
+            method="POST",
+        )
+        login_request.add_header("Content-Type", "application/json")
+        with viewer.open(login_request, timeout=10) as response:
+            assert response.status == 200
+        status, preview = viewer_call("GET", "/api/v1/preview/channels")
+        assert status == 200, (status, preview)
+        assert all("mainUrl" not in item for item in preview), preview
+        status, _ = viewer_call("GET", "/api/v1/channels")
+        assert status == 403, status
         print("channel groups and layouts integration passed")
         return 0
     finally:

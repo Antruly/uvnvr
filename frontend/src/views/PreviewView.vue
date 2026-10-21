@@ -325,8 +325,8 @@ async function loadChannels() {
   error.value = ''
   try {
     const [channelRows, groupRows] = await Promise.all([
-      api<LiveChannel[]>('/api/v1/channels'),
-      api<ChannelGroup[]>('/api/v1/channel-groups'),
+      api<LiveChannel[]>('/api/v1/preview/channels'),
+      api<ChannelGroup[]>('/api/v1/channel-groups').catch(() => []),
     ])
     channels.value = channelRows
     groups.value = groupRows

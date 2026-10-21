@@ -29,8 +29,10 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/system/ntp/sync` | system.manage |
 | POST | `/api/v1/system/email/test` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
+| GET | `/api/v1/preview/channels` | preview.view |
 | POST/PUT/DELETE | `/api/v1/channels[/{id}]` | channel.manage |
-| GET/POST | `/api/v1/channel-groups` | channel.view/manage |
+| GET | `/api/v1/channel-groups` | session |
+| POST | `/api/v1/channel-groups` | channel.manage |
 | PUT/DELETE | `/api/v1/channel-groups/{id}` | channel.manage |
 | GET/POST | `/api/v1/layouts` | preview.view |
 | PUT/DELETE | `/api/v1/layouts/{id}` | preview.view |
@@ -104,6 +106,10 @@ the segments in the range and remuxes them to a fast-start MP4 with the bundled
 FFmpeg. It returns `video/mp4` as an attachment. The range is limited to six
 hours and 4 GiB of input, and temporary files are removed after the response.
 `503 ffmpeg_unavailable` is returned when no FFmpeg executable is configured.
+
+`GET /api/v1/preview/channels` returns the display metadata and stream state
+needed by preview-only roles (no usernames, URLs or stored error text) and
+requires only `preview.view`.
 
 ## Channel groups
 
