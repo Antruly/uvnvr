@@ -92,6 +92,19 @@ jobs:
       - name: API token scopes integration test
         run: python3 tests/integration/token_scopes.py ./build/uvnvr 19210
 
+      - name: Fetch MediaMTX test fixture
+        run: |
+          curl -fL --retry 3 --max-time 180 \
+            -o "$RUNNER_TEMP/mediamtx.tar.gz" \
+            https://github.com/bluenviron/mediamtx/releases/download/v1.21.2/mediamtx_v1.21.2_linux_amd64.tar.gz
+          mkdir -p "$RUNNER_TEMP/mediamtx"
+          tar -C "$RUNNER_TEMP/mediamtx" -xzf "$RUNNER_TEMP/mediamtx.tar.gz"
+
+      - name: Recording integration test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/mediamtx/mediamtx
+        run: python3 tests/integration/recording.py ./build/uvnvr 19510
+
       - name: Upload server log on failure
         if: failure()
         uses: actions/upload-artifact@v7

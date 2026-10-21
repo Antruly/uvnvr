@@ -5732,8 +5732,8 @@ void App::RegisterRecordingRoutes() {
                        }
                        uvcpp::uvcpp_db_table table;
                        std::string error;
-                       if (!Query("SELECT id, channel_id, stream, start_ms, end_ms, duration_ms, "
-                                  "size_bytes, codec, "
+                       if (!Query("SELECT id, channel_id, stream, path, start_ms, end_ms, "
+                                  "duration_ms, size_bytes, codec, "
                                   "record_type FROM recordings" +
                                       where + " ORDER BY start_ms ASC LIMIT 2000",
                                   params, &table, &error)) {
@@ -5744,6 +5744,7 @@ void App::RegisterRecordingRoutes() {
                              {"id", TableInt(table, i, "id")},
                              {"channelId", TableInt(table, i, "channel_id")},
                              {"stream", TableText(table, i, "stream")},
+                             {"path", TableText(table, i, "path")},
                              {"startMs", TableInt(table, i, "start_ms")},
                              {"endMs", TableInt(table, i, "end_ms")},
                              {"durationMs", TableInt(table, i, "duration_ms")},
