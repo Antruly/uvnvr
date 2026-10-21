@@ -7,9 +7,9 @@
 
 namespace uvnvr {
 
-// Minimal RTSP server for the live MPEG-TS streams. It exposes
-// rtsp://host:port/live/{channel}/{main|sub} as RTP/MP2T (payload type 33),
-// with TCP interleaved and UDP unicast transports.
+// RTSP server for the live streams. It exposes
+// rtsp://host:port/live/{channel}/{main|sub} as H.264/H.265 RTP (payload type
+// 96) with TCP interleaved and UDP unicast transports.
 class RtspServer {
 public:
   using AuthFn = std::function<bool(const std::string&, const std::string&)>;
