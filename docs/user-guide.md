@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.16.0)
+# UvNVR User Guide (0.17.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -10,7 +10,7 @@ A Chinese version is available at [`user-guide.zh-CN.md`](user-guide.zh-CN.md).
 | Platform | Package | Default data directory |
 |---|---|---|
 | Linux | `.deb`, `.rpm`, `.tar.gz` | `/var/lib/uvnvr` |
-| Windows | NSIS setup or portable `.zip` | `%ProgramData%\UvNVR` (under Program Files); `.\data` (portable elsewhere) |
+| Windows | Inno Setup setup or portable `.zip` | `%ProgramData%\UvNVR` (under Program Files); `.\data` (portable elsewhere) |
 | macOS | `.pkg`, `.dmg`, `.zip` | `/Library/Application Support/UvNVR` |
 
 Linux packages install a systemd unit and start it automatically. Open
@@ -32,8 +32,10 @@ Ports and the data directory come from a JSON file and can be changed without
 rebuilding or reinstalling:
 
 - Windows installer: choose the HTTP and RTSP ports on the **Service ports**
-  page. The installer writes `%ProgramData%\UvNVR\uvnvr.json` and adds a
-  **UvNVR Configuration** Start-menu shortcut.
+  page (wizard available in English and Simplified Chinese). The installer
+  writes `%ProgramData%\UvNVR\uvnvr.json`, adds Start-menu entries and
+  **desktop shortcuts** for the web UI and the application, and installs the
+  boot task and firewall rule.
 - Linux: edit `/etc/uvnvr/uvnvr.json`, then `sudo systemctl restart uvnvr`.
 - macOS: edit `/Library/Application Support/UvNVR/uvnvr.json`, then restart the
   launchd job.

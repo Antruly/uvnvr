@@ -1,4 +1,4 @@
-# UvNVR 使用手册（0.16.0）
+# UvNVR 使用手册（0.17.0）
 
 本手册覆盖从安装到完整的摄像头接入、预览、录像、回放、API/RTSP、预警和系统管理流程。
 
@@ -9,7 +9,7 @@
 | 平台 | 安装包 | 默认数据目录 |
 |---|---|---|
 | Linux | `.deb`、`.rpm`、`.tar.gz` | `/var/lib/uvnvr` |
-| Windows | NSIS 安装包或便携 `.zip` | `Program Files` 下运行 `%ProgramData%\UvNVR`；其他位置的便携版 `.\data` |
+| Windows | Inno Setup 安装包或便携 `.zip` | `Program Files` 下运行 `%ProgramData%\UvNVR`；其他位置的便携版 `.\data` |
 | macOS | `.pkg`、`.dmg`、`.zip` | `/Library/Application Support/UvNVR` |
 
 Linux 安装包会安装并启动 systemd 服务。浏览器打开 `http://<主机>:8080`。
@@ -28,10 +28,10 @@ uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 
 端口与数据目录来自启动配置文件，无需重新构建或重装即可修改：
 
-- Windows 安装包：NSIS 在“服务端口”页设置端口；也可以使用 x64 MSI：
-  `msiexec /i uvnvr-0.7.0-windows-x64.msi HTTPPORT=8080 RTSPPORT=554`。
-  NSIS 安装程序写入
-  `%ProgramData%\UvNVR\uvnvr.json`，并在开始菜单生成“UvNVR Configuration”快捷方式。
+- Windows 安装包：Inno Setup 在“服务端口”页设置端口（安装向导支持中英文）；也可以使用 x64 MSI：
+  `msiexec /i uvnvr-<版本>-windows-x64.msi HTTPPORT=8080 RTSPPORT=554`。
+  Inno Setup 安装程序写入 `%ProgramData%\UvNVR\uvnvr.json`，在开始菜单生成配置入口，
+  并在**桌面创建 Web 界面与程序快捷方式**，同时安装开机任务与防火墙规则。
 - Linux：编辑 `/etc/uvnvr/uvnvr.json`，然后 `sudo systemctl restart uvnvr`。
 - macOS：编辑 `/Library/Application Support/UvNVR/uvnvr.json`，然后重启 launchd 服务。
 - 任意版本：使用 `--config <路径>`，或 `--port`、`--rtsp-port`、`--data-dir`。

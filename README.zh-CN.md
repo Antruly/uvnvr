@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.16.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.17.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,15 +22,15 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.16.0 — io_uring 录像 I/O。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.17.0 — 安装包与界面刷新。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.16.0 将切片文件 I/O 改为 libuv 文件请求：Linux 内核支持时自动使用 io_uring
-完成异步写入与 fsync，否则回退到线程池。0.15.0 的海康/大华编码控制、0.14.0 的
-ONVIF 编码控制、0.13.0 的 RTSP 音频/预警/存储校验、0.12.0 的 RTSP Digest 与实时事件、
-0.11.0 的 OpenAPI/Swagger UI 与 H.264/H.265 RTP，以及更早的核心里程碑继续保留。
-WebRTC、云平台与高级分析仍不在范围内。里程碑见
+0.17.0 用现代 Inno Setup 安装包替换 Windows NSIS（中英文、服务端口、防火墙、开机任务、
+桌面快捷方式），为 ONVIF 扫描增加多选/批量添加，修复扫描到建通道的流程，并刷新界面、
+图标与亮色主题。0.16.0 的 io_uring 录像 I/O、0.15.0 的海康/大华编码控制、0.14.0 的
+ONVIF 编码控制、0.13.0 的 RTSP 音频、0.12.0 的 RTSP Digest 与实时事件，以及更早的
+核心里程碑继续保留。WebRTC、云平台与高级分析仍不在范围内。里程碑见
 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
@@ -73,6 +73,7 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
   通道状态变化，界面弹出提示并自动刷新预警中心。
 - RTSP AAC（RFC 3640）与 G.711（PCMA/PCMU）音频轨道、独立 RTP/RTCP；录像批量写入
   （`recording.batch_mb`/`batch_ms`）；磁盘/服务异常预警；存储目录浏览与根目录/不可写路径校验。
+- ONVIF 扫描多选与 **添加所选**，逐行显示状态与错误。
 - 摄像头编码控制（`GET/PUT /api/v1/channels/{id}/encoder`），支持 ONVIF、海康 ISAPI 与大华 CGI：编码、分辨率、帧率、码率（ONVIF 另含质量），通道编辑中可直接读取/应用。
 
 ### 已交付范围
@@ -169,7 +170,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.16.0 已知限制
+## 0.17.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -189,7 +190,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
   摄像头重连后缓冲区会丢失。
 - 自动识别与品牌一键添加要求摄像头开启 ONVIF；纯 RTSP 设备仍需手动填写地址。
 - 倒放通过定时向后跳转实现（会有跳跃感）；摄像头时间同步仅覆盖支持 ONVIF 的设备。
-- 提供 x64 MSI；arm64 与便携版仍使用 NSIS/zip，MSI 未签名，SmartScreen 可能提示。
+- 提供 x64 MSI；arm64 与便携版使用 Inno Setup/zip，MSI 未签名，SmartScreen 可能提示。
 - 海康/大华 HTTP 后备覆盖 ISAPI/CGI 摄像头；其他不支持 ONVIF 的品牌仍需手动配置。
 - CSV 导入为逐条处理；录像状态面板会同时列出正在写入的计划录像与事件录像。
 - 格式化存储卷只删除 UvNVR 的 `uvnvr` 录像目录与索引记录，不会执行 `mkfs`，也不删除磁盘上的其他文件。
@@ -223,8 +224,8 @@ configure 参数与许可证声明，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PAR
 
 | 平台 | 安装包 |
 |---|---|
-| Windows x64 | NSIS `setup.exe`、**MSI**、便携 `.zip` |
-| Windows arm64 | NSIS `setup.exe`、便携 `.zip` |
+| Windows x64 | Inno Setup `setup.exe`、**MSI**、便携 `.zip` |
+| Windows arm64 | Inno Setup `setup.exe`、便携 `.zip` |
 | Linux x64 / arm64 | `.deb`、`.rpm`、`.tar.gz` |
 | macOS x64 / arm64 | `.pkg`、`.dmg`、`.zip` |
 
@@ -271,6 +272,7 @@ tests/             单元/集成/E2E 测试
 | 0.14.0 | ✅ ONVIF 编码参数读取/应用、通道媒体配置界面 |
 | 0.15.0 | ✅ 海康 ISAPI 与大华 CGI 编码参数读取/应用 |
 | 0.16.0 | ✅ libuv/io_uring 录像 I/O 与 fsync 批量控制 |
+| 0.17.0 | ✅ Inno Setup Windows 安装包、ONVIF 批量添加、界面/图标/亮色主题刷新 |
 
 ## 贡献与安全
 

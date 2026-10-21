@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.16.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.17.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,19 +22,20 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.16.0 — io_uring-backed recording I/O.** The recorder supports
+**0.17.0 — installer and UI refresh.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.16.0 moves segment file I/O to libuv file requests, so Linux kernels that
-support io_uring use it automatically for asynchronous writes and fsyncs, with a
-threadpool fallback elsewhere. It builds on 0.15.0's Hikvision/Dahua encoder
-control, 0.14.0's ONVIF encoder control, 0.13.0's RTSP audio, alerts and storage
-guards, 0.12.0's RTSP Digest and live events, 0.11.0's OpenAPI/Swagger UI and
-H.264/H.265 RTP, and the earlier core NVR milestones. Peer-to-peer/WebRTC, cloud
-access and advanced analytics remain out of scope. Track the milestones in
+0.17.0 replaces the Windows NSIS setup with a modern Inno Setup installer
+(English/Chinese, service ports, firewall, boot task, desktop shortcuts), adds
+multi-select/bulk add to ONVIF discovery, fixes the scan-to-channel flow and
+refreshes the UI, icon set and light theme. It builds on 0.16.0's io_uring
+recording I/O, 0.15.0's Hikvision/Dahua encoder control, 0.14.0's ONVIF encoder
+control, 0.13.0's RTSP audio, 0.12.0's RTSP Digest and live events, and the
+earlier core NVR milestones. Peer-to-peer/WebRTC, cloud access and advanced
+analytics remain out of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -196,7 +197,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.16.0)
+## Known limitations (0.17.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -229,7 +230,7 @@ and `/ws` to `127.0.0.1:8080`).
   still use the manual URL form.
 - Reverse playback is implemented as timed backward seeks (choppy); decoders cannot
   play a reversed GOP smoothly. Camera time sync covers ONVIF-capable devices only.
-- An x64 MSI is available alongside NSIS; arm64 and portable installs use NSIS/zip.
+- An x64 MSI is available alongside the Inno Setup installer; arm64 and portable builds use Inno Setup/zip.
   The MSI is unsigned, so SmartScreen may warn.
 - Hikvision/Dahua HTTP fallback covers ISAPI/CGI cameras; other brands without
   ONVIF still need manual configuration.
@@ -272,8 +273,8 @@ Download the artifacts from the [latest release](https://github.com/Antruly/uvnv
 
 | Platform | Packages |
 |---|---|
-| Windows x64 | NSIS `setup.exe`, **MSI**, portable `.zip` |
-| Windows arm64 | NSIS `setup.exe`, portable `.zip` |
+| Windows x64 | Inno Setup `setup.exe`, **MSI**, portable `.zip` |
+| Windows arm64 | Inno Setup `setup.exe`, portable `.zip` |
 | Linux x64 / arm64 | `.deb`, `.rpm`, `.tar.gz` |
 | macOS x64 / arm64 | `.pkg`, `.dmg`, `.zip` |
 
@@ -320,6 +321,7 @@ tests/             unit/integration/e2e tests
 | 0.14.0 | ✅ ONVIF camera encoder read/apply, per-channel media profile UI |
 | 0.15.0 | ✅ Hikvision ISAPI and Dahua CGI encoder read/apply |
 | 0.16.0 | ✅ libuv/io_uring recording I/O with fsync batching |
+| 0.17.0 | ✅ Inno Setup Windows installer, ONVIF bulk add, UI/icons and light-theme refresh |
 
 ## Contributing and security
 

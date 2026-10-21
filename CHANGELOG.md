@@ -4,6 +4,45 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] - 2026-10-22
+
+### Added
+
+- **ONVIF discovery multi-select.** Scan results now have checkboxes, a
+  **Select all** toggle and **Add selected (n)**. Each row shows its own
+  progress, `Added` state and error message; added hosts are not created twice.
+- **Inno Setup Windows installer.** The NSIS setup was replaced with a modern
+  Inno Setup 6 installer for x64 and arm64:
+  - English and Simplified Chinese wizard languages (UTF-8 script and language
+    file), with a working language selection.
+  - Service-ports page, `%ProgramData%\UvNVR\uvnvr.json` creation, scheduled
+    task and firewall rule.
+  - Start-menu shortcuts plus **desktop shortcuts** for the web UI and the
+    application (checked by default).
+  - Uninstall removes the task, firewall rule and shortcuts while preserving
+    the data directory.
+- UI refresh: refined surface hierarchy, spacing, panels, buttons, forms,
+  tables, status pills, modal and login composition; redesigned icon set.
+- The dashboard hero now shows channel/recording/user/storage counters, and the
+  stale milestone copy was replaced with the current feature summary.
+
+### Fixed
+
+- Clicking **Probe** in the ONVIF scan modal opened the channel form behind the
+  scan dialog; the scan dialog now closes so the form is usable.
+- ONVIF scan errors were shown behind the modal; they now appear inside it and
+  next to the failing device.
+- Light theme: sidebar, top bar, tabs, token form, scope tree, status pills,
+  notices, modals and authentication panels now use theme tokens instead of
+  dark hard-coded colors.
+- Removed the empty "M3 foundation" sidebar section and the raw
+  `system.scopes.*` labels in the API-token scope list.
+
+### Changed
+
+- Windows console output already switches to UTF-8 at the start of `main`
+  (`SetConsoleOutputCP(CP_UTF8)` / `SetConsoleCP(CP_UTF8)`).
+
 ## [0.16.0] - 2026-10-22
 
 ### Changed

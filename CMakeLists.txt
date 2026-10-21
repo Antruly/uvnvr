@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(uvnvr VERSION 0.16.0 LANGUAGES CXX)
+project(uvnvr VERSION 0.17.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -143,7 +143,9 @@ if(TARGET PkgConfig::LIBUV)
   target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} PkgConfig::LIBUV OpenSSL::Crypto
                                      OpenSSL::SSL)
 else()
-  find_library(UV_LIBRARY NAMES uv libuv REQUIRED)
+  # MSVC builds get libuv through the libuvcpp archive; only add an explicit
+  # library when one is available.
+  find_library(UV_LIBRARY NAMES uv libuv)
   target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} ${UV_LIBRARY} OpenSSL::Crypto
                                      OpenSSL::SSL)
 endif()
