@@ -1,4 +1,4 @@
-# UvNVR 使用手册（0.15.0）
+# UvNVR 使用手册（0.16.0）
 
 本手册覆盖从安装到完整的摄像头接入、预览、录像、回放、API/RTSP、预警和系统管理流程。
 
@@ -160,7 +160,8 @@ UvNVR 会从缓冲区带上预录开始一个片段，并持续录制后录；�
 - `recording.segment_minutes`：按时间切片，默认 5 分钟。
 - `recording.segment_size_mb`：按大小切片，默认 256 MB。
 - `recording.batch_mb`（默认 8）与 `recording.batch_ms`（默认 500）：达到任一阈值时
-  flush 写缓冲；切片结束与收尾时强制 flush。
+  执行 fsync；切片结束与收尾时强制 fsync。写入通过 libuv 文件请求完成，
+  支持的 Linux 内核会自动使用 io_uring。
 - 切片在超过阈值后的第一个关键帧结束。
 
 切片为不可变的 MPEG-TS 文件并写入 SQLite 索引。写入过程中崩溃会留下 `.part` 文件，录像服务启动时修复或重建索引。

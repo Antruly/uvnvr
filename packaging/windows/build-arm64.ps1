@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$Version = if ($env:UVNVR_VERSION) { $env:UVNVR_VERSION } else { '0.15.0' }
+$Version = if ($env:UVNVR_VERSION) { $env:UVNVR_VERSION } else { '0.16.0' }
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $Uvcpp = "$env:RUNNER_TEMP\uvcpp\libuvcpp-1.8.1-msvc-arm64"
 $Ffmpeg = "$env:RUNNER_TEMP\ffmpeg"

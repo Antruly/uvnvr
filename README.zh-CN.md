@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.15.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.16.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,15 +22,14 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.15.0 — 品牌编码参数控制。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.16.0 — io_uring 录像 I/O。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.15.0 将编码参数控制扩展到海康 ISAPI 与大华 CGI 通道：通道编辑中可对三种协议读取并应用
-编码格式、分辨率、帧率与码率。0.14.0 的 ONVIF 编码控制、0.13.0 的 RTSP 音频、批量写入、
-磁盘/服务预警与存储校验、0.12.0 的 RTSP Digest 与实时事件、0.11.0 的 OpenAPI/Swagger UI
-与 H.264/H.265 RTP、0.10.0 的运维操作与移动侦测、0.9.0 的事件触发录像、0.8.0 的 CSV 导入
-与实时录像状态、0.7.0 的海康/大华 HTTP 后备与 x64 MSI，以及更早的核心里程碑继续保留。
+0.16.0 将切片文件 I/O 改为 libuv 文件请求：Linux 内核支持时自动使用 io_uring
+完成异步写入与 fsync，否则回退到线程池。0.15.0 的海康/大华编码控制、0.14.0 的
+ONVIF 编码控制、0.13.0 的 RTSP 音频/预警/存储校验、0.12.0 的 RTSP Digest 与实时事件、
+0.11.0 的 OpenAPI/Swagger UI 与 H.264/H.265 RTP，以及更早的核心里程碑继续保留。
 WebRTC、云平台与高级分析仍不在范围内。里程碑见
 [`docs/development-plan.md`](docs/development-plan.md)。
 
@@ -170,7 +169,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.15.0 已知限制
+## 0.16.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -178,7 +177,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 - RTSP 输出以 RTP payload type 96 发送 H.264/H.265 视频，并以第二条轨道发送 AAC/G.711 音频
   和 RTCP SR；其他音频编码暂不转发。`DESCRIBE` 最多等待 2 秒获取参数集，通道离线时返回 503。
 - 品牌编码控制覆盖主码流的编码/分辨率/帧率/码率；不暴露质量参数，也不修改子码流。
-- 录像写入在用户态按批次 flush；计划中的 io_uring/环形缓存写入器尚未实现，写线程仍使用缓冲文件 I/O。
+- 录像使用 libuv 文件请求（内核支持时走 io_uring）；每个切片异步写入，`recording.batch_*` 控制 fsync 频率。
 - RTSP Digest 使用 RFC 7616 要求的 MD5/`qop=auth`，暂不提供更强摘要算法；H.265 客户端需支持 RFC 7798 分片。
 - OpenAPI 文档描述路由、权限与内容类型，请求/响应字段示例仍以 API 文档正文为准。
 - macOS 安装包为 ad-hoc 签名；未配置 Developer ID 时 Gatekeeper 可能要求右键打开。
@@ -271,6 +270,7 @@ tests/             单元/集成/E2E 测试
 | 0.13.0 | ✅ RTSP 音频（AAC/G.711）、批量写入、磁盘/服务预警、存储浏览 |
 | 0.14.0 | ✅ ONVIF 编码参数读取/应用、通道媒体配置界面 |
 | 0.15.0 | ✅ 海康 ISAPI 与大华 CGI 编码参数读取/应用 |
+| 0.16.0 | ✅ libuv/io_uring 录像 I/O 与 fsync 批量控制 |
 
 ## 贡献与安全
 

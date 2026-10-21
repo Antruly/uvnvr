@@ -4,14 +4,14 @@
 #
 #   packaging/linux/build-package.sh \
 #     --build build --libuvcpp /path/to/libuvcpp-1.8.1-linux-x64 \
-#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.15.0 --out dist-packages
+#     --ffmpeg /path/to/static/ffmpeg --arch x64 --version 0.16.0 --out dist-packages
 set -euo pipefail
 
 BUILD_DIR="build"
 LIBUVCPP_ROOT=""
 FFMPEG_BIN=""
 ARCH="x64"
-VERSION="0.15.0"
+VERSION="0.16.0"
 OUT="dist-packages"
 STAGE=""
 

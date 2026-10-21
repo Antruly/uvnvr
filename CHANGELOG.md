@@ -4,6 +4,26 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] - 2026-10-22
+
+### Changed
+
+- **Recording I/O now goes through libuv file requests.** The segment writer no
+  longer uses `std::ofstream`; it opens, writes and closes through `uv_fs_*` on
+  a private `uv_loop` per recorder. On Linux, libuv hands these requests to
+  **io_uring** automatically when the kernel supports it (verified with
+  `strace`: `io_uring_setup`/`io_uring_enter` during recording), falling back to
+  its threadpool otherwise.
+- `recording.batch_mb`/`recording.batch_ms` now control the `fsync` cadence
+  (`uv_fs_fsync`); each write is already completed asynchronously.
+- CMake links libuv explicitly, since libuvcpp links it privately.
+
+### Notes
+
+- No database, configuration or API changes.
+- The private loop is used only for filesystem requests; the web loop is not
+  blocked by recording I/O.
+
 ## [0.15.0] - 2026-10-22
 
 ### Added

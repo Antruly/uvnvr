@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.15.0)
+# UvNVR User Guide (0.16.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -206,8 +206,9 @@ Recording defaults can be changed in **System** settings:
 - `recording.segment_minutes` (default 5): time-based slicing.
 - `recording.segment_size_mb` (default 256): size-based slicing.
 - `recording.batch_mb` (default 8) and `recording.batch_ms` (default 500):
-  flush the write buffer when either threshold is reached; splits and
-  finalization always flush.
+  fsync when either threshold is reached; splits and finalization always fsync.
+  Writes themselves use libuv file requests (io_uring on supported Linux
+  kernels).
 - Slices end at the first keyframe after the threshold.
 
 Segments are MPEG-TS, immutable and indexed in SQLite. A crash during a segment
