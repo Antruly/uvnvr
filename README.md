@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.7.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.8.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,19 +22,19 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.7.0 — brand fallback and Windows MSI.** The recorder supports
+**0.8.0 — bulk onboarding and recording visibility.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.7.0 adds Hikvision ISAPI/Dahua CGI HTTP Digest fallback for auto-detect and
-camera time sync without ONVIF, a per-channel HTTP port, an x64 MSI installer, and
-automatic playback continuation across codec boundaries. It builds on 0.6.0's
-recording fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and
-layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the
-core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain out
-of scope. Track the milestones in
+0.8.0 adds CSV bulk channel import with automatic brand detection and a live
+recording-status panel that shows the current file, bytes and active volume. It
+builds on 0.7.0's Hikvision/Dahua HTTP fallback, per-channel HTTP port, x64 MSI
+and codec-boundary continuation, 0.6.0's recording fixes and operator UI, 0.5.0's
+ONVIF events, 0.4.0's channel groups and layouts, 0.3.0's downloads/export/cache,
+0.2.0's startup configuration, and the core NVR loop. Peer-to-peer/WebRTC, cloud
+access and advanced analytics remain out of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -77,6 +77,9 @@ output.
 - Hikvision ISAPI/Dahua CGI Digest fallback for detection and time sync without
   ONVIF; per-channel HTTP port; x64 MSI with port properties; automatic playback
   continuation at codec boundaries.
+- CSV bulk channel import with per-row detection and error reporting; a live
+  recording-status API and Storage-page panel showing current files and the
+  active recording volume.
 
 ### Delivered scope
 
@@ -175,7 +178,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.7.0)
+## Known limitations (0.8.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -199,6 +202,8 @@ and `/ws` to `127.0.0.1:8080`).
   The MSI is unsigned, so SmartScreen may warn.
 - Hikvision/Dahua HTTP fallback covers ISAPI/CGI cameras; other brands without
   ONVIF still need manual configuration.
+- CSV import is sequential, and the recording-status panel covers plan-driven
+  recorders (event clips are not produced yet).
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -267,6 +272,7 @@ tests/             unit/integration/e2e tests
 | 0.5.0 | ✅ ONVIF PullPoint camera events integrated with the alert center |
 | 0.6.0 | ✅ Recording fixes, themes, thumbnails, brand detect, token scopes, camera time sync |
 | 0.7.0 | ✅ Hikvision/Dahua HTTP fallback, HTTP port, x64 MSI, codec auto-continue |
+| 0.8.0 | ✅ CSV bulk import, live recording status and active-volume visibility |
 
 ## Contributing and security
 

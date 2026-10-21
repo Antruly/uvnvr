@@ -51,6 +51,7 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/plans/sync` | plan.manage |
 | GET | `/api/v1/storage/volumes` | storage.view |
 | POST/PUT/DELETE | `/api/v1/storage/volumes[/{id}]` | storage.manage |
+| GET | `/api/v1/recordings/status` | storage.view |
 | GET | `/api/v1/recordings` | playback.view |
 | GET | `/api/v1/recordings/{id}/download` | playback.download |
 | POST | `/api/v1/playback/export` | playback.download |
@@ -118,6 +119,37 @@ hours and 4 GiB of input, and temporary files are removed after the response.
 `GET /api/v1/preview/channels` returns the display metadata and stream state
 needed by preview-only roles (no usernames, URLs or stored error text) and
 requires only `preview.view`.
+
+## Recording status
+
+`GET /api/v1/recordings/status` returns a live snapshot of every plan-driven
+recorder and the volume new segments will use:
+
+```json
+{
+  "recordings": [
+    {
+      "channelId": 1,
+      "stream": "main",
+      "active": true,
+      "path": "/var/lib/uvnvr/recordings/uvnvr/1/2026-10-21/1_main_...ts",
+      "bytes": 1048576,
+      "startMs": 1792564800000,
+      "volumeId": 1,
+      "volumePath": "/var/lib/uvnvr/recordings"
+    }
+  ],
+  "volume": { "id": 1, "path": "/var/lib/uvnvr/recordings", "mode": "loop" }
+}
+```
+
+`active` is true while a segment file is open; `path` and `startMs` are empty or
+zero for idle recorders, and `bytes` counts data written to the current
+segment. `volume` is the volume selected for the next segment (`{}` when none is
+available). The endpoint reads in-memory recorder state and does not scan the
+file system, so it is safe to poll; the Storage page refreshes it every five
+seconds. Event clips are not produced yet, so `recordings` covers scheduled
+recorders only.
 
 ## API tokens and scopes
 

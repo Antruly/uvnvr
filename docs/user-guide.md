@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.1.0)
+# UvNVR User Guide (0.8.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -127,6 +127,17 @@ under **Ungrouped**. Deleting a group moves its channels to ungrouped and
 reparents its child groups; the preview tree and channel list update
 immediately.
 
+To onboard many cameras at once, click **Import CSV** and select a file with
+`host,username,password,brand,name,httpPort` rows. A header row is optional; it
+is detected from a `host` or `ip` column, and `user`, `pass` and `http_port` are
+accepted as aliases. Set `brand` to `hikvision` or `dahua` to try that vendor
+first, or leave it empty to try ONVIF first. `name` overrides the detected name.
+Every row uses the same detection path as **Auto detect** and is then created as
+a channel; the button shows `done/total` while the import runs. A host that
+already has a channel is skipped, and failures are listed with the row's host.
+Import is sequential in the browser, so a long list takes one detection round
+per camera.
+
 ### Channel states
 
 `disabled → connecting → online → reconnecting → offline/error`
@@ -194,6 +205,13 @@ Open **Storage** to manage recording volumes.
   retention days (default 30; **0 means keep forever**). Expired segments are
   deleted automatically.
 - Volumes can be disabled without deleting existing files.
+
+The **Active recordings** panel below the volume list refreshes every five
+seconds. It shows the volume new segments are written to and, for each plan
+recorder, whether it is recording, the current file, bytes written and the
+segment start time. Idle recorders show **Idle** with no current file. This
+panel reflects the in-memory recorder state, so it confirms that data is
+actually being written without scanning the disk.
 
 Manual deletion of video files is not available outside maintenance mode.
 Automatic retention and loop cleanup are policy operations and are audited.

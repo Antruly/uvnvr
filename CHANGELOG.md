@@ -4,6 +4,25 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-21
+
+### Added
+
+- **Bulk channel import from CSV.** The Channels page accepts
+  `host,username,password,brand,name,httpPort` rows (header optional). Each row
+  is detected through ONVIF/Hikvision ISAPI/Dahua CGI and created, with a
+  progress counter, duplicate-host protection and per-row error reporting.
+- **Recording status visibility.** `GET /api/v1/recordings/status` reports every
+  active recorder with its current segment path, bytes, start time and volume,
+  plus the volume used for new recordings. The Storage page shows the same live
+  panel (refreshed every five seconds), so operators can confirm that data is
+  actually being written.
+
+### Changed
+
+- The Storage page labels the active volume for new segments and lists the
+  current files being written.
+
 ## [0.7.0] - 2026-10-21
 
 ### Added
