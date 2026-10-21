@@ -3267,3 +3267,37 @@ select.input {
   align-items: center;
   gap: 6px;
 }
+
+.token-create {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.scope-tree {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.scope-group {
+  display: grid;
+  gap: 4px;
+}
+
+.scope-children {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 2px 12px;
+  padding-left: 20px;
+}
+
+.token-scopes {
+  max-width: 280px;
+  word-break: break-word;
+}

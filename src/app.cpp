@@ -488,7 +488,8 @@ ByteRange ParseByteRange(const std::string& header, uint64_t size) {
 const std::vector<std::string>& AllPermissions() {
   static const std::vector<std::string> kPermissions = {
       "dashboard.view", "preview.view",  "playback.view", "playback.download", "channel.view",
-      "channel.manage", "plan.view",     "plan.manage",   "storage.view",      "storage.manage",
+      "channel.create", "channel.delete", "channel.manage", "plan.view",       "plan.manage",
+      "storage.view",   "storage.manage",
       "alert.view",     "alert.manage",  "user.view",     "user.manage",       "log.view",
       "system.view",    "system.manage", "api.access",    "api.snapshot",      "api.stream",
       "api.download",   "api.alerts",    "rtsp.access",   "maintenance",
@@ -501,6 +502,83 @@ bool IsKnownPermission(const std::string& permission) {
     return true;
   const auto& all = AllPermissions();
   return std::find(all.begin(), all.end(), permission) != all.end();
+}
+
+// `channel.manage` and the other manage permissions imply their read/create
+// counterparts. Tokens can therefore grant a narrower subset without changing
+// the endpoint checks.
+bool PermissionImplies(const std::string& granted, const std::string& required) {
+  if (granted == "*" || granted == required)
+    return true;
+  if (granted == "channel.manage")
+    return required == "channel.view" || required == "channel.create" ||
+           required == "channel.delete";
+  if (granted == "playback.download")
+    return required == "playback.view";
+  if (granted == "plan.manage")
+    return required == "plan.view";
+  if (granted == "storage.manage")
+    return required == "storage.view";
+  if (granted == "alert.manage")
+    return required == "alert.view";
+  if (granted == "user.manage")
+    return required == "user.view";
+  if (granted == "system.manage")
+    return required == "system.view";
+  return false;
+}
+
+const std::map<std::string, std::vector<std::string>>& ApiScopes() {
+  static const std::map<std::string, std::vector<std::string>> kScopes = {
+      {"all", {"*"}},
+      {"preview", {"preview.view", "api.stream"}},
+      {"snapshots", {"api.snapshot"}},
+      {"channels.read", {"channel.view"}},
+      {"channels.create", {"channel.create"}},
+      {"channels.delete", {"channel.delete"}},
+      {"channels.manage", {"channel.manage"}},
+      {"playback", {"playback.view"}},
+      {"download", {"playback.view", "playback.download", "api.download"}},
+      {"alerts", {"alert.view", "alert.manage", "api.alerts"}},
+      {"plans", {"plan.view", "plan.manage"}},
+      {"storage", {"storage.view", "storage.manage"}},
+      {"time", {"system.view", "system.manage"}},
+      {"system", {"system.view"}},
+      {"rtsp", {"rtsp.access"}},
+      {"audit", {"log.view"}},
+      {"users", {"user.view", "user.manage"}},
+  };
+  return kScopes;
+}
+
+bool IsKnownApiScope(const std::string& scope) {
+  return ApiScopes().find(scope) != ApiScopes().end();
+}
+
+std::vector<std::string> EffectiveTokenPermissions(const std::vector<std::string>& scopes,
+                                                   const std::vector<std::string>& role) {
+  if (scopes.empty())
+    return role;
+  if (std::find(scopes.begin(), scopes.end(), "all") != scopes.end())
+    return role;
+  std::vector<std::string> expanded = {"api.access"};
+  for (const std::string& scope : scopes) {
+    const auto it = ApiScopes().find(scope);
+    if (it == ApiScopes().end())
+      continue;
+    for (const std::string& permission : it->second)
+      expanded.push_back(permission);
+  }
+  std::vector<std::string> effective;
+  for (const std::string& permission : expanded) {
+    const bool allowed =
+        std::any_of(role.begin(), role.end(), [&](const std::string& granted) {
+          return PermissionImplies(granted, permission);
+        });
+    if (allowed && std::find(effective.begin(), effective.end(), permission) == effective.end())
+      effective.push_back(permission);
+  }
+  return effective;
 }
 
 const char* kOperatorPermissions =
@@ -624,7 +702,8 @@ bool App::Migrate(std::string* error) {
       "token_hash TEXT NOT NULL UNIQUE,"
       "created_at INTEGER NOT NULL,"
       "expires_at INTEGER,"
-      "last_used_at INTEGER)",
+      "last_used_at INTEGER,"
+      "scopes_json TEXT NOT NULL DEFAULT '[]')",
       "CREATE TABLE IF NOT EXISTS login_attempts ("
       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
       "kind TEXT NOT NULL,"
@@ -760,6 +839,23 @@ bool App::Migrate(std::string* error) {
   for (const auto& sql : statements) {
     if (!Exec(sql, {}, nullptr, error))
       return false;
+  }
+
+  // Existing databases predate per-token API scopes.
+  {
+    uvcpp::uvcpp_db_table columns;
+    if (Query("PRAGMA table_info(api_tokens)", {}, &columns, error)) {
+      bool has_scopes = false;
+      for (size_t row = 0; row < columns.rows().size(); ++row) {
+        if (TableText(columns, row, "name") == "scopes_json")
+          has_scopes = true;
+      }
+      if (!has_scopes &&
+          !Exec("ALTER TABLE api_tokens ADD COLUMN scopes_json TEXT NOT NULL DEFAULT '[]'", {},
+                nullptr, error)) {
+        return false;
+      }
+    }
   }
 
   const int64_t now = NowSeconds();
@@ -986,7 +1082,7 @@ bool App::PasswordValid(const std::string& password, std::string* message) {
 
 bool App::HasPermission(const UserContext& user, const std::string& permission) const {
   for (const auto& item : user.permissions) {
-    if (item == "*" || item == permission)
+    if (PermissionImplies(item, permission))
       return true;
   }
   return false;
@@ -1382,7 +1478,8 @@ AuthResult App::Authenticate(const std::string& cookie_token, const std::string&
     std::string error;
     const bool queried = Query(
         "SELECT u.id, u.username, u.enabled, r.name AS role_name, r.permissions AS permissions, "
-        "t.id AS token_id FROM api_tokens t JOIN users u ON u.id = t.user_id "
+        "t.id AS token_id, t.scopes_json AS scopes_json FROM api_tokens t "
+        "JOIN users u ON u.id = t.user_id "
         "JOIN roles r ON r.id = u.role_id WHERE t.token_hash = ? "
         "AND (t.expires_at IS NULL OR t.expires_at > ?)",
         params, &table, &error);
@@ -1394,7 +1491,11 @@ AuthResult App::Authenticate(const std::string& cookie_token, const std::string&
     user.id = TableInt(table, 0, "id");
     user.username = TableText(table, 0, "username");
     user.role_name = TableText(table, 0, "role_name");
-    user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
+    const std::vector<std::string> role_permissions =
+        ParsePermissions(TableText(table, 0, "permissions"));
+    const std::vector<std::string> token_scopes =
+        ParsePermissions(TableText(table, 0, "scopes_json"));
+    user.permissions = EffectiveTokenPermissions(token_scopes, role_permissions);
     if (!HasPermission(user, "api.access")) {
       result.status = 403;
       result.code = "forbidden";
@@ -3057,8 +3158,8 @@ void App::RegisterProtectedRoutes() {
                   params.add(user.id);
                   std::string error;
                   if (!Query(
-                          "SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens "
-                          "WHERE user_id = ? ORDER BY id",
+                          "SELECT id, name, created_at, expires_at, last_used_at, scopes_json "
+                          "FROM api_tokens WHERE user_id = ? ORDER BY id",
                           params, &table, &error)) {
                     return;
                   }
@@ -3069,6 +3170,7 @@ void App::RegisterProtectedRoutes() {
                         {"createdAt", TableInt(table, i, "created_at")},
                         {"expiresAt", TableInt(table, i, "expires_at")},
                         {"lastUsedAt", TableInt(table, i, "last_used_at")},
+                        {"scopes", json::parse(TableText(table, i, "scopes_json"), nullptr, false)},
                     });
                   }
                 },
@@ -3102,12 +3204,30 @@ void App::RegisterProtectedRoutes() {
               next();
               return;
             }
+            std::vector<std::string> scopes;
+            if (body.contains("scopes")) {
+              if (!body["scopes"].is_array()) {
+                SendError(resp, 400, "invalid_scopes", "scopes must be an array");
+                next();
+                return;
+              }
+              for (const auto& item : body["scopes"]) {
+                if (!item.is_string() || !IsKnownApiScope(item.get<std::string>())) {
+                  SendError(resp, 400, "invalid_scopes", "unknown API scope");
+                  next();
+                  return;
+                }
+                const std::string scope = item.get<std::string>();
+                if (std::find(scopes.begin(), scopes.end(), scope) == scopes.end())
+                  scopes.push_back(scope);
+              }
+            }
             const UserContext user = UserFromRequest(req);
             const std::string ip = req.peer_ip();
             const std::string ua = req.header("User-Agent", "");
             auto op = std::make_shared<OpResult>();
             RunWork(
-                [this, name, days, user, ip, ua, op] {
+                [this, name, days, scopes, user, ip, ua, op] {
                   const std::string raw_token = "uvnvr_" + RandomHex(32);
                   if (raw_token.size() <= 6) {
                     op->ok = false;
@@ -3126,11 +3246,12 @@ void App::RegisterProtectedRoutes() {
                   } else {
                     params.add_null();
                   }
+                  params.add(json(scopes).dump());
                   uvcpp::uvcpp_db_value new_id;
                   std::string error;
                   if (!uvcpp::uvcpp_db_ok(db_.insert("INSERT INTO api_tokens(user_id, name, "
-                                                     "token_hash, created_at, expires_at) "
-                                                     "VALUES(?, ?, ?, ?, ?)",
+                                                     "token_hash, created_at, expires_at, "
+                                                     "scopes_json) VALUES(?, ?, ?, ?, ?, ?)",
                                                      params, &new_id))) {
                     op->ok = false;
                     op->status = 500;
@@ -3139,10 +3260,14 @@ void App::RegisterProtectedRoutes() {
                     return;
                   }
                   const int64_t id = new_id.to_int64();
-                  Audit("api", "info", user.username, ip, ua, "token", std::to_string(id), "create",
-                        "success", "", json{{"name", name}, {"expiresInDays", days}}.dump());
+                  Audit("api", "info", user.username, ip, ua, "token", std::to_string(id),
+                        "create", "success", "",
+                        json{{"name", name}, {"expiresInDays", days}, {"scopes", scopes}}.dump());
                   op->status = 201;
-                  op->data = json{{"id", id}, {"name", name}, {"token", raw_token}};
+                  op->data = json{{"id", id},
+                                  {"name", name},
+                                  {"token", raw_token},
+                                  {"scopes", scopes}};
                 },
                 [op, &resp, next] {
                   SendOp(resp, *op);
@@ -3857,7 +3982,7 @@ void App::RegisterChannelRoutes() {
                   next();
                 });
           },
-          "channel.manage"));
+          "channel.create"));
 
   web_.put(
       "/api/v1/channels/:id",
@@ -4081,7 +4206,7 @@ void App::RegisterChannelRoutes() {
                        next();
                      });
                },
-               "channel.manage"));
+               "channel.delete"));
 
   web_.get("/api/v1/channels/:id/snapshot",
            Protected(

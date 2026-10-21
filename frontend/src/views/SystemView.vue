@@ -62,7 +62,23 @@ interface TokenRow {
   createdAt: number
   expiresAt: number
   lastUsedAt: number
+  scopes?: string[]
 }
+
+const scopeGroups = [
+  { key: 'preview', scopes: ['preview', 'snapshots'] },
+  { key: 'channels', scopes: ['channels.read', 'channels.create', 'channels.delete', 'channels.manage'] },
+  { key: 'playback', scopes: ['playback', 'download'] },
+  { key: 'alerts', scopes: ['alerts'] },
+  { key: 'plans', scopes: ['plans'] },
+  { key: 'storage', scopes: ['storage'] },
+  { key: 'time', scopes: ['time', 'system'] },
+  { key: 'rtsp', scopes: ['rtsp'] },
+  { key: 'audit', scopes: ['audit'] },
+  { key: 'users', scopes: ['users'] },
+] as const
+
+const allScopes = scopeGroups.flatMap((group) => [...group.scopes])
 
 interface StartupConfig {
   http: { port: number; host: string }
@@ -110,7 +126,7 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
 const notice = ref('')
-const newToken = reactive({ name: '', expiresInDays: 0 })
+const newToken = reactive({ name: '', expiresInDays: 0, scopes: [] as string[] })
 const createdToken = ref('')
 
 const canManage = () => auth.hasPermission('system.manage')
@@ -197,16 +213,53 @@ async function createToken() {
       body: JSON.stringify({
         name: newToken.name,
         expiresInDays: Number(newToken.expiresInDays) || 0,
+        scopes: newToken.scopes,
       }),
     })
     createdToken.value = response.token
     newToken.name = ''
     newToken.expiresInDays = 0
+    newToken.scopes = []
     flash(t('system.tokenCreated'))
     await load()
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
+}
+
+function toggleScope(scope: string) {
+  if (newToken.scopes.includes(scope)) {
+    newToken.scopes = newToken.scopes.filter((item) => item !== scope)
+  } else {
+    newToken.scopes = [...newToken.scopes, scope]
+  }
+}
+
+function groupSelected(scopes: readonly string[]) {
+  return scopes.every((scope) => newToken.scopes.includes(scope))
+}
+
+function toggleGroup(scopes: readonly string[]) {
+  if (groupSelected(scopes)) {
+    newToken.scopes = newToken.scopes.filter((scope) => !scopes.includes(scope))
+  } else {
+    newToken.scopes = Array.from(new Set([...newToken.scopes, ...scopes]))
+  }
+}
+
+function allSelected() {
+  return allScopes.every((scope) => newToken.scopes.includes(scope))
+}
+
+function toggleAllScopes() {
+  newToken.scopes = allSelected() ? [] : [...allScopes]
+}
+
+function tokenScopeLabel(token: TokenRow) {
+  if (!token.scopes || token.scopes.length === 0) return t('system.scopesInherited')
+  return token.scopes
+    .map((scope) => t(`system.scopes.${scope}`))
+    .join(', ')
 }
 
 async function revokeToken(token: TokenRow) {
@@ -469,25 +522,59 @@ onMounted(load)
         </div>
       </div>
 
-      <form class="token-form" @submit.prevent="createToken">
-        <label class="field compact-field grow">
-          <span>{{ t('system.tokenName') }}</span>
-          <input v-model="newToken.name" class="input" required maxlength="64" />
-        </label>
-        <label class="field compact-field">
-          <span>{{ t('system.expiresInDays') }}</span>
-          <input v-model.number="newToken.expiresInDays" class="input" type="number" min="0" max="3650" />
-        </label>
-        <button class="button primary" type="submit">
-          <AppIcon name="plus" :size="16" />
-          {{ t('system.createToken') }}
-        </button>
-      </form>
+      <div class="token-create">
+        <div class="token-form">
+          <label class="field compact-field grow">
+            <span>{{ t('system.tokenName') }}</span>
+            <input v-model="newToken.name" class="input" maxlength="64" />
+          </label>
+          <label class="field compact-field">
+            <span>{{ t('system.expiresInDays') }}</span>
+            <input v-model.number="newToken.expiresInDays" class="input" type="number" min="0" max="3650" />
+          </label>
+        </div>
+
+        <div class="scope-tree">
+          <label class="check-row scope-all">
+            <input type="checkbox" :checked="allSelected()" @change="toggleAllScopes" />
+            <span>{{ t('system.allScopes') }}</span>
+          </label>
+          <div v-for="group in scopeGroups" :key="group.key" class="scope-group">
+            <label class="check-row">
+              <input
+                type="checkbox"
+                :checked="groupSelected(group.scopes)"
+                @change="toggleGroup(group.scopes)"
+              />
+              <strong>{{ t(`system.scopeGroups.${group.key}`) }}</strong>
+            </label>
+            <div class="scope-children">
+              <label v-for="scope in group.scopes" :key="scope" class="check-row">
+                <input
+                  type="checkbox"
+                  :checked="newToken.scopes.includes(scope)"
+                  @change="toggleScope(scope)"
+                />
+                <span>{{ t(`system.scopes.${scope}`) }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <p class="small-note">{{ t('system.scopesHint') }}</p>
+        <div class="modal-actions">
+          <button class="button primary" type="button" :disabled="!newToken.name" @click="createToken">
+            <AppIcon name="plus" :size="16" />
+            {{ t('system.createToken') }}
+          </button>
+        </div>
+      </div>
 
       <table class="data-table">
         <thead>
           <tr>
             <th>{{ t('system.tokenName') }}</th>
+            <th>{{ t('system.tokenScopes') }}</th>
             <th>{{ t('users.created') }}</th>
             <th>{{ t('system.tokenExpires') }}</th>
             <th>{{ t('users.lastLogin') }}</th>
@@ -497,6 +584,7 @@ onMounted(load)
         <tbody>
           <tr v-for="token in tokens" :key="token.id">
             <td><strong>{{ token.name }}</strong></td>
+            <td class="muted token-scopes">{{ tokenScopeLabel(token) }}</td>
             <td class="muted">{{ formatTime(token.createdAt) }}</td>
             <td class="muted">{{ token.expiresAt ? formatTime(token.expiresAt) : t('common.never') }}</td>
             <td class="muted">{{ formatTime(token.lastUsedAt) }}</td>
@@ -508,7 +596,7 @@ onMounted(load)
             </td>
           </tr>
           <tr v-if="tokens.length === 0">
-            <td colspan="5" class="empty-cell">{{ t('system.noTokens') }}</td>
+            <td colspan="6" class="empty-cell">{{ t('system.noTokens') }}</td>
           </tr>
         </tbody>
       </table>
