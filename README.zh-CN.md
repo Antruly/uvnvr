@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.3.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.4.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,15 +22,14 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.3.0 — 回放与下载加固。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.4.0 — 通道组织与个人布局。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.3.0 新增 HTTP Range 断点下载、通过随包 FFmpeg 导出 MP4，以及带下一片预读的共享
-LRU 回放缓存。0.2.0 的启动 JSON 配置（端口、绑定地址、数据目录、TLS）、Windows
-安装器端口选择、`/api/v1/system/config`、0.5×–8× 倍速与时间轴跳转继续保留。
-WebRTC、云平台与高级分析仍不在范围内。里程碑见
-[`docs/development-plan.md`](docs/development-plan.md)。
+0.4.0 新增通道分组与可折叠的预览通道树，以及按用户保存在服务端的预览布局。
+0.3.0 的 HTTP Range 断点下载、MP4 导出与共享 LRU 回放缓存，0.2.0 的启动 JSON 配置、
+安装器端口选择、倍速与时间轴跳转继续保留。WebRTC、云平台与高级分析仍不在范围内。
+里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -54,6 +53,7 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
   `--print-config`；Windows 安装器端口页，Linux/macOS 服务配置。
 - 回放 0.5×–8× 倍速、±10s/±30s 快退快进、时间轴点击跳转与播放位置游标。
 - HTTP Range 断点下载、FFmpeg 转封装 MP4 导出、可配置的 64 KiB 块共享回放缓存与预读。
+- 通道分组（父子/排序）与可折叠预览通道树；按用户保存的服务端预览布局与浏览器离线缓存。
 
 ### 已交付范围
 
@@ -149,7 +149,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.3.0 已知限制
+## 0.4.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -158,6 +158,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 - macOS 安装包为 ad-hoc 签名；未配置 Developer ID 时 Gatekeeper 可能要求右键打开。
 - 回退通过连续向后跳转实现（浏览器无法反向解码 GOP）；快进使用服务端限速与播放器倍速。
 - MP4 导出为转封装（`-c copy`）；无法放入 MP4 的源会直接报错，不做转码。
+- 分组排序使用 API 的 `sort` 字段，界面暂不支持拖拽排序；布局仅对所属用户可见。
 - 审计日志与录像共用数据盘；独立审计路径为后续增强。
 
 ## 许可证
@@ -220,6 +221,7 @@ tests/             单元/集成/E2E 测试
 | M6 | ✅ 发布加固、中英文手册、`v0.1.0` |
 | 0.2.0 | ✅ 启动配置文件与端口、安装器端口页、回放倍速/快进快退 |
 | 0.3.0 | ✅ Range 断点下载、MP4 导出、共享回放缓存与预读 |
+| 0.4.0 | ✅ 通道分组/通道树、按用户保存的服务端预览布局 |
 
 ## 贡献与安全
 

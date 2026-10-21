@@ -4,6 +4,25 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-21
+
+### Added
+
+- Channel groups: CRUD API, parent/order fields, cycle protection, channel
+  assignment (`groupId`) and a group manager on the Channels page. The Live
+  preview rail renders channels as a collapsible group tree.
+- Server-side personal preview layouts: `GET/POST/PUT/DELETE /api/v1/layouts`
+  with per-user storage, one default layout, a 20-layout limit and a 64 KiB grid
+  limit. The Preview page loads and saves layouts through the API and keeps the
+  browser cache as an offline fallback.
+
+### Changed
+
+- Deleting a group moves its channels to ungrouped and reparents its child
+  groups to the deleted group's parent.
+- Layout changes are synced with a short debounce; switching accounts or
+  browsers picks up the server copy.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added

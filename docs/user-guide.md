@@ -108,6 +108,12 @@ Use **Reconnect** to retry a channel now instead of waiting for the exponential
 backoff. **Sync** copies selected channel fields and/or recording plans to other
 channels after showing a diff.
 
+Use **Groups** to organize channels into a tree. Create a group, optionally
+under a parent, and pick it in the channel form. Channels without a group appear
+under **Ungrouped**. Deleting a group moves its channels to ungrouped and
+reparents its child groups; the preview tree and channel list update
+immediately.
+
 ### Channel states
 
 `disabled → connecting → online → reconnecting → offline/error`
@@ -128,8 +134,9 @@ Open **Preview**. It is the second page after the dashboard.
 3. Double-click an online picture for fullscreen. An offline cell shows the
    channel name and an offline badge; double-click it to open channel management.
 4. Choose the main or sub stream for the whole layout.
-5. Name and save layouts. Layouts and cell assignments are stored in the browser,
-   so each client can keep its own set. Use the layout tabs to switch.
+5. Name and save layouts. Layouts are stored per user account on the server, so
+   they follow the account across browsers; the browser keeps a local cache for
+   offline use. Use the layout tabs to switch, and the **×** tab to delete.
 
 Every consumer shares one camera connection. Live clients have independent
 bounded queues: a slow client drops to the next keyframe or is disconnected and

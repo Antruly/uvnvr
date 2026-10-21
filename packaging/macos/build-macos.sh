@@ -2,7 +2,7 @@
 # Stage and package a macOS build. dylibbundler must be available.
 set -euo pipefail
 BUILD_DIR="build"
-VERSION="0.3.0"
+VERSION="0.4.0"
 ARCH="arm64"
 OUT="dist-packages"
 FFMPEG_BIN=""

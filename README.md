@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.3.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.4.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,18 +22,18 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.3.0 — playback and download hardening.** The recorder supports
+**0.4.0 — channel organization and personal layouts.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.3.0 adds resumable HTTP Range downloads, MP4 export through the bundled FFmpeg,
-and a shared LRU playback cache with next-segment read-ahead. It builds on 0.2.0's
-startup JSON configuration (ports, bind address, data directory, TLS), installer
-port selection, `/api/v1/system/config`, and 0.5×–8× playback with timeline seeking.
-Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of scope. Track
-the milestones in [`docs/development-plan.md`](docs/development-plan.md).
+0.4.0 adds channel groups with a collapsible Live preview tree and server-side
+personal preview layouts. It builds on 0.3.0's resumable Range downloads, MP4
+export and shared LRU playback cache, 0.2.0's startup JSON configuration and
+installer port selection, and the core NVR loop. Peer-to-peer/WebRTC, cloud access
+and advanced analytics remain out of scope. Track the milestones in
+[`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
 
@@ -61,6 +61,8 @@ output.
   and a playback position cursor.
 - Streaming Range downloads with resume, MP4 export (FFmpeg remux) and a shared
   64 KiB-block playback cache with configurable size and read-ahead.
+- Channel groups with parent/order and a collapsible preview tree; per-user
+  server-side preview layouts with a default layout and offline browser cache.
 
 ### Delivered scope
 
@@ -159,7 +161,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.3.0)
+## Known limitations (0.4.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -171,6 +173,8 @@ and `/ws` to `127.0.0.1:8080`).
   reversed GOP. Fast-forward uses server-paced playback plus the media element rate.
 - MP4 export is a remux (`-c copy`); sources that cannot be placed in MP4 are rejected
   with an error rather than transcoded.
+- Group order uses the API's numeric `sort` field; the UI does not yet reorder groups
+  by drag and drop. Layouts are private to each account.
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -235,6 +239,7 @@ tests/             unit/integration/e2e tests
 | M6 | ✅ Release hardening, bilingual manuals, `v0.1.0` |
 | 0.2.0 | ✅ Startup config file and ports, installer port page, playback speed/seek |
 | 0.3.0 | ✅ Range downloads, MP4 export, shared playback cache with read-ahead |
+| 0.4.0 | ✅ Channel groups/tree, per-user server-side preview layouts |
 
 ## Contributing and security
 

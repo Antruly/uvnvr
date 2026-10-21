@@ -30,6 +30,10 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/system/email/test` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
 | POST/PUT/DELETE | `/api/v1/channels[/{id}]` | channel.manage |
+| GET/POST | `/api/v1/channel-groups` | channel.view/manage |
+| PUT/DELETE | `/api/v1/channel-groups/{id}` | channel.manage |
+| GET/POST | `/api/v1/layouts` | preview.view |
+| PUT/DELETE | `/api/v1/layouts/{id}` | preview.view |
 | POST | `/api/v1/channels/discover` | channel.manage |
 | POST | `/api/v1/channels/onvif/probe` | channel.manage |
 | POST | `/api/v1/channels/{id}/reconnect` | channel.manage |
@@ -100,6 +104,36 @@ the segments in the range and remuxes them to a fast-start MP4 with the bundled
 FFmpeg. It returns `video/mp4` as an attachment. The range is limited to six
 hours and 4 GiB of input, and temporary files are removed after the response.
 `503 ffmpeg_unavailable` is returned when no FFmpeg executable is configured.
+
+## Channel groups
+
+`GET /api/v1/channel-groups` returns the flat group list with channel counts:
+
+```json
+[{ "id": 1, "name": "Building A", "parentId": 0, "sort": 0, "channels": 3 }]
+```
+
+`POST` accepts `{ "name": "...", "parentId": 0, "sort": 0 }`; `PUT /{id}`
+updates the name, parent or order. Cycles and self-parenting are rejected with
+400. Deleting a group moves its channels to ungrouped and reparents its child
+groups to its own parent. Channels accept `groupId` on create/update and return
+it in the channel JSON.
+
+## Preview layouts
+
+Layouts are stored per user and survive browser changes:
+
+```json
+{
+  "name": "Desk",
+  "grid": { "grid": "4", "cols": 2, "rows": 2, "cells": [1, null, 2, null] },
+  "isDefault": true
+}
+```
+
+`GET /api/v1/layouts` returns the current user's layouts, default first.
+`POST` creates (up to 20 per user, 64 KiB grid limit); `PUT /{id}` updates;
+`DELETE /{id}` removes. Exactly one layout per user is the default.
 
 ## Startup configuration
 
