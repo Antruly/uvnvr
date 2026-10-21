@@ -103,6 +103,7 @@ endforeach()
 add_executable(uvnvr
   src/main.cpp
   src/app.cpp
+  src/brand_http.cpp
   src/config.cpp
   src/exporter.cpp
   src/media.cpp

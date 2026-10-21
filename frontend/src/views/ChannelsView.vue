@@ -14,6 +14,7 @@ interface Channel {
   protocol: string
   host: string
   port: number
+  httpPort: number
   username: string
   hasPassword: boolean
   mainUrl: string
@@ -84,6 +85,7 @@ const modal = reactive({
   protocol: 'rtsp',
   host: '',
   port: 554,
+  httpPort: 80,
   username: '',
   password: '',
   mainUrl: '',
@@ -107,6 +109,18 @@ const scan = reactive({
 })
 const detecting = ref(false)
 
+interface DetectResult {
+  protocol: string
+  name: string
+  model: string
+  brand: string
+  mainUrl: string
+  subUrl: string
+  subEnabled: boolean
+  eventsEnabled: boolean
+  httpPort: number
+}
+
 function detectedProtocol(manufacturer: string) {
   const value = manufacturer.toLowerCase()
   if (value.includes('hikvision'))
@@ -126,6 +140,7 @@ function applyProbeResult(host: string, result: OnvifProbeResult) {
     protocol,
     host,
     port: protocol === 'onvif' ? 80 : 554,
+    httpPort: 80,
     mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
     subUrl: protocol === 'onvif' ? (subProfile?.streamUri ?? '') : '',
     subEnabled: protocol !== 'onvif' || Boolean(subProfile),
@@ -140,15 +155,30 @@ async function detectFromModal() {
   detecting.value = true
   error.value = ''
   try {
-    const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+    const preferred = modal.protocol === 'hikvision' || modal.protocol === 'dahua'
+      ? modal.protocol
+      : ''
+    const result = await api<DetectResult>('/api/v1/channels/detect', {
       method: 'POST',
       body: JSON.stringify({
-        xaddr: `http://${modal.host.trim()}/onvif/device_service`,
+        host: modal.host.trim(),
+        httpPort: Number(modal.httpPort) || 80,
         username: modal.username,
         password: modal.password,
+        brand: preferred,
       }),
     })
-    applyProbeResult(modal.host.trim(), result)
+    Object.assign(modal, {
+      protocol: result.protocol,
+      name: result.name || modal.name || result.model,
+      brand: result.brand,
+      port: result.protocol === 'onvif' ? 80 : 554,
+      httpPort: result.httpPort ?? (Number(modal.httpPort) || 80),
+      mainUrl: result.mainUrl,
+      subUrl: result.subUrl,
+      subEnabled: result.subEnabled,
+      eventsEnabled: result.eventsEnabled,
+    })
     flash(t('channels.detected'))
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -177,6 +207,7 @@ async function quickAdd(device: OnvifDevice) {
       protocol,
       host: device.ip,
       port: protocol === 'onvif' ? 80 : 554,
+      httpPort: 80,
       username: scan.username,
       password: scan.password,
       mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
@@ -286,6 +317,7 @@ function openCreate() {
     protocol: 'rtsp',
     host: '',
     port: 554,
+    httpPort: 80,
     username: '',
     password: '',
     mainUrl: '',
@@ -309,6 +341,7 @@ function openEdit(channel: Channel) {
     protocol: channel.protocol,
     host: channel.host,
     port: channel.port,
+    httpPort: channel.httpPort ?? 80,
     username: channel.username,
     password: '',
     mainUrl: channel.mainUrl,
@@ -332,6 +365,7 @@ async function save() {
       protocol: modal.protocol,
       host: modal.host,
       port: Number(modal.port) || 554,
+      httpPort: Number(modal.httpPort) || 80,
       username: modal.username,
       mainUrl: modal.mainUrl,
       subUrl: modal.subUrl,
@@ -694,6 +728,10 @@ onMounted(load)
           <label class="field">
             <span>{{ t('channels.port') }}</span>
             <input v-model.number="modal.port" class="input" type="number" min="1" max="65535" />
+          </label>
+          <label class="field">
+            <span>{{ t('channels.httpPort') }}</span>
+            <input v-model.number="modal.httpPort" class="input" type="number" min="1" max="65535" />
           </label>
           <label class="field">
             <span>{{ t('channels.username') }}</span>

@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "brand_http.h"
 #include "exporter.h"
 #include "onvif.h"
 #include "platform.h"
@@ -350,6 +351,12 @@ void FillChannelRow(const uvcpp::uvcpp_db_table& table, size_t row, ChannelRow* 
 bool ChannelEventsEnabled(const ChannelRow& channel) {
   const json media = json::parse(channel.media_json, nullptr, false);
   return media.is_object() && media.value("events", false);
+}
+
+int ChannelHttpPort(const ChannelRow& channel) {
+  const json media = json::parse(channel.media_json, nullptr, false);
+  const int port = media.is_object() ? media.value("httpPort", 80) : 80;
+  return port >= 1 && port <= 65535 ? port : 80;
 }
 
 std::vector<std::string> ParsePermissions(const std::string& text) {
@@ -3542,6 +3549,7 @@ json App::ChannelJson(const ChannelRow& channel) const {
       {"brand", channel.brand},
       {"media", media},
       {"eventsEnabled", ChannelEventsEnabled(channel)},
+      {"httpPort", ChannelHttpPort(channel)},
       {"watermark", watermark},
       {"lastStatus", channel.last_status},
       {"lastError", channel.last_error},
@@ -3613,7 +3621,7 @@ void App::SyncMediaChannel(int64_t id) {
       OnvifEventConfig config;
       config.channel_id = id;
       config.host = channel.host;
-      config.port = channel.port > 0 ? channel.port : 80;
+      config.port = ChannelHttpPort(channel);
       config.username = channel.username;
       if (!channel.password_enc.empty()) {
         std::string decrypt_error;
@@ -3775,10 +3783,37 @@ json App::SyncCameraTimes(int64_t epoch_ms) {
         continue;
       }
     }
-    const int port = channel.protocol == "onvif" && channel.port > 0 ? channel.port : 80;
+    const int port = ChannelHttpPort(channel);
+    std::string brand = channel.brand;
+    for (char& c : brand)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string preferred = brand.find("hikvision") != std::string::npos
+                                      ? "hikvision"
+                                      : (brand.find("dahua") != std::string::npos ? "dahua" : "");
     std::string camera_error;
-    const bool ok =
-        SetOnvifTime(channel.host, port, channel.username, password, epoch_ms, &camera_error);
+    bool ok = false;
+    if (channel.protocol == "onvif") {
+      ok = SetOnvifTime(channel.host, port, channel.username, password, epoch_ms, &camera_error);
+      if (!ok && !preferred.empty()) {
+        std::string brand_error;
+        ok = SetBrandTime(preferred, channel.host, port, channel.username, password, epoch_ms,
+                          &brand_error);
+        if (!ok)
+          camera_error += "; " + brand_error;
+      }
+    } else if (channel.protocol == "hikvision" || channel.protocol == "dahua") {
+      ok = SetBrandTime(channel.protocol, channel.host, port, channel.username, password, epoch_ms,
+                        &camera_error);
+      if (!ok) {
+        std::string onvif_error;
+        ok = SetOnvifTime(channel.host, port, channel.username, password, epoch_ms, &onvif_error);
+        if (!ok)
+          camera_error += "; " + onvif_error;
+      }
+    } else {
+      ++skipped;
+      continue;
+    }
     if (ok)
       ++synced;
     else
@@ -3941,6 +3976,8 @@ void App::RegisterChannelRoutes() {
                                                                              : json::object();
             if (body.contains("eventsEnabled"))
               media["events"] = JsonBool(body, "eventsEnabled", false);
+            if (body.contains("httpPort"))
+              media["httpPort"] = JsonInt(body, "httpPort", 80);
             const json watermark = body.contains("watermark") && body["watermark"].is_object()
                                        ? body["watermark"]
                                        : json::object();
@@ -4111,11 +4148,14 @@ void App::RegisterChannelRoutes() {
                   std::string media_json = body.contains("media") && body["media"].is_object()
                                                ? body["media"].dump()
                                                : existing.media_json;
-                  if (body.contains("eventsEnabled")) {
+                  if (body.contains("eventsEnabled") || body.contains("httpPort")) {
                     json media = json::parse(media_json, nullptr, false);
                     if (!media.is_object())
                       media = json::object();
-                    media["events"] = JsonBool(body, "eventsEnabled", false);
+                    if (body.contains("eventsEnabled"))
+                      media["events"] = JsonBool(body, "eventsEnabled", false);
+                    if (body.contains("httpPort"))
+                      media["httpPort"] = JsonInt(body, "httpPort", 80);
                     media_json = media.dump();
                   }
                   const std::string watermark_json =
@@ -5030,6 +5070,101 @@ void App::RegisterOnvifRoutes() {
                                                         {"firmware", info.firmware},
                                                         {"serial", info.serial}}},
                                         {"profiles", profiles}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
+                },
+                "channel.manage"));
+
+  web_.post("/api/v1/channels/detect",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  const std::string host = JsonString(body, "host");
+                  const int port = static_cast<int>(JsonInt(body, "httpPort", 80));
+                  const std::string username = JsonString(body, "username");
+                  const std::string password = JsonString(body, "password");
+                  const std::string preferred = JsonString(body, "brand");
+                  if (host.empty() || port < 1 || port > 65535) {
+                    SendError(resp, 400, "invalid_host", "host and a valid httpPort are required");
+                    next();
+                    return;
+                  }
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [host, port, username, password, preferred, op] {
+                        std::string onvif_error;
+                        std::string brand_error;
+                        const std::string preferred_lower = [&preferred] {
+                          std::string value = preferred;
+                          for (char& c : value)
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                          return value;
+                        }();
+
+                        const auto try_onvif = [&]() {
+                          OnvifInfo info;
+                          const std::string xaddr = "http://" + host + ":" + std::to_string(port) +
+                                                    "/onvif/device_service";
+                          if (!ProbeOnvif(xaddr, username, password, &info, &onvif_error) ||
+                              info.profiles.empty()) {
+                            if (onvif_error.empty())
+                              onvif_error = "the camera did not return usable ONVIF profiles";
+                            return false;
+                          }
+                          const OnvifProfile& first = info.profiles.front();
+                          const bool has_sub = info.profiles.size() > 1;
+                          const std::string name = !first.name.empty()
+                                                       ? first.name
+                                                       : (info.model.empty() ? host : info.model);
+                          op->data = json{{"protocol", "onvif"},
+                                          {"name", name},
+                                          {"model", info.model},
+                                          {"brand", info.manufacturer},
+                                          {"mainUrl", first.stream_uri},
+                                          {"subUrl", has_sub ? info.profiles[1].stream_uri : ""},
+                                          {"subEnabled", has_sub},
+                                          {"eventsEnabled", true},
+                                          {"httpPort", port}};
+                          return true;
+                        };
+
+                        const auto try_brand = [&]() {
+                          BrandDeviceInfo info;
+                          if (!ProbeBrandHttp(host, port, username, password, preferred_lower,
+                                              &info, &brand_error))
+                            return false;
+                          op->data = json{{"protocol", info.protocol},
+                                          {"name", info.name.empty() ? info.model : info.name},
+                                          {"model", info.model},
+                                          {"brand", info.brand},
+                                          {"mainUrl", ""},
+                                          {"subUrl", ""},
+                                          {"subEnabled", true},
+                                          {"eventsEnabled", true},
+                                          {"httpPort", port}};
+                          return true;
+                        };
+
+                        const bool brand_first =
+                            preferred_lower == "hikvision" || preferred_lower == "dahua";
+                        if ((brand_first && (try_brand() || try_onvif())) ||
+                            (!brand_first && (try_onvif() || try_brand())))
+                          return;
+
+                        op->ok = false;
+                        op->status = 404;
+                        op->code = "detect_failed";
+                        op->message =
+                            "camera detection failed: " + onvif_error + "; " + brand_error;
                       },
                       [op, &resp, next] {
                         SendOp(resp, *op);
