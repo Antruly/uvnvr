@@ -357,9 +357,15 @@ def main() -> int:
 
         # The snapshot path exercises the capture command (and the software
         # fallback when hardware decoding is unavailable).
-        status, image = call("GET", f"/api/v1/channels/{channel_id}/snapshot", raw=True)
+        status, image = call(
+            "GET",
+            f"/api/v1/channels/{channel_id}/snapshot?width=160&height=90&quality=5",
+            raw=True,
+        )
         assert status == 200, (status, image[:200])
         assert image.startswith(b"\xff\xd8"), image[:16]
+        status, invalid = call("GET", f"/api/v1/channels/{channel_id}/snapshot?width=8", raw=True)
+        assert status == 400, (status, invalid[:200])
         time.sleep(6)
 
         MockOnvif.send_motion = True

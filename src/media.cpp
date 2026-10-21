@@ -1043,11 +1043,22 @@ void MediaService::Remove(int64_t channel_id) {
     channel->sub->Stop();
 }
 
-bool MediaService::CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error) {
+bool MediaService::CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error,
+                               int width, int height, int quality) {
+  const int scale_width = width > 0 ? width : -2;
+  const int scale_height = height > 0 ? height : -2;
   std::vector<std::string> args = {
       "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
-      "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1",
-      "-q:v",         "2",         "-f",    "mjpeg",    "pipe:1"};
+      "-timeout",     "10000000",  "-i",    url,        "-frames:v",       "1"};
+  if (width > 0 || height > 0) {
+    args.push_back("-vf");
+    args.push_back("scale=" + std::to_string(scale_width) + ":" + std::to_string(scale_height));
+  }
+  args.push_back("-q:v");
+  args.push_back(std::to_string(quality));
+  args.push_back("-f");
+  args.push_back("mjpeg");
+  args.push_back("pipe:1");
   const auto run = [&](const std::vector<std::string>& attempt) {
 #ifdef _WIN32
     return CaptureWindows(impl_->ffmpeg_path, attempt, jpeg, error);

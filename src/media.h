@@ -62,7 +62,8 @@ public:
                             std::string* error);
   void RemoveRawSubscriber(int64_t channel_id, const std::string& stream, uint64_t id);
 
-  bool CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error);
+  bool CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error, int width = 0,
+                   int height = 0, int quality = 2);
   bool CaptureGray(const std::string& url, int width, int height, std::vector<uint8_t>* frame,
                    std::string* error);
 

@@ -3,6 +3,7 @@
 #include "brand_http.h"
 #include "exporter.h"
 #include "onvif.h"
+#include "openapi.h"
 #include "platform.h"
 
 #include <algorithm>
@@ -1989,6 +1990,44 @@ void App::RegisterPublicRoutes() {
                   {"status", "ok"}});
     next();
   });
+
+  web_.get("/api/v1/openapi.json",
+           Protected(
+               [](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                  uvcpp::uvcpp_web_next next) {
+                 resp.set_header("Content-Type", "application/vnd.oai.openapi+json; charset=utf-8");
+                 resp.set_header("Cache-Control", "no-store");
+                 resp.status(200).body(BuildOpenApi(UVNVR_VERSION),
+                                       "application/vnd.oai.openapi+json; charset=utf-8");
+                 resp.end();
+                 next();
+               },
+               "api.access"));
+
+  web_.get("/api/docs",
+           Protected(
+               [](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                  uvcpp::uvcpp_web_next next) {
+                 static const char kPage[] =
+                     "<!doctype html>\n"
+                     "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+                     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                     "<title>UvNVR API</title>"
+                     "<link rel=\"stylesheet\" href=\"/api-docs/swagger-ui.css\"></head>"
+                     "<body><div id=\"swagger-ui\"></div>"
+                     "<script src=\"/api-docs/swagger-ui-bundle.js\"></script>"
+                     "<script src=\"/api-docs/swagger-ui-standalone-preset.js\"></script>"
+                     "<script>window.onload=function(){window.ui=SwaggerUIBundle({"
+                     "url:'/api/openapi.json',dom_id:'#swagger-ui',deepLinking:true,"
+                     "presets:[SwaggerUIBundle.presets.apis,SwaggerUIStandalonePreset],"
+                     "layout:'StandaloneLayout'});};</script></body></html>";
+                 resp.set_header("Content-Type", "text/html; charset=utf-8");
+                 resp.set_header("Cache-Control", "no-store");
+                 resp.status(200).body(kPage, "text/html; charset=utf-8");
+                 resp.end();
+                 next();
+               },
+               "api.access"));
 
   web_.get("/api/v1/setup/status",
            [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
@@ -4831,11 +4870,28 @@ void App::RegisterChannelRoutes() {
                    next();
                    return;
                  }
+                 int64_t width = 0;
+                 int64_t height = 0;
+                 int64_t quality = 2;
+                 if (const std::string* value = req.query("width"))
+                   ParseIntParam(value, &width);
+                 if (const std::string* value = req.query("height"))
+                   ParseIntParam(value, &height);
+                 if (const std::string* value = req.query("quality"))
+                   ParseIntParam(value, &quality);
+                 if (width < 0 || width > 4096 || height < 0 || height > 4096 ||
+                     (width > 0 && width < 16) || (height > 0 && height < 16) || quality < 1 ||
+                     quality > 31) {
+                   SendError(resp, 400, "invalid_snapshot_options",
+                             "width/height must be 0 or 16-4096 and quality must be 1-31");
+                   next();
+                   return;
+                 }
                  auto payload = std::make_shared<std::string>();
                  auto status = std::make_shared<int>(200);
                  auto message = std::make_shared<std::string>();
                  RunWork(
-                     [this, channel_id, payload, status, message] {
+                     [this, channel_id, width, height, quality, payload, status, message] {
                        ChannelRow channel;
                        std::string error;
                        if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
@@ -4850,7 +4906,9 @@ void App::RegisterChannelRoutes() {
                          *message = error;
                          return;
                        }
-                       if (!media_ || !media_->CaptureJpeg(url, payload.get(), &error)) {
+                       if (!media_ || !media_->CaptureJpeg(
+                                          url, payload.get(), &error, static_cast<int>(width),
+                                          static_cast<int>(height), static_cast<int>(quality))) {
                          *status = 502;
                          *message = error.empty() ? "camera snapshot failed" : error;
                        }

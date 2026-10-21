@@ -11,6 +11,7 @@ CMakeFiles/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/public/api-docs/
 *.tsbuildinfo
 
 # Runtime data

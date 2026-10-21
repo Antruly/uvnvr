@@ -25,6 +25,7 @@ ship the exact license texts and source offer for the versions it bundles.
 | [@vueuse/core](https://vueuse.org/) | MIT | Frontend utilities |
 | [Vite](https://vite.dev/) | MIT | Frontend build |
 | [TypeScript](https://www.typescriptlang.org/) | Apache-2.0 | Frontend language |
+| [Swagger UI](https://github.com/swagger-api/swagger-ui) (swagger-ui-dist) | Apache-2.0 | Self-hosted API reference at `/api/docs` |
 
 The authoritative list for a given release is the SBOM attached to that release.
 

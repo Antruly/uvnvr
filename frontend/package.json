@@ -1,14 +1,14 @@
 {
   "name": "uvnvr-frontend",
   "private": true,
-  "version": "0.10.0",
+  "version": "0.11.0",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || ^24.11.0 || >=26.0.0"
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "node scripts/copy-swagger.mjs && vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit"
   },
@@ -25,6 +25,7 @@
   "devDependencies": {
     "@types/node": "24.19.2",
     "@vitejs/plugin-vue": "6.0.10",
+    "swagger-ui-dist": "^5.34.0",
     "typescript": "5.9.3",
     "vite": "8.3.4",
     "vue-tsc": "3.3.13"

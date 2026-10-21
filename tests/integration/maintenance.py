@@ -148,6 +148,15 @@ def main() -> int:
         status, health = server.call("GET", "/healthz")
         assert status == 200 and health["maintenance"] is True, health
 
+        status, spec = server.call("GET", "/api/v1/openapi.json")
+        assert status == 200 and spec["openapi"] == "3.1.0", (status, spec)
+        assert len(spec["paths"]) >= 50, len(spec["paths"])
+        status, page, headers = server.call("GET", "/api/docs", raw=True)
+        assert status == 200 and b"swagger-ui-bundle.js" in page, page[:120]
+        assert "text/html" in headers.get("Content-Type", ""), headers
+        status, asset, _ = server.call("GET", "/api-docs/swagger-ui.css", raw=True)
+        assert status == 200 and len(asset) > 1000, (status, len(asset))
+
         status, settings = server.call("GET", "/api/v1/settings")
         assert status == 200 and settings["motion"]["sensitivity"] == 50, settings
         status, saved = server.call(
