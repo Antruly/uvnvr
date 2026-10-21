@@ -85,6 +85,12 @@ onBeforeUnmount(() => {
       <h1>{{ t('app.name') }}</h1>
       <p class="auth-tagline">{{ t('app.tagline') }} — {{ t('app.subtitle') }}</p>
       <p class="auth-copy">{{ t('auth.loginSubtitle') }}</p>
+      <ul class="auth-features">
+        <li><AppIcon name="camera" :size="16" />{{ t('auth.featureOnvif') }}</li>
+        <li><AppIcon name="playback" :size="16" />{{ t('auth.featureRecording') }}</li>
+        <li><AppIcon name="storage" :size="16" />{{ t('auth.featureLive') }}</li>
+        <li><AppIcon name="shield" :size="16" />{{ t('auth.featureApi') }}</li>
+      </ul>
       <div class="auth-meta">
         <span>{{ t('dashboard.serial') }}</span>
         <strong>{{ auth.serial || '—' }}</strong>

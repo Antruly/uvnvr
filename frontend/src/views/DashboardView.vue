@@ -133,12 +133,32 @@ onBeforeUnmount(() => {
           <span>{{ t('dashboard.uptime') }} {{ formatDuration(summary.uptimeSeconds) }}</span>
         </div>
       </div>
-      <div class="dash-actions">
-        <span class="dash-updated">{{ t('dashboard.updated') }} {{ updatedText }}</span>
-        <button class="button" @click="load">
-          <AppIcon name="refresh" :size="16" />
-          {{ t('common.refresh') }}
-        </button>
+      <div class="dash-side">
+        <div class="dash-status-grid">
+          <div>
+            <span>{{ t('dashboard.channels') }}</span>
+            <strong>{{ summary.counts.channels }}</strong>
+          </div>
+          <div>
+            <span>{{ t('dashboard.recordings') }}</span>
+            <strong>{{ summary.counts.recordings }}</strong>
+          </div>
+          <div>
+            <span>{{ t('dashboard.users') }}</span>
+            <strong>{{ summary.counts.users }}</strong>
+          </div>
+          <div>
+            <span>{{ t('dashboard.storageUsage') }}</span>
+            <strong>{{ Math.round(summary.disk.usagePercent) }}%</strong>
+          </div>
+        </div>
+        <div class="dash-actions">
+          <span class="dash-updated">{{ t('dashboard.updated') }} {{ updatedText }}</span>
+          <button class="button" @click="load">
+            <AppIcon name="refresh" :size="16" />
+            {{ t('common.refresh') }}
+          </button>
+        </div>
       </div>
     </section>
 

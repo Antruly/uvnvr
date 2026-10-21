@@ -32,8 +32,6 @@ const primaryNav = [
   { key: 'alerts', to: '/alerts', icon: 'bell', permission: 'alert.view' },
 ]
 
-const plannedNav: { key: string; icon: string }[] = []
-
 const adminNav = [
   { key: 'users', to: '/users', icon: 'users', permission: 'user.view' },
   { key: 'logs', to: '/audit', icon: 'logs', permission: 'log.view' },
@@ -235,15 +233,6 @@ onBeforeUnmount(() => {
           <span class="nav-label">{{ t(`nav.${item.key}`) }}</span>
         </RouterLink>
 
-        <div class="nav-section">
-          <span class="nav-section-label">{{ t('app.status') }}</span>
-        </div>
-
-        <div v-for="item in plannedNav" :key="item.key" class="nav-item disabled">
-          <AppIcon :name="item.icon" />
-          <span class="nav-label">{{ t(`nav.${item.key}`) }}</span>
-          <span class="nav-soon">{{ t('nav.soon') }}</span>
-        </div>
 
         <div v-if="adminNav.some((entry) => canSee(entry.permission))" class="nav-section">
           <span class="nav-section-label">{{ t('nav.administration') }}</span>

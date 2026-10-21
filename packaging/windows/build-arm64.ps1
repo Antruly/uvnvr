@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$Version = if ($env:UVNVR_VERSION) { $env:UVNVR_VERSION } else { '0.16.0' }
+$Version = if ($env:UVNVR_VERSION) { $env:UVNVR_VERSION } else { '0.17.0' }
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $Uvcpp = "$env:RUNNER_TEMP\uvcpp\libuvcpp-1.8.1-msvc-arm64"
 $Ffmpeg = "$env:RUNNER_TEMP\ffmpeg"
@@ -19,8 +19,6 @@ $vcpkgBin = "$Root\build\vcpkg_installed\arm64-windows\bin"
 if (Test-Path $vcpkgBin) { Copy-Item "$vcpkgBin\*.dll" "$Out\bin\" -Force }
 Copy-Item "$Root\LICENSE", "$Root\THIRD_PARTY_NOTICES.md" "$Out\"
 Compress-Archive -Path "$Out\*" -DestinationPath "$Root\dist-packages\uvnvr-$Version-windows-arm64.zip" -Force
-$env:Path += ';C:\Program Files (x86)\NSIS'
-$makensis = Get-Command makensis -ErrorAction SilentlyContinue
-if ($makensis) {
-  & $makensis.Source -V2 "-DVERSION=$Version" "-DARCH=arm64" "-DOUTDIR=$Root\dist-packages" "-DSOURCE=$Out" "-DROOT=$Root" "$Root\packaging\windows\uvnvr.nsi"
-}
+$iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" | Select-Object -First 1
+if (-not $iscc) { throw "ISCC.exe not found; install Inno Setup 6" }
+& $iscc.FullName "/DMyAppVersion=$Version" "/DMyArch=arm64" "/DSourceDir=$Out" "/DOutputDir=$Root\dist-packages" "$Root\packaging\windows\uvnvr.iss"

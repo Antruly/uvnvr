@@ -108,6 +108,12 @@ const scan = reactive({
   result: null as OnvifProbeResult | null,
 })
 const detecting = ref(false)
+const scanSelection = ref<Set<string>>(new Set())
+const scanStatus = reactive<Record<string, string>>({})
+const scanErrors = reactive<Record<string, string>>({})
+const scanError = ref('')
+const scanNotice = ref('')
+const scanAdding = ref(false)
 const encoder = reactive({
   token: '',
   encoding: 'H264',
@@ -365,9 +371,15 @@ async function detectFromModal() {
   }
 }
 
-async function quickAdd(device: OnvifDevice) {
+async function addDevice(device: OnvifDevice): Promise<boolean> {
+  if (scanStatus[device.xaddr] === 'added' || scanStatus[device.xaddr] === 'adding') return false
+  if (channels.value.some((channel) => channel.host === device.ip)) {
+    scanStatus[device.xaddr] = 'failed'
+    scanErrors[device.xaddr] = t('channels.importDuplicate')
+    return false
+  }
+  scanStatus[device.xaddr] = 'adding'
   scan.probing = device.xaddr
-  error.value = ''
   try {
     const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
       method: 'POST',
@@ -397,12 +409,73 @@ async function quickAdd(device: OnvifDevice) {
       watermark: { text: '', position: 'bottom-right' },
     }
     await api('/api/v1/channels', { method: 'POST', body: JSON.stringify(payload) })
-    flash(t('channels.created'))
-    await load()
+    scanStatus[device.xaddr] = 'added'
+    delete scanErrors[device.xaddr]
+    scanSelection.value = new Set([...scanSelection.value].filter((key) => key !== device.xaddr))
+    return true
   } catch (caught) {
-    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+    scanStatus[device.xaddr] = 'failed'
+    scanErrors[device.xaddr] =
+      caught instanceof ApiError ? caught.message : t('common.error')
+    return false
   } finally {
     scan.probing = ''
+  }
+}
+
+async function quickAdd(device: OnvifDevice) {
+  scanError.value = ''
+  scanNotice.value = ''
+  if (await addDevice(device)) {
+    flash(t('channels.created'))
+    await load()
+  } else if (scanErrors[device.xaddr]) {
+    scanError.value = scanErrors[device.xaddr]
+  }
+}
+
+function toggleDevice(xaddr: string) {
+  const next = new Set(scanSelection.value)
+  if (next.has(xaddr)) next.delete(xaddr)
+  else next.add(xaddr)
+  scanSelection.value = next
+}
+
+function allDevicesSelected() {
+  return scan.devices.length > 0 && scan.devices.every((device) => scanSelection.value.has(device.xaddr))
+}
+
+function toggleAllDevices() {
+  scanSelection.value = allDevicesSelected()
+    ? new Set()
+    : new Set(scan.devices.map((device) => device.xaddr))
+}
+
+async function addSelected() {
+  if (scanAdding.value) return
+  const devices = scan.devices.filter(
+    (device) => scanSelection.value.has(device.xaddr) && scanStatus[device.xaddr] !== 'added',
+  )
+  if (devices.length === 0) return
+  scanAdding.value = true
+  scanError.value = ''
+  scanNotice.value = ''
+  let added = 0
+  let failed = 0
+  for (const device of devices) {
+    if (await addDevice(device)) added += 1
+    else failed += 1
+  }
+  await load()
+  scanAdding.value = false
+  if (added > 0) scanNotice.value = t('channels.addSelectedDone', { count: added })
+  if (failed > 0) {
+    const detail = devices
+      .map((device) => (scanErrors[device.xaddr] ? `${device.ip}: ${scanErrors[device.xaddr]}` : ''))
+      .filter(Boolean)
+      .slice(0, 4)
+      .join('; ')
+    scanError.value = t('channels.addSelectedFailed', { count: failed }) + (detail ? ` ${detail}` : '')
   }
 }
 
@@ -606,6 +679,12 @@ function openScan() {
     probing: '',
     result: null,
   })
+  scanSelection.value = new Set()
+  scanStatus
+  Object.keys(scanStatus).forEach((key) => delete scanStatus[key])
+  Object.keys(scanErrors).forEach((key) => delete scanErrors[key])
+  scanError.value = ''
+  scanNotice.value = ''
 }
 
 async function discover() {
@@ -617,6 +696,11 @@ async function discover() {
       body: '{}',
     })
     scan.devices = result.devices
+    scanSelection.value = new Set(result.devices.map((device) => device.xaddr))
+    Object.keys(scanStatus).forEach((key) => delete scanStatus[key])
+    Object.keys(scanErrors).forEach((key) => delete scanErrors[key])
+    scanError.value = ''
+    scanNotice.value = ''
     if (result.devices.length === 0) {
       error.value = t('channels.noDevices')
     }
@@ -650,6 +734,7 @@ async function probe(device: OnvifDevice) {
         watermarkPosition: 'bottom-right',
       })
       applyProbeResult(device.ip, scan.result)
+      scan.open = false
     }
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -1074,10 +1159,33 @@ onMounted(load)
             <AppIcon name="search" :size="16" />
             {{ scan.scanning ? t('channels.scanning') : t('channels.startScan') }}
           </button>
+          <button
+            v-if="scan.devices.length > 0"
+            class="button primary"
+            :disabled="scanAdding || scanSelection.size === 0"
+            @click="addSelected"
+          >
+            <AppIcon name="plus" :size="16" />
+            {{
+              scanAdding
+                ? t('channels.adding')
+                : t('channels.addSelected', { count: scanSelection.size })
+            }}
+          </button>
         </div>
+        <p v-if="scanNotice" class="notice">{{ scanNotice }}</p>
+        <p v-if="scanError" class="form-error">{{ scanError }}</p>
         <table class="data-table">
           <thead>
             <tr>
+              <th class="check-cell">
+                <input
+                  type="checkbox"
+                  :checked="allDevicesSelected()"
+                  :aria-label="t('channels.selectAll')"
+                  @change="toggleAllDevices"
+                />
+              </th>
               <th>{{ t('channels.ip') }}</th>
               <th>XAddr</th>
               <th>{{ t('common.actions') }}</th>
@@ -1085,19 +1193,40 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="device in scan.devices" :key="device.xaddr">
+              <td class="check-cell">
+                <input
+                  type="checkbox"
+                  :checked="scanSelection.has(device.xaddr)"
+                  :disabled="scanStatus[device.xaddr] === 'added'"
+                  @change="toggleDevice(device.xaddr)"
+                />
+              </td>
               <td>{{ device.ip }}</td>
               <td class="mono">{{ device.xaddr }}</td>
               <td>
-                <button class="button small" :disabled="scan.probing === device.xaddr" @click="probe(device)">
-                  {{ scan.probing === device.xaddr ? t('common.loading') : t('channels.probe') }}
-                </button>
-                <button class="button small primary" :disabled="scan.probing === device.xaddr" @click="quickAdd(device)">
-                  {{ t('channels.addNow') }}
-                </button>
+                <div class="scan-actions">
+                  <button class="button small" :disabled="scan.probing === device.xaddr || scanStatus[device.xaddr] === 'added'" @click="probe(device)">
+                    {{ scan.probing === device.xaddr ? t('common.loading') : t('channels.probe') }}
+                  </button>
+                  <button
+                    class="button small primary"
+                    :disabled="scan.probing === device.xaddr || scanAdding || scanStatus[device.xaddr] === 'added'"
+                    @click="quickAdd(device)"
+                  >
+                    {{
+                      scanStatus[device.xaddr] === 'added'
+                        ? t('channels.added')
+                        : scan.probing === device.xaddr
+                          ? t('channels.adding')
+                          : t('channels.addNow')
+                    }}
+                  </button>
+                </div>
+                <small v-if="scanErrors[device.xaddr]" class="block error-text">{{ scanErrors[device.xaddr] }}</small>
               </td>
             </tr>
             <tr v-if="scan.devices.length === 0">
-              <td colspan="3" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
+              <td colspan="4" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
             </tr>
           </tbody>
         </table>
