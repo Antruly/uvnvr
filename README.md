@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.14.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.15.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,25 +22,22 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.14.0 — camera encoder control.** The recorder supports
+**0.15.0 — brand encoder control.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.14.0 adds per-channel ONVIF encoder configuration: read and apply H.264/H.265,
-resolution, frame rate, bitrate and quality for the main stream from the channel
-editor. It builds on 0.13.0's RTSP audio, batched recording writes, disk/service
-alerts and storage guards, 0.12.0's RTSP Digest and live event push, 0.11.0's
-OpenAPI/Swagger UI, H.264/H.265 RTP output and snapshot sizing, 0.10.0's
-maintenance operations, motion settings, audit export, Windows capture and GPU
-fallback, 0.9.0's event-triggered clips, 0.8.0's CSV bulk import and live
-recording status, 0.7.0's Hikvision/Dahua HTTP fallback, per-channel HTTP port,
-x64 MSI and codec-boundary continuation, 0.6.0's recording fixes and operator UI,
-0.5.0's ONVIF events, 0.4.0's channel groups and layouts, 0.3.0's
-downloads/export/cache, 0.2.0's startup configuration, and the core NVR loop.
-Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of scope.
-Track the milestones in
+0.15.0 extends encoder configuration to Hikvision ISAPI and Dahua CGI channels:
+the channel editor can read and apply codec, resolution, frame rate and bitrate
+for all three supported protocols. It builds on 0.14.0's ONVIF encoder control,
+0.13.0's RTSP audio, batched writes, disk/service alerts and storage guards,
+0.12.0's RTSP Digest and live event push, 0.11.0's OpenAPI/Swagger UI and
+H.264/H.265 RTP output, 0.10.0's maintenance operations, motion settings, audit
+export, Windows capture and GPU fallback, 0.9.0's event-triggered clips, 0.8.0's
+CSV bulk import and live recording status, 0.7.0's Hikvision/Dahua HTTP fallback
+and x64 MSI, and the earlier core NVR milestones. Peer-to-peer/WebRTC, cloud
+access and advanced analytics remain out of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -103,7 +100,7 @@ output.
   and RTCP; batched recording writes (`recording.batch_mb`/`batch_ms`); disk and
   service error alerts; storage directory browsing and root/unwritable-path
   rejection.
-- ONVIF camera encoder control (`GET/PUT /api/v1/channels/{id}/encoder`) for encoding, resolution, frame rate, bitrate and quality, with read/apply actions in the channel editor.
+- Camera encoder control (`GET/PUT /api/v1/channels/{id}/encoder`) for ONVIF, Hikvision ISAPI and Dahua CGI channels: encoding, resolution, frame rate, bitrate and (ONVIF) quality, with read/apply actions in the channel editor.
 
 ### Delivered scope
 
@@ -202,7 +199,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.14.0)
+## Known limitations (0.15.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -211,7 +208,7 @@ and `/ws` to `127.0.0.1:8080`).
   as a second track with RTCP sender reports; other audio codecs are not
   forwarded. `DESCRIBE` waits up to two seconds for the stream's parameter sets
   and returns 503 while the channel is offline.
-- Encoder control is ONVIF-only; Hikvision ISAPI and Dahua CGI encoder setters are not implemented yet.
+- Brand encoder control covers main-stream codec/resolution/frame rate/bitrate; quality is not exposed and sub-stream encoder settings are not changed.
 - Recording writes are batched in user space; the planned io_uring/ring-buffer
   writer is not implemented, and the writer thread still uses buffered file I/O.
 - RTSP Digest uses MD5/`qop=auth` as required by RFC 7616; stronger digests are
@@ -324,6 +321,7 @@ tests/             unit/integration/e2e tests
 | 0.12.0 | ✅ RTSP Digest auth, live events WebSocket, alerts navigation |
 | 0.13.0 | ✅ RTSP audio (AAC/G.711), batched recording writes, disk/service alerts, storage browser |
 | 0.14.0 | ✅ ONVIF camera encoder read/apply, per-channel media profile UI |
+| 0.15.0 | ✅ Hikvision ISAPI and Dahua CGI encoder read/apply |
 
 ## Contributing and security
 

@@ -4,6 +4,28 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] - 2026-10-22
+
+### Added
+
+- **Hikvision ISAPI encoder control.** `GET/PUT /api/v1/channels/{id}/encoder`
+  now reads and updates `/ISAPI/Streaming/channels/101`, including codec
+  (`H.264`/`H.265`), resolution, frame rate (stored by ISAPI in hundredths) and
+  `vbrUpperCap`/`videoBitrate`.
+- **Dahua CGI encoder control.** The same endpoint reads `Encode[0].MainFormat[0]`
+  through `configManager.cgi?action=getConfig&name=Encode` and applies
+  `Compression`, `Width`, `Height`, `FPS` and `BitRate` through `setConfig`.
+- The encoder endpoint selects ONVIF, Hikvision or Dahua from the channel
+  protocol (or the detected brand) and normalizes `H.264`/`H.265` to
+  `H264`/`H265` in API responses and stored profiles.
+
+### Notes
+
+- Brand encoder quality is not exposed; the API returns `quality: 0` and ignores
+  it for ISAPI/CGI updates.
+- Hikvision firmware variants that use `videoBitrate` instead of `vbrUpperCap`
+  are handled by falling back to that tag when applying a bitrate.
+
 ## [0.14.0] - 2026-10-22
 
 ### Added

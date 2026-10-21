@@ -321,9 +321,16 @@ fields and sends `SetVideoEncoderConfiguration` with `ForcePersistence=true`.
 Zero or omitted values keep the camera setting. Applied values are stored in the
 channel's `media.encoder`.
 
-Only ONVIF channels are supported; other protocols return `400
-unsupported_protocol`. The camera's own ONVIF user must be allowed to change the
-encoder configuration.
+**Hikvision ISAPI** channels read and update
+`/ISAPI/Streaming/channels/101` (`videoCodecType`,
+`videoResolutionWidth/Height`, `videoFrameRate`/`maxFrameRate` in hundredths,
+`vbrUpperCap` or `videoBitrate`). **Dahua CGI** channels use
+`configManager.cgi?action=getConfig&name=Encode` and `setConfig` with
+`Encode[0].MainFormat[0].Video.Compression/Width/Height/FPS/BitRate`.
+
+Responses normalize `H.264`/`H.265` to `H264`/`H265`. Brand encoders do not
+expose quality (`quality` is 0 and ignored); only the main stream is changed.
+Unsupported protocols return `400 unsupported_protocol`.
 
 ## Brand detection
 
