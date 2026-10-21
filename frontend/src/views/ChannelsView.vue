@@ -108,6 +108,129 @@ const scan = reactive({
   result: null as OnvifProbeResult | null,
 })
 const detecting = ref(false)
+const importing = ref(false)
+const importTotal = ref(0)
+const importDone = ref(0)
+const importInput = ref<HTMLInputElement | null>(null)
+
+function parseCsvLine(line: string) {
+  const cells: string[] = []
+  let current = ''
+  let quoted = false
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '"') {
+      if (quoted && line[index + 1] === '"') {
+        current += '"'
+        index += 1
+      } else {
+        quoted = !quoted
+      }
+    } else if (char === ',' && !quoted) {
+      cells.push(current.trim())
+      current = ''
+    } else {
+      current += char
+    }
+  }
+  cells.push(current.trim())
+  return cells
+}
+
+async function importCsv(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || importing.value) return
+  importing.value = true
+  importDone.value = 0
+  importTotal.value = 0
+  error.value = ''
+  notice.value = ''
+  const failures: string[] = []
+  let succeeded = 0
+  try {
+    const lines = (await file.text())
+      .replace(/^\uFEFF/, '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
+    if (lines.length === 0) {
+      error.value = t('channels.importEmpty')
+      return
+    }
+    let rows = lines.map(parseCsvLine)
+    let columns = ['host', 'username', 'password', 'brand', 'name', 'httpport']
+    const first = rows[0].map((cell) => cell.toLowerCase())
+    if (first.includes('host') || first.includes('ip')) {
+      columns = first
+      rows = rows.slice(1)
+    }
+    const column = (row: string[], name: string) => {
+      const index = columns.indexOf(name)
+      return index >= 0 ? (row[index] ?? '') : ''
+    }
+    if (rows.length === 0) {
+      error.value = t('channels.importEmpty')
+      return
+    }
+    const knownHosts = new Set(channels.value.map((channel) => channel.host))
+    importTotal.value = rows.length
+    for (const row of rows) {
+      const host = column(row, 'host') || column(row, 'ip')
+      if (!host) {
+        importDone.value += 1
+        continue
+      }
+      try {
+        if (knownHosts.has(host)) {
+          failures.push(`${host}: ${t('channels.importDuplicate')}`)
+          continue
+        }
+        knownHosts.add(host)
+        const username = column(row, 'username') || column(row, 'user')
+        const password = column(row, 'password') || column(row, 'pass')
+        const brand = column(row, 'brand').toLowerCase()
+        const httpPort = Number(column(row, 'httpport') || column(row, 'http_port') || 80) || 80
+        const detected = await api<DetectResult>('/api/v1/channels/detect', {
+          method: 'POST',
+          body: JSON.stringify({ host, httpPort, username, password, brand }),
+        })
+        const payload = {
+          name: column(row, 'name') || detected.name || detected.model || host,
+          protocol: detected.protocol,
+          host,
+          port: detected.protocol === 'onvif' ? 80 : 554,
+          httpPort: detected.httpPort ?? httpPort,
+          username,
+          password,
+          mainUrl: detected.mainUrl,
+          subUrl: detected.subUrl,
+          subEnabled: detected.subEnabled,
+          enabled: true,
+          brand: detected.brand,
+          eventsEnabled: detected.eventsEnabled,
+          watermark: { text: '', position: 'bottom-right' },
+        }
+        await api('/api/v1/channels', { method: 'POST', body: JSON.stringify(payload) })
+        succeeded += 1
+      } catch (caught) {
+        failures.push(`${host}: ${caught instanceof Error ? caught.message : t('common.error')}`)
+      } finally {
+        importDone.value += 1
+      }
+    }
+    await load()
+    notice.value = t('channels.importDone', { count: succeeded })
+    if (failures.length > 0) {
+      error.value = t('channels.importFailed', { count: failures.length }) + ' ' + failures.slice(0, 5).join('; ')
+    }
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : t('common.error')
+  } finally {
+    importing.value = false
+    input.value = ''
+  }
+}
 
 interface DetectResult {
   protocol: string
@@ -534,6 +657,22 @@ onMounted(load)
       <button class="button" @click="openGroups">
         <AppIcon name="users" :size="16" />
         {{ t('channels.groups') }}
+      </button>
+      <input
+        ref="importInput"
+        class="hidden-input"
+        type="file"
+        accept=".csv,text/csv"
+        @change="importCsv"
+      />
+      <button
+        class="button"
+        :disabled="importing"
+        :title="t('channels.csvHint')"
+        @click="importInput?.click()"
+      >
+        <AppIcon name="plus" :size="16" />
+        {{ importing ? `${importDone}/${importTotal}` : t('channels.importCsv') }}
       </button>
       <button class="button primary" @click="openCreate">
         <AppIcon name="plus" :size="16" />
