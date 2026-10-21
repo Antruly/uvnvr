@@ -70,7 +70,7 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.12.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.13.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 

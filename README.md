@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.12.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.13.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,23 +22,24 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.12.0 — RTSP Digest and live events.** The recorder supports
+**0.13.0 — RTSP audio and storage hardening.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.12.0 adds RTSP Digest authentication alongside Basic, a real-time `/ws/events`
-socket that pushes alerts and channel state into the UI, and puts the Alerts page
-in the main navigation. It builds on 0.11.0's OpenAPI/Swagger UI, H.264/H.265 RTP
-output and snapshot sizing, 0.10.0's maintenance operations, motion settings,
-audit export, Windows capture and GPU fallback, 0.9.0's event-triggered clips,
-0.8.0's CSV bulk import and live recording status, 0.7.0's Hikvision/Dahua HTTP
-fallback, per-channel HTTP port, x64 MSI and codec-boundary continuation, 0.6.0's
-recording fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and
-layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the
-core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain
-out of scope. Track the milestones in
+0.13.0 adds RTSP audio (AAC and G.711) as a second RTP track, batched recording
+writes, disk/service error alerts, and a storage browser with root/unwritable-path
+guards. It builds on 0.12.0's RTSP Digest and live event push, 0.11.0's
+OpenAPI/Swagger UI, H.264/H.265 RTP output and snapshot sizing, 0.10.0's
+maintenance operations, motion settings, audit export, Windows capture and GPU
+fallback, 0.9.0's event-triggered clips, 0.8.0's CSV bulk import and live
+recording status, 0.7.0's Hikvision/Dahua HTTP fallback, per-channel HTTP port,
+x64 MSI and codec-boundary continuation, 0.6.0's recording fixes and operator UI,
+0.5.0's ONVIF events, 0.4.0's channel groups and layouts, 0.3.0's
+downloads/export/cache, 0.2.0's startup configuration, and the core NVR loop.
+Peer-to-peer/WebRTC, cloud access and advanced analytics remain out of scope.
+Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -97,6 +98,10 @@ output.
 - RTSP Digest authentication (MD5, `qop=auth`) alongside Basic; `/ws/events`
   pushes alerts and channel state changes, with an in-app toast and an
   auto-refreshing Alerts page.
+- RTSP audio tracks for AAC (RFC 3640) and G.711 (PCMA/PCMU) with per-track RTP
+  and RTCP; batched recording writes (`recording.batch_mb`/`batch_ms`); disk and
+  service error alerts; storage directory browsing and root/unwritable-path
+  rejection.
 
 ### Delivered scope
 
@@ -195,14 +200,17 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.12.0)
+## Known limitations (0.13.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
 - Browser playback uses MSE; H.265 depends on the browser/hardware. Prefer an H.264 sub stream.
-- RTSP output sends H.264/H.265 video as RTP payload type 96 with RTCP sender
-  reports; audio is not packetized yet. `DESCRIBE` waits up to two seconds for
-  the stream's parameter sets and returns 503 while the channel is offline.
+- RTSP output sends H.264/H.265 video as RTP payload type 96 and AAC/G.711 audio
+  as a second track with RTCP sender reports; other audio codecs are not
+  forwarded. `DESCRIBE` waits up to two seconds for the stream's parameter sets
+  and returns 503 while the channel is offline.
+- Recording writes are batched in user space; the planned io_uring/ring-buffer
+  writer is not implemented, and the writer thread still uses buffered file I/O.
 - RTSP Digest uses MD5/`qop=auth` as required by RFC 7616; stronger digests are
   not offered. H.265 clients must support RFC 7798 packetization.
 - The OpenAPI document describes routes, permissions and content types with
@@ -311,6 +319,7 @@ tests/             unit/integration/e2e tests
 | 0.10.0 | ✅ Maintenance operations, motion settings, audit export, Windows capture, GPU fallback |
 | 0.11.0 | ✅ OpenAPI + Swagger UI, H.264/H.265 RTP output, snapshot sizing |
 | 0.12.0 | ✅ RTSP Digest auth, live events WebSocket, alerts navigation |
+| 0.13.0 | ✅ RTSP audio (AAC/G.711), batched recording writes, disk/service alerts, storage browser |
 
 ## Contributing and security
 

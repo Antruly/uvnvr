@@ -60,6 +60,7 @@ header for cookie-authenticated mutating requests.
 | GET | `/api/v1/plans` | plan.view |
 | PUT | `/api/v1/plans` | plan.manage |
 | POST | `/api/v1/plans/sync` | plan.manage |
+| GET | `/api/v1/storage/browse` | storage.manage |
 | GET | `/api/v1/storage/volumes` | storage.view |
 | POST/PUT/DELETE | `/api/v1/storage/volumes[/{id}]` | storage.manage |
 | POST | `/api/v1/storage/format` | maintenance + admin |
@@ -97,8 +98,12 @@ RTP payload is H.264 (RFC 6184) or H.265 (RFC 7798) with payload type 96 over
 TCP interleaved or UDP unicast. `DESCRIBE` waits up to two seconds for the
 stream's PAT/PMT and parameter sets, then returns SDP with
 `packetization-mode=1` and `sprop-parameter-sets`/`sprop-vps,sps,pps`; it
-returns 503 while the channel is offline. Video only is forwarded (audio is not
-packetized yet). RTCP sender reports are sent every five seconds. If port 554
+returns 503 while the channel is offline. When the source carries audio, SDP
+advertises a second track (`trackID=1`) for AAC (RFC 3640 AAC-hbr,
+`MPEG4-GENERIC`) or G.711 (`PCMA`/`PCMU`); SETUP accepts the audio track over
+TCP interleaved or UDP, and each track has its own RTP sequence/SSRC and RTCP
+sender reports. Other audio codecs are ignored. RTCP sender reports are sent
+every five seconds. If port 554
 cannot be bound, the service tries 8554/8555 and prints the active port.
 
 Authentication accepts **Basic** and **Digest** (MD5, `qop=auth`). The 401
@@ -179,6 +184,24 @@ hours and 4 GiB of input, and temporary files are removed after the response.
 `GET /api/v1/preview/channels` returns the display metadata and stream state
 needed by preview-only roles (no usernames, URLs or stored error text) and
 requires only `preview.view`.
+
+## Storage browser
+
+`GET /api/v1/storage/browse` (permission `storage.manage`) returns the
+filesystem roots when `path` is omitted, or the subdirectories of `path`:
+
+```json
+{
+  "path": "/mnt/data",
+  "parent": "/mnt",
+  "roots": ["/", "/mnt", "/media"],
+  "entries": [{ "name": "recordings", "path": "/mnt/data/recordings" }]
+}
+```
+
+`POST/PUT /api/v1/storage/volumes` reject filesystem roots (`/`, `C:\`) and
+directories that cannot be written; the server creates the directory if needed
+and checks writability with a temporary file.
 
 ## Recording status
 

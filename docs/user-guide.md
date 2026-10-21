@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.12.0)
+# UvNVR User Guide (0.13.0)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -199,6 +199,9 @@ Recording defaults can be changed in **System** settings:
 
 - `recording.segment_minutes` (default 5): time-based slicing.
 - `recording.segment_size_mb` (default 256): size-based slicing.
+- `recording.batch_mb` (default 8) and `recording.batch_ms` (default 500):
+  flush the write buffer when either threshold is reached; splits and
+  finalization always flush.
 - Slices end at the first keyframe after the threshold.
 
 Segments are MPEG-TS, immutable and indexed in SQLite. A crash during a segment
@@ -208,7 +211,9 @@ leaves a `.part` file; the recorder repairs or reindexes it at startup.
 
 Open **Storage** to manage recording volumes.
 
-- Add a path that exists and is writable. Each volume can use:
+- Add a path that exists and is writable. Filesystem roots and unwritable
+  directories are rejected; `GET /api/v1/storage/browse?path=` lists
+  subdirectories for integrations. Each volume can use:
   - **Loop**: delete the oldest segments when the volume reaches its limit.
   - **Alert**: stop recording and raise an alert at the limit.
 - Configure the maximum usage percentage (default 90), reserved space and
@@ -293,10 +298,11 @@ rtsp://user:pass@host:554/live/{channel}        # main stream
 ```
 
 RTSP accepts Basic and Digest authentication (MD5, `qop=auth`) and outputs
-H.264/H.265 RTP (payload type 96) over TCP interleaved or UDP unicast. The
+H.264/H.265 video over RTP (payload type 96) plus AAC or G.711 audio as a
+second track over TCP interleaved or UDP unicast. The
 `rtsp.access` permission is required. `DESCRIBE` waits up to two seconds for the
-stream's parameter sets and returns 503 while the channel is offline; video only
-is forwarded (audio is not packetized yet). If the sub stream is disabled,
+stream's parameter sets and returns 503 while the channel is offline. If the sub
+stream is disabled,
 requesting it returns an explicit error.
 
 ### Live WebSocket
@@ -324,7 +330,8 @@ Alert sources:
 - ONVIF camera events (motion, person, tamper, line crossing) when enabled on the
   channel. Each type has a 60-second per-channel cooldown.
 - Camera offline and recovery events.
-- Storage nearly full events.
+- Storage nearly full events, disk read errors (at most hourly) and service
+  errors such as missing FFmpeg or an RTSP bind failure.
 
 Configure SMTP under **System → Email alerts**. The default preset is QQ Mail
 (`smtp.qq.com:465`); use the account's authorization code, not the login

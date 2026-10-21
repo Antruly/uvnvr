@@ -4,6 +4,33 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-10-22
+
+### Added
+
+- **RTSP audio.** The RTSP output now advertises a second track when the source
+  carries AAC (ADTS, RFC 3640 AAC-hbr) or G.711 (PCMA/PCMU): SDP includes the
+  audio `m=` line and AudioSpecificConfig, SETUP handles `trackID=1` for both
+  TCP interleaved and UDP, and per-track RTP/RTCP sequence, SSRC and sender
+  reports are maintained.
+- **Batched recording writes.** The segment writer flushes when
+  `recording.batch_mb` (default 8) or `recording.batch_ms` (default 500) is
+  reached instead of after every chunk, while splits and finalization still
+  force a flush.
+- **Disk and service alerts.** A volume whose free space cannot be read raises a
+  `disk_error` alert (at most hourly), and missing FFmpeg or an RTSP bind failure
+  raises `service_error` at startup.
+- **Storage browser and guards.** `GET /api/v1/storage/browse` lists filesystem
+  roots and subdirectories for the Storage page, and adding a volume rejects
+  filesystem roots and paths that cannot be written.
+
+### Changed
+
+- RTSP audio is available as AAC or G.711; video-only sources produce the same
+  SDP as before.
+- Volume creation now proves writability with a temporary file before inserting
+  the volume.
+
 ## [0.12.0] - 2026-10-22
 
 ### Added

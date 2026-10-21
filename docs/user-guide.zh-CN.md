@@ -1,4 +1,4 @@
-# UvNVR 使用手册（0.12.0）
+# UvNVR 使用手册（0.13.0）
 
 本手册覆盖从安装到完整的摄像头接入、预览、录像、回放、API/RTSP、预警和系统管理流程。
 
@@ -155,6 +155,8 @@ UvNVR 会从缓冲区带上预录开始一个片段，并持续录制后录；�
 
 - `recording.segment_minutes`：按时间切片，默认 5 分钟。
 - `recording.segment_size_mb`：按大小切片，默认 256 MB。
+- `recording.batch_mb`（默认 8）与 `recording.batch_ms`（默认 500）：达到任一阈值时
+  flush 写缓冲；切片结束与收尾时强制 flush。
 - 切片在超过阈值后的第一个关键帧结束。
 
 切片为不可变的 MPEG-TS 文件并写入 SQLite 索引。写入过程中崩溃会留下 `.part` 文件，录像服务启动时修复或重建索引。
@@ -163,7 +165,8 @@ UvNVR 会从缓冲区带上预录开始一个片段，并持续录制后录；�
 
 打开 **存储管理**。
 
-- 添加存在且可写的路径。每个卷可配置：
+- 添加存在且可写的路径。文件系统根目录与不可写目录会被拒绝；集成可通过
+  `GET /api/v1/storage/browse?path=` 列出子目录。每个卷可配置：
   - **循环录制**：达到上限后删除最旧切片。
   - **录满预警**：达到上限后停止录像并告警。
 - 可配置最大使用率（默认 90%）、保留空间与保留天数（默认 30 天；**0 表示永久保留**）。
@@ -227,7 +230,7 @@ rtsp://user:pass@host:554/live/{channel}/{main|sub}
 rtsp://user:pass@host:554/live/{channel}        # 主码流
 ```
 
-RTSP 支持 Basic 与 Digest 鉴权（MD5、`qop=auth`），输出 H.264/H.265 RTP（payload type 96），支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。`DESCRIBE` 最多等待 2 秒获取流的参数集，通道离线时返回 503；当前只转发视频，音频尚未封装，RTCP SR 每 5 秒发送一次。
+RTSP 支持 Basic 与 Digest 鉴权（MD5、`qop=auth`），输出 H.264/H.265 视频 RTP（payload type 96），并在源流带音频时以第二轨道输出 AAC 或 G.711，支持 TCP interleaved 或 UDP unicast。需要 `rtsp.access` 权限；子码流关闭时请求子码流会返回明确错误。`DESCRIBE` 最多等待 2 秒获取流的参数集，通道离线时返回 503；当前只转发视频，音频尚未封装，RTCP SR 每 5 秒发送一次。
 
 ### 实时 WebSocket
 
@@ -247,7 +250,7 @@ RTSP 支持 Basic 与 Digest 鉴权（MD5、`qop=auth`），输出 H.264/H.265 R
   （1–100）、冷却秒数和一个百分比矩形区域。这是实验性功能，不是 AI。
 - 摄像头 ONVIF 事件（移动、人形、遮挡、越线）：在通道中启用后生效，同类事件每通道 60 秒冷却。
 - 摄像头离线与恢复事件。
-- 存储将满事件。
+- 存储将满、磁盘读取异常（最多每小时一次）以及服务异常（如 FFmpeg 缺失、RTSP 端口绑定失败）。
 
 在 **系统设置 → 邮件预警** 配置 SMTP。默认预置 QQ 邮箱（`smtp.qq.com:465`），需使用授权码而不是登录密码。**测试** 会立即发送一封邮件；TLS 证书校验保持开启。
 
