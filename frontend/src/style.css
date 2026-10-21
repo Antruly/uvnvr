@@ -3301,3 +3301,11 @@ select.input {
   max-width: 280px;
   word-break: break-word;
 }
+
+.range-export {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}

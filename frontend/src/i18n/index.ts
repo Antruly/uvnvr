@@ -210,6 +210,10 @@ const messages = {
       exportMp4: 'Export MP4',
       exporting: 'Exporting…',
       exported: 'MP4 export downloaded.',
+      rangeStart: 'From',
+      rangeEnd: 'To',
+      exportRange: 'Download by time',
+      invalidRange: 'Choose a valid start and end time.',
     },
     channels: {
       title: 'Channels',
@@ -239,6 +243,10 @@ const messages = {
       eventsHint:
         'ONVIF cameras can push motion, person, tamper and line-crossing events; they appear in Alerts (60-second cooldown per type).',
       snapshot: 'Snapshot',
+      autoDetect: 'Auto detect',
+      autoDetectAction: 'Detect camera',
+      detected: 'Camera detected and fields filled.',
+      addNow: 'Add now',
       state: 'State',
       streams: 'Enabled',
       lastError: 'Last error',
@@ -721,6 +729,10 @@ const messages = {
       exportMp4: '导出 MP4',
       exporting: '正在导出…',
       exported: 'MP4 已开始下载。',
+      rangeStart: '开始',
+      rangeEnd: '结束',
+      exportRange: '按时间下载',
+      invalidRange: '请选择有效的开始和结束时间。',
     },
     channels: {
       title: '通道管理',
@@ -750,6 +762,10 @@ const messages = {
       eventsHint:
         'ONVIF 摄像头可推送移动、人形、遮挡与越线事件，并进入预警中心（同类事件 60 秒冷却）。',
       snapshot: '抓拍',
+      autoDetect: '自动识别',
+      autoDetectAction: '识别摄像头',
+      detected: '已识别摄像头并自动填写参数。',
+      addNow: '立即添加',
       state: '状态',
       streams: '启用',
       lastError: '最后错误',

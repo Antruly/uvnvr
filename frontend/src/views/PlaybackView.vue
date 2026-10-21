@@ -48,6 +48,8 @@ const error = ref('')
 const notice = ref('')
 const exporting = ref(false)
 const reverse = ref(false)
+const rangeStart = ref('')
+const rangeEnd = ref('')
 const windowMs = ref(24 * 60 * 60 * 1000)
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
 let reverseTimer: number | undefined
@@ -109,6 +111,12 @@ const positionPercent = computed(() => {
   return Math.max(0, Math.min(100, ((positionMs.value - windowStart.value) / span) * 100))
 })
 
+function toLocalInput(ms: number) {
+  const date = new Date(ms)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function formatTime(ms: number) {
   return new Intl.DateTimeFormat(undefined, {
     hour: '2-digit',
@@ -139,6 +147,8 @@ function selectSegment(recording: Recording) {
   selected.value = recording
   playStartMs.value = recording.startMs
   positionMs.value = recording.startMs
+  rangeStart.value = toLocalInput(recording.startMs)
+  rangeEnd.value = toLocalInput(recording.endMs)
 }
 
 function playFrom(recording: Recording) {
@@ -228,6 +238,8 @@ async function loadRecordings() {
       selected.value = recordings.value[0]
       playStartMs.value = recordings.value[0].startMs
       positionMs.value = recordings.value[0].startMs
+      rangeStart.value = toLocalInput(recordings.value[0].startMs)
+      rangeEnd.value = toLocalInput(recordings.value[0].endMs)
     } else {
       selected.value = null
       playStartMs.value = 0
@@ -252,7 +264,22 @@ function download() {
 }
 
 async function exportMp4() {
-  if (!selected.value || exporting.value) return
+  if (!selected.value) return
+  await exportRange(selected.value.startMs, selected.value.endMs)
+}
+
+async function exportRangeFromForm() {
+  const start = rangeStart.value ? new Date(rangeStart.value).getTime() : 0
+  const end = rangeEnd.value ? new Date(rangeEnd.value).getTime() : 0
+  if (start <= 0 || end <= start) {
+    error.value = t('playback.invalidRange')
+    return
+  }
+  await exportRange(start, end)
+}
+
+async function exportRange(startMs: number, endMs: number) {
+  if (exporting.value) return
   exporting.value = true
   error.value = ''
   notice.value = ''
@@ -267,8 +294,8 @@ async function exportMp4() {
       body: JSON.stringify({
         channelId: channelId.value,
         stream: stream.value,
-        startMs: selected.value.startMs,
-        endMs: selected.value.endMs,
+        startMs,
+        endMs,
       }),
     })
     if (!response.ok) {
@@ -285,7 +312,7 @@ async function exportMp4() {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `uvnvr-${channelId.value}-${selected.value.startMs}.mp4`
+    link.download = `uvnvr-${channelId.value}-${startMs}.mp4`
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -379,6 +406,20 @@ onMounted(async () => {
       </div>
     </label>
     <span class="muted playback-count">{{ t('playback.segments', { count: recordings.length }) }}</span>
+    <div class="range-export">
+      <label class="field compact-field">
+        <span>{{ t('playback.rangeStart') }}</span>
+        <input v-model="rangeStart" class="input" type="datetime-local" />
+      </label>
+      <label class="field compact-field">
+        <span>{{ t('playback.rangeEnd') }}</span>
+        <input v-model="rangeEnd" class="input" type="datetime-local" />
+      </label>
+      <button class="button" :disabled="!canDownload || exporting" @click="exportRangeFromForm">
+        <AppIcon name="save" :size="15" />
+        {{ t('playback.exportRange') }}
+      </button>
+    </div>
   </section>
 
   <div v-if="loading" class="panel empty-state">

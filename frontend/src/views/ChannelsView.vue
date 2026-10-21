@@ -105,6 +105,97 @@ const scan = reactive({
   probing: '',
   result: null as OnvifProbeResult | null,
 })
+const detecting = ref(false)
+
+function detectedProtocol(manufacturer: string) {
+  const value = manufacturer.toLowerCase()
+  if (value.includes('hikvision'))
+    return 'hikvision'
+  if (value.includes('dahua'))
+    return 'dahua'
+  return 'onvif'
+}
+
+function applyProbeResult(host: string, result: OnvifProbeResult) {
+  const protocol = detectedProtocol(result.device.manufacturer)
+  const profile = result.profiles[0]
+  const subProfile = result.profiles[1]
+  Object.assign(modal, {
+    groupId: 0,
+    name: profile?.name || result.device.model || host,
+    protocol,
+    host,
+    port: protocol === 'onvif' ? 80 : 554,
+    mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
+    subUrl: protocol === 'onvif' ? (subProfile?.streamUri ?? '') : '',
+    subEnabled: protocol !== 'onvif' || Boolean(subProfile),
+    enabled: true,
+    brand: result.device.manufacturer,
+    eventsEnabled: true,
+  })
+}
+
+async function detectFromModal() {
+  if (!modal.host.trim()) return
+  detecting.value = true
+  error.value = ''
+  try {
+    const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+      method: 'POST',
+      body: JSON.stringify({
+        xaddr: `http://${modal.host.trim()}/onvif/device_service`,
+        username: modal.username,
+        password: modal.password,
+      }),
+    })
+    applyProbeResult(modal.host.trim(), result)
+    flash(t('channels.detected'))
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  } finally {
+    detecting.value = false
+  }
+}
+
+async function quickAdd(device: OnvifDevice) {
+  scan.probing = device.xaddr
+  error.value = ''
+  try {
+    const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+      method: 'POST',
+      body: JSON.stringify({
+        xaddr: device.xaddr,
+        username: scan.username,
+        password: scan.password,
+      }),
+    })
+    const protocol = detectedProtocol(result.device.manufacturer)
+    const profile = result.profiles[0]
+    const subProfile = result.profiles[1]
+    const payload: Record<string, unknown> = {
+      name: profile?.name || result.device.model || device.ip,
+      protocol,
+      host: device.ip,
+      port: protocol === 'onvif' ? 80 : 554,
+      username: scan.username,
+      password: scan.password,
+      mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
+      subUrl: protocol === 'onvif' ? (subProfile?.streamUri ?? '') : '',
+      subEnabled: protocol !== 'onvif' || Boolean(subProfile),
+      enabled: true,
+      brand: result.device.manufacturer,
+      eventsEnabled: true,
+      watermark: { text: '', position: 'bottom-right' },
+    }
+    await api('/api/v1/channels', { method: 'POST', body: JSON.stringify(payload) })
+    flash(t('channels.created'))
+    await load()
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  } finally {
+    scan.probing = ''
+  }
+}
 
 const protocols = ['rtsp', 'onvif', 'hikvision', 'dahua', 'generic']
 
@@ -234,6 +325,8 @@ function openEdit(channel: Channel) {
 async function save() {
   error.value = ''
   try {
+    if (!modal.name.trim())
+      modal.name = modal.host.trim() || 'Camera'
     const payload: Record<string, unknown> = {
       name: modal.name,
       protocol: modal.protocol,
@@ -339,22 +432,12 @@ async function probe(device: OnvifDevice) {
       Object.assign(modal, {
         open: true,
         mode: 'create',
-        groupId: 0,
-        name: scan.result.device.model || device.ip,
-        protocol: 'onvif',
-        host: device.ip,
-        port: 80,
-        username: scan.username,
         password: scan.password,
-        mainUrl: scan.result.profiles[0].streamUri,
-        subUrl: scan.result.profiles[1]?.streamUri ?? '',
-        subEnabled: scan.result.profiles.length > 1,
-        enabled: true,
-        eventsEnabled: true,
-        brand: scan.result.device.manufacturer,
+        username: scan.username,
         watermarkText: '',
         watermarkPosition: 'bottom-right',
       })
+      applyProbeResult(device.ip, scan.result)
     }
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -593,6 +676,18 @@ onMounted(load)
             </select>
           </label>
           <label class="field">
+            <span>{{ t('channels.autoDetect') }}</span>
+            <button
+              type="button"
+              class="button"
+              :disabled="detecting || !modal.host.trim()"
+              @click="detectFromModal"
+            >
+              <AppIcon name="search" :size="15" />
+              {{ detecting ? t('common.loading') : t('channels.autoDetectAction') }}
+            </button>
+          </label>
+          <label class="field">
             <span>{{ t('channels.host') }}</span>
             <input v-model="modal.host" class="input" placeholder="192.168.1.64" />
           </label>
@@ -708,6 +803,9 @@ onMounted(load)
               <td>
                 <button class="button small" :disabled="scan.probing === device.xaddr" @click="probe(device)">
                   {{ scan.probing === device.xaddr ? t('common.loading') : t('channels.probe') }}
+                </button>
+                <button class="button small primary" :disabled="scan.probing === device.xaddr" @click="quickAdd(device)">
+                  {{ t('channels.addNow') }}
                 </button>
               </td>
             </tr>
