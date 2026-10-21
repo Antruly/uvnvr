@@ -46,7 +46,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'Main and sub streams are independent. Sub stream is recommended for multi-cell preview.',
         'Use Groups to build a channel tree; the Live preview rail shows the same groups and can collapse them.',
         'Enable Use camera ONVIF events to receive motion, person, tamper and line-crossing notifications from the camera in Alerts.',
-        'Use Auto detect in the channel form or Add now in the ONVIF scan results. Hikvision/Dahua are recognized and use generated main/sub paths; names come from the camera profile/model.',
+        'Use Auto detect in the channel form or Add now in the ONVIF scan results. It tries ONVIF, then Hikvision ISAPI/Dahua CGI, and uses generated main/sub paths; set HTTP / ONVIF port when the camera HTTP service is not on 80.',
       ],
     },
     {
@@ -143,7 +143,7 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         '海康/大华：URL 可留空，填写 IP、端口和凭据后由系统生成路径模板。',
         '主码流与子码流独立配置；多画面预览建议使用子码流。',
         '使用“通道分组”构建通道树；实时预览左侧会按分组展示并支持折叠。',
-        '在通道编辑中点击“自动识别”，或在 ONVIF 扫描结果中点击“立即添加”。海康/大华会自动使用主/子码流路径，名称来自摄像头 Profile/型号。',
+        '在通道编辑中点击“自动识别”，或在 ONVIF 扫描结果中点击“立即添加”。会依次尝试 ONVIF、海康 ISAPI、大华 CGI，并使用主/子码流路径；摄像头 HTTP 不在 80 时填写 HTTP / ONVIF 端口。',
         '启用“使用摄像头 ONVIF 事件”后，摄像头推送的移动、人形、遮挡与越线事件会进入预警中心。',
       ],
     },

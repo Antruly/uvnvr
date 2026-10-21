@@ -108,8 +108,11 @@ network, add the channel manually with the protocol **ONVIF** and the device hos
    notifications into alerts.
 6. Save. The channel begins connecting immediately.
 
-Use **Auto detect** in the channel form to probe an ONVIF camera at the entered
-host and fill the protocol, stream paths and name automatically. From **Scan
+Use **Auto detect** in the channel form to probe the entered host. It tries
+ONVIF first, then Hikvision ISAPI or Dahua CGI over HTTP Digest; choose the brand
+in **Protocol** to try that vendor first. It fills the protocol, stream paths and
+name automatically. Set **HTTP / ONVIF port** if the camera's HTTP service is not
+on 80. From **Scan
 ONVIF**, **Add now** creates the channel in one click. Hikvision and Dahua
 manufacturers are recognized and use their generated main/sub stream templates,
 so no RTSP URL is needed; other ONVIF cameras use the profile URI, and manual

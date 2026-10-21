@@ -16,6 +16,8 @@ Startup configuration is installed by each package:
 
 - Windows: the NSIS **Service ports** page writes
   `%ProgramData%\UvNVR\uvnvr.json` and the boot task runs with `--config`.
+  The x64 MSI (`packaging/windows/msi`) uses `HTTPPORT`/`RTSPPORT` properties and
+  the same config/shortcut/task behavior.
 - Linux: the post-install script creates `/etc/uvnvr/uvnvr.json`; the systemd unit
   runs with `--config`.
 - macOS: the pkg post-install script creates

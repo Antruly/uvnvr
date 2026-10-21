@@ -30,6 +30,7 @@ All endpoints are under `/api/v1` unless noted.
 | POST | `/api/v1/system/email/test` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
 | GET | `/api/v1/preview/channels` | preview.view |
+| POST | `/api/v1/channels/detect` | channel.manage |
 | POST | `/api/v1/channels` | channel.create |
 | PUT | `/api/v1/channels/{id}` | channel.manage |
 | DELETE | `/api/v1/channels/{id}` | channel.delete |
@@ -173,7 +174,19 @@ clock and then attempts to set the clock on every enabled ONVIF-capable camera
 `POST /api/v1/system/ntp/sync` queries the configured NTP server, applies the
 offset and performs the same camera synchronization; it returns `offsetMs`,
 `applied`, `applyError` and `cameras`. Pure RTSP cameras have no control channel
-and are reported as skipped.
+and are reported as skipped. For Hikvision/Dahua channels (or ONVIF channels whose
+manufacturer is Hikvision/Dahua) the vendor ISAPI/CGI API is used as a fallback.
+
+## Brand detection
+
+`POST /api/v1/channels/detect` with
+`{ "host": "192.168.1.64", "httpPort": 80, "username": "admin",
+"password": "...", "brand": "hikvision" }` tries the camera's ONVIF device
+service, then Hikvision ISAPI or Dahua CGI over HTTP Digest. Supplying `brand`
+tries that vendor API first. The response contains `protocol`, `name`, `model`,
+`brand`, `mainUrl`, `subUrl`, `subEnabled`, `eventsEnabled` and `httpPort`.
+Channels store `httpPort` (default 80) separately from the RTSP port and return
+it in the channel JSON; it is used for ONVIF/brand HTTP and time sync.
 
 ## ONVIF events
 

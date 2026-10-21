@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.6.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.7.0-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,15 +22,15 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.6.0 — 录像可靠性与运维体验。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.7.0 — 品牌后备与 Windows MSI。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.6.0 修复录像计划/存储卷选择问题，并新增计划框选、自动/亮/暗主题、通道缩略图、
-品牌自动识别与一键添加、预览翻页/一键播放、0.25×–32× 缩放时间轴与倒放、
-按 Token 的 API 权限和摄像头时间同步。0.5.0 的 ONVIF 事件、0.4.0 的通道分组与布局、
-0.3.0 的下载/导出/缓存、0.2.0 的启动配置继续保留。WebRTC、云平台与高级分析仍不在范围内。
-里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
+0.7.0 新增海康 ISAPI / 大华 CGI 的 HTTP Digest 后备：未开 ONVIF 也能自动识别和校时；
+新增每通道 HTTP 端口、x64 MSI 安装包，以及编码切换时的自动续播。0.6.0 的录像修复与运维 UI、
+0.5.0 的 ONVIF 事件、0.4.0 的通道分组与布局、0.3.0 的下载/导出/缓存、0.2.0 的启动配置继续保留。
+WebRTC、云平台与高级分析仍不在范围内。里程碑见
+[`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -59,6 +59,8 @@ UvNVR 是一套面向中小规模摄像头部署的软件 NVR。单进程完成 
 - 录像计划框选、自动/亮/暗主题、通道缩略图/抓拍、品牌自动识别与一键添加、预览翻页/一键播放、录像入口。
 - 回放 0.25×–32×、时间轴缩放（最小 5 分钟）、倒放步进、按时间范围下载 MP4。
 - Token 分组 API 权限；浏览器/NTP 时间同步联动摄像头；码流切换自动切片与按编码回放。
+- 海康 ISAPI / 大华 CGI HTTP Digest 后备（无 ONVIF 也能识别/校时）；每通道 HTTP 端口；
+  x64 MSI（端口属性）；编码边界自动续播。
 
 ### 已交付范围
 
@@ -154,7 +156,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.6.0 已知限制
+## 0.7.0 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -167,7 +169,8 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 - ONVIF 事件名称因厂商而异，未识别主题会被忽略；事件目前只生成预警，不单独触发事件录像片段。
 - 自动识别与品牌一键添加要求摄像头开启 ONVIF；纯 RTSP 设备仍需手动填写地址。
 - 倒放通过定时向后跳转实现（会有跳跃感）；摄像头时间同步仅覆盖支持 ONVIF 的设备。
-- Windows 安装包仍为 NSIS，暂未提供 MSI/MSIX。
+- 提供 x64 MSI；arm64 与便携版仍使用 NSIS/zip，MSI 未签名，SmartScreen 可能提示。
+- 海康/大华 HTTP 后备覆盖 ISAPI/CGI 摄像头；其他不支持 ONVIF 的品牌仍需手动配置。
 - 审计日志与录像共用数据盘；独立审计路径为后续增强。
 
 ## 许可证
@@ -195,7 +198,7 @@ configure 参数与许可证声明，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PAR
 
 | 平台 | 安装包 |
 |---|---|
-| Windows x64 | NSIS `setup.exe`、便携 `.zip` |
+| Windows x64 | NSIS `setup.exe`、**MSI**、便携 `.zip` |
 | Windows arm64 | NSIS `setup.exe`、便携 `.zip` |
 | Linux x64 / arm64 | `.deb`、`.rpm`、`.tar.gz` |
 | macOS x64 / arm64 | `.pkg`、`.dmg`、`.zip` |
@@ -233,6 +236,7 @@ tests/             单元/集成/E2E 测试
 | 0.4.0 | ✅ 通道分组/通道树、按用户保存的服务端预览布局 |
 | 0.5.0 | ✅ ONVIF PullPoint 摄像头事件接入预警中心 |
 | 0.6.0 | ✅ 录像修复、主题、缩略图、品牌识别、Token 权限、摄像头时间同步 |
+| 0.7.0 | ✅ 海康/大华 HTTP 后备、HTTP 端口、x64 MSI、编码自动续播 |
 
 ## 贡献与安全
 

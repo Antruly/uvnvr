@@ -4,6 +4,30 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-10-21
+
+### Added
+
+- Hikvision ISAPI and Dahua CGI HTTP Digest fallback for cameras without ONVIF:
+  auto-detect reads the device name/model and brand, and time sync sets the
+  camera clock even when ONVIF is disabled.
+- `POST /api/v1/channels/detect` tries ONVIF first, then Hikvision ISAPI/Dahua
+  CGI (or brand-first when a brand is supplied). Channels gain an
+  `httpPort` (default 80) used for ONVIF/brand HTTP and time sync, separate from
+  the RTSP port.
+- A WiX-based **x64 MSI** alongside the NSIS setup. It supports
+  `HTTPPORT`/`RTSPPORT` properties, creates desktop and Start-menu shortcuts, the
+  boot task and firewall rule, writes a non-BOM JSON config, and preserves data
+  on uninstall. The release workflow installs and uninstalls it as a smoke test.
+- Playback automatically continues with a fresh player at a codec boundary, so an
+  H.264/H.265 switch needs no manual seek.
+
+### Changed
+
+- `SyncCameraTimes` prefers ONVIF for ONVIF channels and falls back to the brand
+  HTTP API; Hikvision/Dahua channels try their HTTP API first and ONVIF second.
+- The channel form exposes the HTTP/ONVIF port next to the RTSP port.
+
 ## [0.6.0] - 2026-10-21
 
 ### Fixed

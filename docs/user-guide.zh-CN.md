@@ -28,7 +28,9 @@ uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 
 端口与数据目录来自启动配置文件，无需重新构建或重装即可修改：
 
-- Windows 安装包：在“服务端口”页设置 HTTP 与 RTSP 端口，安装程序写入
+- Windows 安装包：NSIS 在“服务端口”页设置端口；也可以使用 x64 MSI：
+  `msiexec /i uvnvr-0.7.0-windows-x64.msi HTTPPORT=8080 RTSPPORT=554`。
+  NSIS 安装程序写入
   `%ProgramData%\UvNVR\uvnvr.json`，并在开始菜单生成“UvNVR Configuration”快捷方式。
 - Linux：编辑 `/etc/uvnvr/uvnvr.json`，然后 `sudo systemctl restart uvnvr`。
 - macOS：编辑 `/Library/Application Support/UvNVR/uvnvr.json`，然后重启 launchd 服务。
@@ -90,7 +92,9 @@ uvnvr.exe --data-dir "%ProgramData%\UvNVR"
    将移动、人形、遮挡与越线通知转换为预警。
 6. 保存后通道立即开始连接。
 
-在通道编辑中点击 **自动识别**，会按填写的 IP 探测 ONVIF 并自动填写协议、码流地址和名称；
+在通道编辑中点击 **自动识别**，会按填写的 IP 依次尝试 ONVIF、海康 ISAPI、大华 CGI（HTTP Digest），
+选择对应协议时会优先尝试该品牌；自动填写协议、码流地址和名称。摄像头 HTTP 不在 80 端口时，
+在 **HTTP / ONVIF 端口** 中填写实际端口；
 在 **扫描 ONVIF** 结果中点击 **立即添加** 可一键创建通道。识别到海康/大华时会使用内置的
 主/子码流路径模板，无需手写 RTSP 地址；其他 ONVIF 摄像头使用 Profile 地址，仍可手动填写 RTSP。
 通道列表显示数字 `#id` 和抓拍缩略图，摄像头按钮可刷新，双击缩略图查看大图。**重连** 可立即重试，无需等待退避。**同步** 会在显示差异后把选定字段和/或录像计划复制到其他通道。
@@ -246,8 +250,8 @@ RTSP 使用 Basic 鉴权，RTP/MP2T（payload type 33），支持 TCP interleave
 
 - 安全：锁定阈值、审计保留天数（默认 180）、时区、界面语言、GPU 开关。
 - 时间：服务器时间、NTP 开关/服务器/偏移、立即同步、使用浏览器时间校准。页面时钟逐秒更新。
-  两种同步都会同时设置支持 ONVIF 的摄像头时间（海康/大华需开启 ONVIF），并显示成功/失败数量；
-  纯 RTSP 摄像头没有控制通道，会被跳过。
+  两种同步都会设置 ONVIF 摄像头时间；海康/大华即使未开 ONVIF，也会通过 ISAPI/CGI 校时。
+  结果会显示成功/失败数量；纯 RTSP 摄像头没有控制通道，会被跳过。
 - 性能：自动识别的性能档位（低/中/高）、GPU 设备与当前 FFmpeg 模式。低配默认关闭子码流，可手动覆盖档位。
 - 邮件：SMTP 主机、端口、账号、密码、发件人与测试发送。
 - API Token：创建、查看、吊销。

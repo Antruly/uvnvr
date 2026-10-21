@@ -12,7 +12,7 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.6.0-22c55e)](#status)
+[![Status](https://img.shields.io/badge/status-0.7.0-22c55e)](#status)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,19 +22,19 @@ ONVIF discovery · RTSP ingest · scheduled recording · seamless playback · RT
 
 ## Status
 
-**0.6.0 — recording reliability and operator workflow.** The recorder supports
+**0.7.0 — brand fallback and Windows MSI.** The recorder supports
 ONVIF discovery/probing, channel management, RTSP ingest with automatic reconnects,
 live multi-client preview, plan-driven MPEG-TS recording, SQLite indexing, playback,
 RTSP output, snapshots, alerts, email notifications, users/roles, audit logging and a
 bilingual web UI.
 
-0.6.0 fixes plan/volume recording reliability and adds plan box selection,
-auto/light/dark themes, channel thumbnails, brand auto-detect/quick add, preview
-paging and play-all, 0.25×–32× zoomed/reverse playback, per-token API scopes and
-camera time synchronization. It builds on 0.5.0's ONVIF events, 0.4.0's channel
-groups and layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration,
-and the core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics
-remain out of scope. Track the milestones in
+0.7.0 adds Hikvision ISAPI/Dahua CGI HTTP Digest fallback for auto-detect and
+camera time sync without ONVIF, a per-channel HTTP port, an x64 MSI installer, and
+automatic playback continuation across codec boundaries. It builds on 0.6.0's
+recording fixes and operator UI, 0.5.0's ONVIF events, 0.4.0's channel groups and
+layouts, 0.3.0's downloads/export/cache, 0.2.0's startup configuration, and the
+core NVR loop. Peer-to-peer/WebRTC, cloud access and advanced analytics remain out
+of scope. Track the milestones in
 [`docs/development-plan.md`](docs/development-plan.md).
 
 ## What UvNVR will be
@@ -74,6 +74,9 @@ output.
   time-range MP4 download.
 - Per-token API scopes with a grouped selector; camera time sync from browser/NTP
   updates; codec-change segment roll and codec-aware playback.
+- Hikvision ISAPI/Dahua CGI Digest fallback for detection and time sync without
+  ONVIF; per-channel HTTP port; x64 MSI with port properties; automatic playback
+  continuation at codec boundaries.
 
 ### Delivered scope
 
@@ -172,7 +175,7 @@ and `/ws` to `127.0.0.1:8080`).
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
-## Known limitations (0.6.0)
+## Known limitations (0.7.0)
 
 - ONVIF probing currently supports `http://` device services only.
 - Motion detection is an experimental low-resolution frame-difference detector, not AI.
@@ -192,7 +195,10 @@ and `/ws` to `127.0.0.1:8080`).
   still use the manual URL form.
 - Reverse playback is implemented as timed backward seeks (choppy); decoders cannot
   play a reversed GOP smoothly. Camera time sync covers ONVIF-capable devices only.
-- The Windows installer is NSIS; an MSI/MSIX package is not produced yet.
+- An x64 MSI is available alongside NSIS; arm64 and portable installs use NSIS/zip.
+  The MSI is unsigned, so SmartScreen may warn.
+- Hikvision/Dahua HTTP fallback covers ISAPI/CGI cameras; other brands without
+  ONVIF still need manual configuration.
 - Audit logs and recordings share the data volume; a separate audit path is a later enhancement.
 
 ## License
@@ -222,7 +228,7 @@ Download the artifacts from the [latest release](https://github.com/Antruly/uvnv
 
 | Platform | Packages |
 |---|---|
-| Windows x64 | NSIS `setup.exe`, portable `.zip` |
+| Windows x64 | NSIS `setup.exe`, **MSI**, portable `.zip` |
 | Windows arm64 | NSIS `setup.exe`, portable `.zip` |
 | Linux x64 / arm64 | `.deb`, `.rpm`, `.tar.gz` |
 | macOS x64 / arm64 | `.pkg`, `.dmg`, `.zip` |
@@ -260,6 +266,7 @@ tests/             unit/integration/e2e tests
 | 0.4.0 | ✅ Channel groups/tree, per-user server-side preview layouts |
 | 0.5.0 | ✅ ONVIF PullPoint camera events integrated with the alert center |
 | 0.6.0 | ✅ Recording fixes, themes, thumbnails, brand detect, token scopes, camera time sync |
+| 0.7.0 | ✅ Hikvision/Dahua HTTP fallback, HTTP port, x64 MSI, codec auto-continue |
 
 ## Contributing and security
 
