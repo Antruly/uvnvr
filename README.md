@@ -322,7 +322,7 @@ tests/             unit/integration/e2e tests
 | 0.15.0 | ✅ Hikvision ISAPI and Dahua CGI encoder read/apply |
 | 0.16.0 | ✅ libuv/io_uring recording I/O with fsync batching |
 | 0.17.0 | ✅ Inno Setup Windows installer, ONVIF bulk add, UI/icons and light-theme refresh |
-| 0.18.0 | ✅ Live recording playback, draggable timeline, snapshot spinners, audit localization |
+| 0.18.0 | ✅ Live recording playback, draggable timeline, service management, new icon, About/Help rewrite |
 
 ## Contributing and security
 

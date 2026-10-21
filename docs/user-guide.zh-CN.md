@@ -30,14 +30,20 @@ uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 
 - Windows 安装包：Inno Setup 在“服务端口”页设置端口（安装向导支持中英文）；也可以使用 x64 MSI：
   `msiexec /i uvnvr-<版本>-windows-x64.msi HTTPPORT=8080 RTSPPORT=554`。
+  在“启动”页保留 **注册为 Windows 服务**（正式环境推荐）；取消勾选则以控制台方式运行。
   Inno Setup 安装程序写入 `%ProgramData%\UvNVR\uvnvr.json`，在开始菜单生成配置入口，
-  并在**桌面创建 Web 界面与程序快捷方式**，同时安装开机任务与防火墙规则。
+  并在桌面创建**唯一的快捷方式**（已注册服务时直接打开 Web 界面；未注册时启动 UvNVR 并打开浏览器），
+  同时添加防火墙规则。
 - Linux：编辑 `/etc/uvnvr/uvnvr.json`，然后 `sudo systemctl restart uvnvr`。
 - macOS：编辑 `/Library/Application Support/UvNVR/uvnvr.json`，然后重启 launchd 服务。
 - 任意版本：使用 `--config <路径>`，或 `--port`、`--rtsp-port`、`--data-dir`。
 
 命令行参数优先于环境变量，环境变量优先于配置文件。`uvnvr --print-config`
 可查看最终生效的配置，完整格式见 [`configuration.md`](configuration.md)（英文）。
+
+Windows 与 Linux 可在 **设置 → 系统服务** 查看服务状态，并随时注册或卸载服务。注册需要
+管理员或 root 权限，会重启录像服务，页面会自动重连；卸载后 UvNVR 以控制台进程继续运行。
+Windows 服务日志位于 `%ProgramData%\UvNVR\logs\service.log`，Linux 使用 `journalctl -u uvnvr`。
 
 ```json
 {

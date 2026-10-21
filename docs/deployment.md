@@ -14,7 +14,13 @@ The systemd unit runs as `uvnvr`, stores data in `/var/lib/uvnvr`, binds HTTP 80
 
 ### Windows
 
-**The Inno Setup installer** installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR` (or `<install>\data` when installed on another drive), creates Start-menu and desktop **UvNVR Web UI** shortcuts, adds a firewall rule and a startup scheduled task. The uninstaller preserves the data directory. When the executable is installed under Program Files and no `--data-dir` is given, UvNVR defaults to `%ProgramData%\UvNVR`; a portable copy outside Program Files defaults to the `data` directory next to it (for `bin\uvnvr.exe`, that is `<root>\data`). Run a portable copy with `bin\uvnvr.exe --data-dir <dir>` (extracting under Program Files is not writable for normal users). `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
+**The Inno Setup installer** installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR` (or `<install>\data` when installed on another drive), adds a firewall rule and offers a **Startup** task page. With **Register UvNVR as a Windows service** selected (the default, recommended for production) the installer creates the `UvNVR` service with automatic startup, starts it, and the single desktop shortcut opens the web UI. Without it, the desktop shortcut launches the console process with `--open`, which also opens the browser. The uninstaller stops and deletes the service, removes the firewall rule and preserves the data directory. When the executable is installed under Program Files and no `--data-dir` is given, UvNVR defaults to `%ProgramData%\UvNVR`; a portable copy outside Program Files defaults to the `data` directory next to it (for `bin\uvnvr.exe`, that is `<root>\data`). Run a portable copy with `bin\uvnvr.exe --data-dir <dir>` (extracting under Program Files is not writable for normal users). `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
+
+The service can also be managed after installation from **Settings → System service**:
+register it (administrator rights required), or unregister it. Both actions
+restart the recorder; after unregistering, UvNVR returns as a console process
+and the page reconnects. The service runs as `LocalSystem` and logs to
+`%ProgramData%\UvNVR\logs\service.log`.
 
 An **x64 MSI** is also published. It is per-machine and accepts port properties:
 
@@ -22,7 +28,8 @@ An **x64 MSI** is also published. It is per-machine and accepts port properties:
 msiexec /i uvnvr-0.7.0-windows-x64.msi HTTPPORT=9090 RTSPPORT=9554 /qn
 ```
 
-The MSI creates the same desktop/Start-menu shortcuts, boot task and firewall
+The MSI registers the same Windows service (it is a machine-wide package, so
+there is no opt-out), creates the same desktop/Start-menu shortcuts and firewall
 rule, writes `%ProgramData%\UvNVR\uvnvr.json` (or `<install>\data` for another
 drive), and preserves the config/data on uninstall. It is unsigned, so Windows
 SmartScreen may warn. Arm64 and portable installs use the Inno Setup installer/zip.
@@ -56,6 +63,32 @@ Or pass the values directly:
 ```bash
 /opt/uvnvr/bin/uvnvr --port 8080 --rtsp-port 554 --data-dir /var/lib/uvnvr
 ```
+
+`--open` opens the web UI in the default browser once the server is listening;
+the Windows console shortcuts use it. `--service` is the Windows SCM entry point
+and is only meaningful when the process was started by the service manager.
+
+## System service
+
+**Settings → System service** shows whether the platform service is registered,
+running and enabled at boot, and offers **Register as system service** /
+**Unregister service**. Both operations restart the recorder and need
+administrator (Windows) or root (Linux) rights.
+
+- Windows: registers the `UvNVR` service with `sc.exe` (`start= auto`,
+  `obj= LocalSystem`). The installers do the same; the Inno Setup wizard lets you
+  skip it for a console-only test installation.
+- Linux: writes `/etc/systemd/system/uvnvr.service` with the current executable,
+  configuration and data directory, enables it, and starts it as root. Release
+  packages instead ship `/lib/systemd/system/uvnvr.service`, which runs as the
+  dedicated `uvnvr` user with `CAP_NET_BIND_SERVICE`.
+- macOS: registration is owned by the pkg (launchd); the web UI reports the
+  state but directs changes to the package or `launchctl`.
+
+Unregistering stops the service and starts a console instance again (with the
+browser opened) so the web UI stays reachable. The service logs to
+`%ProgramData%\UvNVR\logs\service.log` on Windows and to the journal
+(`journalctl -u uvnvr`) on Linux.
 
 ## Ports
 

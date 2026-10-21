@@ -18,6 +18,27 @@ All notable changes to UvNVR are documented here. The format follows
   and seeks on release; clicking still works.
 - Snapshot thumbnails show a loading spinner until the JPEG arrives.
 - Audit values (level, action, result) are localized in Chinese.
+- **System service management.** **Settings → System service** reports the
+  service state and registers or unregisters it. Windows uses the SCM
+  (`UvNVR`, automatic start, `LocalSystem`); Linux writes and enables an
+  `/etc/systemd/system/uvnvr.service` unit. The recorder restarts after either
+  action, and unregistering starts a console instance again. A new
+  `--service` flag is the Windows SCM entry point; `--open` starts the server
+  and opens the web UI in the browser.
+- **Windows installer options.** Inno Setup now offers a **Startup** task
+  (service registration, checked by default; console otherwise), creates a
+  single desktop shortcut that adapts to that choice, and stops the existing
+  service before upgrading. The MSI registers the service instead of a boot
+  task.
+- **About page** now describes the project, repository, issues and docs links,
+  build information, the MIT license and a deployment/risk notice.
+- **Help page** links to the self-hosted Swagger UI (`/api/docs`) and the
+  OpenAPI document, and documents events, snapshots, encoder, alerts and RTSP
+  authentication accurately.
+- **New icon.** A play mark inside an aperture ring replaces the lens mark;
+  all platform, installer, PWA and favicon assets are regenerated from one SVG
+  with headless Chrome, and the Windows executable now embeds the icon so
+  shortcuts and Explorer show it.
 
 ### Changed
 
@@ -28,6 +49,13 @@ All notable changes to UvNVR are documented here. The format follows
 - Light theme: plan brushes (timed/event/both/erase), segmented controls,
   layout tabs and small active buttons no longer use white text on a white
   background; accent, warning, violet and danger variants use theme tokens.
+
+### Fixed
+
+- The Swagger UI page requested `/api/openapi.json` (404) instead of
+  `/api/v1/openapi.json`.
+- The Windows installer created two desktop shortcuts, and the non-service
+  shortcut did not start UvNVR.
 
 ## [0.17.0] - 2026-10-22
 

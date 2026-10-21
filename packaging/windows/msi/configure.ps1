@@ -18,6 +18,13 @@ $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Uv
 $startUrl = Join-Path $startDir 'UvNVR Web UI.url'
 
 if ($Uninstall) {
+    $svc = Get-Service -Name 'UvNVR' -ErrorAction SilentlyContinue
+    if ($svc) {
+        Stop-Service -Name 'UvNVR' -Force -ErrorAction SilentlyContinue
+        try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) } catch {}
+    }
+    Start-Sleep -Milliseconds 500
+    & sc.exe delete UvNVR | Out-Null
     Unregister-ScheduledTask -TaskName 'UvNVR' -Confirm:$false -ErrorAction SilentlyContinue
     Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
     Remove-Item $desktopUrl -Force -ErrorAction SilentlyContinue
@@ -56,11 +63,22 @@ New-Item -ItemType Directory -Force $startDir | Out-Null
 "[InternetShortcut]`r`nURL=$url`r`n" | Set-Content -Path $desktopUrl -Encoding ASCII
 "[InternetShortcut]`r`nURL=$url`r`n" | Set-Content -Path $startUrl -Encoding ASCII
 
-$action = New-ScheduledTaskAction -Execute $exe -Argument "--config `"$configPath`""
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName 'UvNVR' -Action $action -Trigger $trigger -Principal $principal `
-    -Description 'UvNVR software network video recorder' -Force | Out-Null
+# The MSI is a machine-wide installation, so it registers the Windows service
+# (recommended for production). The Inno Setup wizard lets the operator opt out.
+Unregister-ScheduledTask -TaskName 'UvNVR' -Confirm:$false -ErrorAction SilentlyContinue
+$binPath = '"{0}" --service --config "{1}"' -f $exe, $configPath
+$existing = Get-Service -Name 'UvNVR' -ErrorAction SilentlyContinue
+if ($existing) {
+    Stop-Service -Name 'UvNVR' -Force -ErrorAction SilentlyContinue
+    try { $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) } catch {}
+}
+Start-Sleep -Milliseconds 500
+& sc.exe create UvNVR binPath= $binPath start= auto obj= LocalSystem DisplayName= 'UvNVR' | Out-Null
+if ($LASTEXITCODE -eq 1073) {
+    & sc.exe config UvNVR binPath= $binPath start= auto | Out-Null
+}
+& sc.exe description UvNVR 'UvNVR software network video recorder' | Out-Null
+& sc.exe start UvNVR | Out-Null
 Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName 'UvNVR' -Direction Inbound -Program $exe -Action Allow `
     -Profile Any | Out-Null

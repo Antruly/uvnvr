@@ -543,7 +543,7 @@ uvnvr/
 
 ### 7.3 安装包行为
 
-- **Windows（NSIS）**：安装到 `Program Files\UvNVR`；数据 `%ProgramData%\UvNVR`；注册 Windows 服务（`uvnvr.exe --service`）；防火墙放行 HTTP/HTTPS/RTSP；开始菜单/桌面快捷方式；卸载保留数据（可选删除）。
+- **Windows（Inno Setup）**：安装到 `Program Files\UvNVR`；数据 `%ProgramData%\UvNVR`；可选注册 Windows 服务（`uvnvr.exe --service`，默认勾选，自动启动，LocalSystem）；防火墙放行 HTTP/HTTPS/RTSP；单一桌面快捷方式（服务模式打开网页，控制台模式启动程序并打开浏览器）；开始菜单入口；卸载保留数据（可选删除）。
 - **Linux（deb/rpm）**：`/opt/uvnvr`、`/etc/uvnvr`、`/var/lib/uvnvr`、`/var/log/uvnvr`；`uvnvr.service`（systemd）；`AmbientCapabilities=CAP_NET_BIND_SERVICE` 绑定 554；创建 `uvnvr` 系统用户；卸载保留数据，`purge` 删除。
 - **macOS**：`/usr/local/uvnvr` 或 `/Applications/UvNVR.app` 启动器；launchd `com.antruly.uvnvr`；`.pkg` 安装，`.dmg` 内含 pkg 与说明；数据 `~/Library/Application Support/UvNVR` 或 `/Library/Application Support/UvNVR`（按安装方式）。
 - 首次访问 `http://host:8080` 进入设置向导；安装日志打印访问地址与 RTSP 地址。
@@ -624,7 +624,7 @@ uvnvr/
 | 0.15.0 | ✅ 2026-10-22 | 海康 ISAPI 与大华 CGI 编码参数读取/应用、协议自动选择与统一 API/UI、品牌 mock 集成测试 |
 | 0.16.0 | ✅ 2026-10-22 | 录像 I/O 改为 libuv fs 请求（Linux io_uring 自动启用）、fsync 批量控制、CMake 显式链接 libuv |
 | 0.17.0 | ✅ 2026-10-22 | Inno Setup Windows 安装包（中英文/桌面快捷方式/防火墙/开机任务）、ONVIF 扫描多选批量添加、界面与图标刷新、亮色主题补全 |
-| 0.18.0 | ✅ 2026-10-22 | 录制中切片实时回放（part 文件跟随/切片轮换续播）、可拖动时间轴、抓拍加载动画、默认永久保留、审计中文化、亮色选中按钮修复 |
+| 0.18.0 | ✅ 2026-10-22 | 录制中切片实时回放（part 文件跟随/切片轮换续播）、可拖动时间轴、抓拍加载动画、默认永久保留、审计中文化、亮色选中按钮修复、系统服务注册/卸载（Windows SCM + systemd）、关于与帮助页重写、Swagger 入口、全新图标与单桌面快捷方式安装包 |
 
 
 > 估算为 1 名主程 + AI 辅助的“人日”参考，用于排序与范围控制，不作为固定交付日期。每个里程碑结束都要求构建通过、核心路径手工验收、CI 绿。

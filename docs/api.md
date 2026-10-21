@@ -39,6 +39,9 @@ header for cookie-authenticated mutating requests.
 | POST | `/api/v1/system/time/sync` | system.manage |
 | POST | `/api/v1/system/ntp/sync` | system.manage |
 | POST | `/api/v1/system/email/test` | system.manage |
+| GET | `/api/v1/system/service` | system.view |
+| POST | `/api/v1/system/service/install` | system.manage |
+| POST | `/api/v1/system/service/uninstall` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
 | GET | `/api/v1/preview/channels` | preview.view |
 | POST | `/api/v1/channels/detect` | channel.manage |
@@ -279,6 +282,32 @@ Scopes are returned by `GET /api/v1/tokens`.
 | `rtsp` | RTSP output |
 | `audit` | Audit log |
 | `users` | Users and roles |
+
+## System service
+
+`GET /api/v1/system/service` reports the platform service state:
+
+```json
+{
+  "platform": "windows",
+  "manager": "Windows Service Control Manager",
+  "detail": "UvNVR",
+  "supported": true,
+  "installed": true,
+  "running": true,
+  "autostart": true,
+  "runningAsService": false
+}
+```
+
+`POST /api/v1/system/service/install` registers UvNVR with automatic startup and
+returns `{ "installed": true, "restarting": true }`.
+`POST /api/v1/system/service/uninstall` removes the registration and returns
+`{ "installed": false, "restarting": true }` when the request came from the
+service itself. Both require `system.manage` and administrator (Windows) or
+root (Linux) rights. The response is sent before the process restarts, so a
+client should retry after a few seconds; unregistering leaves a console
+instance running with the same ports and data.
 
 ## Time synchronization
 

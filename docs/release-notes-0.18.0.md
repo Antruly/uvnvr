@@ -22,6 +22,33 @@ Live playback and polish.
   segmented controls, layout tabs and small active buttons no longer render
   white text on white. Warning/violet/danger variants have their own tokens.
 - API-token scope groups alternate row backgrounds for easier scanning.
+- **System service management.** **Settings → System service** shows whether
+  UvNVR is registered, running and enabled at boot, and can register or remove
+  the service. Windows uses the Service Control Manager; Linux writes and
+  enables a systemd unit. Both actions restart the recorder and the page
+  reconnects; unregistering starts a console instance again. New flags:
+  `--service` (Windows SCM entry point) and `--open` (open the web UI in the
+  browser after startup).
+- **Updated Windows packaging.** The Inno Setup wizard has a **Startup** page:
+  keep **Register UvNVR as a Windows service** for production, clear it for a
+  console install. There is now one desktop shortcut: with the service it opens
+  the web UI; without it, it starts UvNVR and opens the browser. Upgrades stop
+  the running service before replacing files. The MSI registers the service
+  too.
+- **About and help pages.** About now covers the project, repository, issues,
+  documentation, build information, the MIT license and a deployment/risk
+  notice. Help links to the self-hosted Swagger UI and OpenAPI document and
+  describes the event, snapshot, encoder, alert and RTSP interfaces.
+- **New application mark.** A play symbol inside an aperture ring, regenerated
+  for Windows, macOS, Linux, the installer, PWA and favicon assets. The Windows
+  executable embeds it, so shortcuts and Explorer no longer show a generic icon.
+
+## Fixed
+
+- Swagger UI loaded `/api/openapi.json`, which does not exist; it now uses
+  `/api/v1/openapi.json`.
+- The Windows installer created two desktop shortcuts and the console shortcut
+  did not launch the application.
 
 ## Notes
 

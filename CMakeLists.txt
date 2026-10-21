@@ -116,7 +116,20 @@ add_executable(uvnvr
   src/rtsp.cpp
   src/ntp.cpp
   src/platform.cpp
+  src/service.cpp
 )
+
+if(WIN32)
+  # The icon resource is what Explorer and shortcuts display; SetupIconFile
+  # only covers the installer itself. Generate the script so the icon path is
+  # absolute, independent of the resource compiler's working directory.
+  enable_language(RC)
+  file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/uvnvr.ico"
+       UVNVR_ICON_PATH)
+  configure_file(resources/windows/uvnvr.rc.in
+                 "${CMAKE_BINARY_DIR}/generated/uvnvr.rc" @ONLY)
+  target_sources(uvnvr PRIVATE "${CMAKE_BINARY_DIR}/generated/uvnvr.rc")
+endif()
 
 target_include_directories(uvnvr PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -158,7 +171,9 @@ if(WIN32)
   # uvcpp's Windows headers pull in <windows.h>; keep its min/max macros from
   # breaking std::min/std::max in this project (MSVC sees C2589 otherwise).
   target_compile_definitions(uvnvr PRIVATE NOMINMAX)
-  target_link_libraries(uvnvr PRIVATE ws2_32)
+  # wtsapi32/userenv let the service launch an interactive console instance
+  # after it is unregistered (session 0 isolation).
+  target_link_libraries(uvnvr PRIVATE ws2_32 wtsapi32 userenv advapi32 shell32)
 endif()
 
 # The release archive is a shared library outside the normal loader path.

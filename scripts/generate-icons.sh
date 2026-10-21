@@ -9,8 +9,29 @@ out="$root/resources/branding"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-for size in 16 32 48 64 128 256 512 1024; do
-  convert -background none "$src" -resize "${size}x${size}" "$tmp/icon-${size}.png"
+# Render at 1024 once, then downscale. Chrome produces the same gradients and
+# dashes as the web UI; ImageMagick's internal SVG renderer does not.
+rendered=0
+if command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+  chrome="$(command -v google-chrome || command -v chromium)"
+  cat > "$tmp/icon.html" <<EOF
+<!doctype html><html><head><style>html,body{margin:0;background:transparent}img{display:block;width:1024px;height:1024px}</style></head><body><img src="file://$src"></body></html>
+EOF
+  "$chrome" --headless --disable-gpu --no-sandbox --hide-scrollbars \
+    --default-background-color=00000000 --window-size=1024,1024 \
+    --screenshot="$tmp/icon-1024.png" "file://$tmp/icon.html" >/dev/null 2>&1 || true
+  [[ -s "$tmp/icon-1024.png" ]] && rendered=1
+fi
+if [[ "$rendered" -eq 0 ]] && command -v rsvg-convert >/dev/null 2>&1; then
+  rsvg-convert -w 1024 -h 1024 "$src" -o "$tmp/icon-1024.png"
+  rendered=1
+fi
+if [[ "$rendered" -eq 0 ]]; then
+  convert -background none "$src" -resize 1024x1024 "$tmp/icon-1024.png"
+fi
+
+for size in 16 32 48 64 128 256 512; do
+  convert -background none "$tmp/icon-1024.png" -resize "${size}x${size}" "$tmp/icon-${size}.png"
 done
 
 cp "$tmp/icon-512.png" "$out/uvnvr-512.png"

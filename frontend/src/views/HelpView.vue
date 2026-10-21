@@ -2,11 +2,14 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
+import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'HelpView' })
 
 const { t, locale } = useI18n()
+const auth = useAuthStore()
 const query = ref('')
+const canUseApi = () => auth.hasPermission('api.access')
 
 interface Section {
   id: string
@@ -34,6 +37,16 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
         'Ports, bind address, the data directory and TLS are read from uvnvr.json at startup. Command-line flags override environment variables, which override the file.',
         'Windows installer: choose the HTTP and RTSP ports on the Service ports page; the file is %ProgramData%\\UvNVR\\uvnvr.json. Linux: /etc/uvnvr/uvnvr.json. macOS: /Library/Application Support/UvNVR/uvnvr.json.',
         'Run uvnvr --print-config to see the merged settings, then restart the service after editing the file.',
+      ],
+    },
+    {
+      id: 'service',
+      title: 'Running as a system service',
+      body: [
+        'The Windows installer registers UvNVR as a service by default on the Startup page. Clear the option to run a console instance instead.',
+        'Settings → System service shows the registration state and can register or remove it. Registration needs administrator (Windows) or root (Linux) rights, restarts UvNVR and the page reconnects automatically.',
+        'With the service, the single desktop shortcut opens the web UI. Without it, the shortcut starts UvNVR and opens the browser; pass --open from a terminal for the same effect.',
+        'Windows service logs are in %ProgramData%\\UvNVR\\logs\\service.log. On Linux use journalctl -u uvnvr.',
       ],
     },
     {
@@ -76,9 +89,11 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: 'API and RTSP output',
       body: [
         'REST endpoints live under /api/v1. Create an API token in System → API Token and use Authorization: Bearer.',
-        'Snapshots: GET /api/v1/channels/{id}/snapshot. Recordings: GET /api/v1/recordings.',
+        'OpenAPI 3.1 is served at /api/v1/openapi.json. The self-hosted Swagger UI at /api/docs loads the spec and lets you authorize with a bearer token; both require api.access.',
+        'Snapshots: GET /api/v1/channels/{id}/snapshot (optional width/height/quality). Recordings: GET /api/v1/recordings, including the active .ts.part segment. Alerts: GET /api/v1/alerts. Encoder: GET/PUT /api/v1/channels/{id}/encoder.',
+        'Real-time events: POST /api/v1/events/ticket then connect to /ws/events for alert and channel-state messages.',
         'RTSP output: rtsp://user:pass@host:554/live/{channel}/{main|sub}. The server falls back to 8554/8555 when 554 is unavailable.',
-        'RTSP uses HTTP Basic-equivalent RTSP Basic authentication and RTP/MP2T (payload type 33).',
+        'RTSP accepts Basic and Digest authentication and sends H.264/H.265 video as RTP payload type 96 plus AAC/G.711 audio when present. DESCRIBE returns 503 while the channel is offline.',
       ],
     },
     {
@@ -135,6 +150,16 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       ],
     },
     {
+      id: 'service',
+      title: '以系统服务运行',
+      body: [
+        'Windows 安装包默认在“启动”页注册系统服务；取消勾选则以控制台方式运行。',
+        '“设置 → 系统服务”显示注册状态，并可随时注册或卸载。注册需要管理员（Windows）或 root（Linux）权限，会重启 UvNVR，页面会自动重连。',
+        '已注册服务时，桌面唯一的快捷方式直接打开 Web 界面；未注册时，快捷方式启动 UvNVR 并打开浏览器。命令行加 --open 效果相同。',
+        'Windows 服务日志位于 %ProgramData%\\UvNVR\\logs\\service.log；Linux 使用 journalctl -u uvnvr。',
+      ],
+    },
+    {
       id: 'camera',
       title: '摄像头协议',
       body: [
@@ -174,9 +199,11 @@ const sections: Record<'en-US' | 'zh-CN', Section[]> = {
       title: 'API 与 RTSP 输出',
       body: [
         'REST 接口位于 /api/v1。在“系统设置 → API Token”创建 Token，并使用 Authorization: Bearer。',
-        '抓拍：GET /api/v1/channels/{id}/snapshot；录像查询：GET /api/v1/recordings。',
+        'OpenAPI 3.1 文档位于 /api/v1/openapi.json；自托管 Swagger UI 位于 /api/docs，可填入 Bearer Token 调试；两者都需要 api.access。',
+        '抓拍：GET /api/v1/channels/{id}/snapshot（可选宽高/质量）；录像查询：GET /api/v1/recordings（包含正在写入的 .ts.part 切片）；预警：GET /api/v1/alerts；编码参数：GET/PUT /api/v1/channels/{id}/encoder。',
+        '实时事件：先 POST /api/v1/events/ticket，再连接 /ws/events 接收预警与通道状态。',
         'RTSP 输出：rtsp://user:pass@host:554/live/{channel}/{main|sub}。554 不可用时回退到 8554/8555。',
-        'RTSP 使用 Basic 鉴权与 RTP/MP2T（payload type 33）。',
+        'RTSP 支持 Basic 与 Digest 鉴权，视频以 RTP payload type 96 发送 H.264/H.265，源流带音频时附加 AAC/G.711；通道离线时 DESCRIBE 返回 503。',
       ],
     },
     {
@@ -233,10 +260,22 @@ const filtered = computed(() => {
       <h2>{{ t('help.title') }}</h2>
       <p>{{ t('help.subtitle') }}</p>
     </div>
-    <RouterLink class="button" to="/about">
-      <AppIcon name="arrow" :size="16" />
-      {{ t('nav.about') }}
-    </RouterLink>
+    <div class="head-actions">
+      <template v-if="canUseApi()">
+        <a class="button" href="/api/docs" target="_blank" rel="noreferrer">
+          <AppIcon name="key" :size="16" />
+          {{ t('help.openSwagger') }}
+        </a>
+        <a class="button" href="/api/v1/openapi.json" target="_blank" rel="noreferrer">
+          <AppIcon name="logs" :size="16" />
+          {{ t('help.openSpec') }}
+        </a>
+      </template>
+      <RouterLink class="button" to="/about">
+        <AppIcon name="arrow" :size="16" />
+        {{ t('nav.about') }}
+      </RouterLink>
+    </div>
   </section>
 
   <section class="panel help-search">

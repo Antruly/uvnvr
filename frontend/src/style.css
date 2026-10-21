@@ -940,15 +940,17 @@ p {
   grid-column: 1 / -1;
 }
 
+.about-links {
+  margin-top: 14px;
+}
+
 .danger-card {
-  border-color: rgba(248, 113, 113, 0.28);
-  background:
-    linear-gradient(180deg, rgba(60, 18, 24, 0.32), rgba(13, 21, 32, 0.88)),
-    var(--panel);
+  border-color: var(--danger-border);
+  background: linear-gradient(var(--danger-bg), var(--danger-bg)), var(--panel);
 }
 
 .danger-card h3 {
-  color: #fecaca;
+  color: var(--danger-text);
 }
 
 .meta-list {

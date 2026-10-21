@@ -7,10 +7,13 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
+#include <shellapi.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 #endif
@@ -54,6 +57,45 @@ std::string ExecutablePath() {
   char path[4096] = {0};
   const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
   return length <= 0 ? std::string() : std::string(path, static_cast<size_t>(length));
+#endif
+}
+
+bool OpenUrl(const std::string& url) {
+  if (url.empty())
+    return false;
+#ifdef _WIN32
+  const int length = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
+  if (length <= 0)
+    return false;
+  std::wstring wide(static_cast<size_t>(length), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wide.data(), length);
+  const HINSTANCE result =
+      ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  return reinterpret_cast<INT_PTR>(result) > 32;
+#else
+  // Detach the handler so a launcher that stays in the foreground (some
+  // xdg-open versions) never blocks the recorder.
+  const pid_t pid = fork();
+  if (pid != 0)
+    return pid > 0;
+  if (setsid() < 0) {
+    // Keep going: the handler still works when setsid is restricted.
+  }
+  const int null_fd = open("/dev/null", O_RDWR);
+  if (null_fd >= 0) {
+    dup2(null_fd, STDIN_FILENO);
+    dup2(null_fd, STDOUT_FILENO);
+    dup2(null_fd, STDERR_FILENO);
+    if (null_fd > STDERR_FILENO)
+      close(null_fd);
+  }
+#ifdef __APPLE__
+  execlp("open", "open", url.c_str(), static_cast<char*>(nullptr));
+#else
+  execlp("xdg-open", "xdg-open", url.c_str(), static_cast<char*>(nullptr));
+  execlp("gio", "gio", "open", url.c_str(), static_cast<char*>(nullptr));
+#endif
+  _exit(127);
 #endif
 }
 

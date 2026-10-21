@@ -32,10 +32,12 @@ Ports and the data directory come from a JSON file and can be changed without
 rebuilding or reinstalling:
 
 - Windows installer: choose the HTTP and RTSP ports on the **Service ports**
-  page (wizard available in English and Simplified Chinese). The installer
-  writes `%ProgramData%\UvNVR\uvnvr.json`, adds Start-menu entries and
-  **desktop shortcuts** for the web UI and the application, and installs the
-  boot task and firewall rule.
+  page (wizard available in English and Simplified Chinese). On the **Startup**
+  page, keep **Register UvNVR as a Windows service** for a production install;
+  clear it to run UvNVR as a console process instead. The installer writes
+  `%ProgramData%\UvNVR\uvnvr.json`, adds Start-menu entries, creates **one
+  desktop shortcut** (opens the web UI when the service is installed; otherwise
+  starts UvNVR and opens the browser), and adds the firewall rule.
 - Linux: edit `/etc/uvnvr/uvnvr.json`, then `sudo systemctl restart uvnvr`.
 - macOS: edit `/Library/Application Support/UvNVR/uvnvr.json`, then restart the
   launchd job.
@@ -44,6 +46,12 @@ rebuilding or reinstalling:
 Command-line flags override environment variables, which override the file.
 `uvnvr --print-config` shows the effective settings. See
 [`configuration.md`](configuration.md) for the full schema.
+
+On Windows and Linux, **Settings → System service** shows the service state and
+can register or unregister it later. Registration needs administrator or root
+rights, restarts the recorder, and the page reconnects automatically;
+unregistering returns UvNVR to a console process. On Windows the service logs to
+`%ProgramData%\UvNVR\logs\service.log`; on Linux use `journalctl -u uvnvr`.
 
 ```json
 {

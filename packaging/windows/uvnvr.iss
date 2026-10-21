@@ -66,6 +66,9 @@ english.PortsExisting=An existing configuration file will be preserved. Edit it 
 english.PortInvalid=Enter a port between 1 and 65535 for both HTTP and RTSP.
 english.PortConflict=The HTTP and RTSP ports must differ.
 english.LaunchWeb=Open the UvNVR web UI
+english.InstallService=Register UvNVR as a Windows service (recommended)
+english.LaunchApp=Launch UvNVR and open the web UI
+english.StartupGroup=Startup
 
 chinesesimplified.PortsTitle=服务端口
 chinesesimplified.PortsDescription=选择 UvNVR 监听的端口。
@@ -76,8 +79,12 @@ chinesesimplified.PortsExisting=检测到已有配置文件，安装时不会覆
 chinesesimplified.PortInvalid=HTTP 和 RTSP 端口都必须在 1 到 65535 之间。
 chinesesimplified.PortConflict=HTTP 端口与 RTSP 端口不能相同。
 chinesesimplified.LaunchWeb=打开 UvNVR Web 界面
+chinesesimplified.InstallService=注册为 Windows 服务（推荐正式环境）
+chinesesimplified.LaunchApp=启动 UvNVR 并打开 Web 界面
+chinesesimplified.StartupGroup=启动
 
 [Tasks]
+Name: "service"; Description: "{cm:InstallService}"; GroupDescription: "{cm:StartupGroup}"; Flags: checkedonce
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
@@ -88,9 +95,12 @@ Source: "..\..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion s
 [Icons]
 Name: "{group}\{#MyAppName} Web UI"; Filename: "http://127.0.0.1:{code:GetHttpPort}/"; IconFilename: "{app}\bin\{#MyAppExeName}"
 Name: "{group}\{#MyAppName} Configuration"; Filename: "{sys}\notepad.exe"; Parameters: """{commonappdata}\{#MyAppName}\uvnvr.json"""; IconFilename: "{app}\bin\{#MyAppExeName}"
+Name: "{group}\{#MyAppName} (console)"; Filename: "{app}\bin\{#MyAppExeName}"; Parameters: "--config ""{commonappdata}\{#MyAppName}\uvnvr.json"" --open"; IconFilename: "{app}\bin\{#MyAppExeName}"; Check: IsConsoleSelected
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName} Web UI"; Filename: "http://127.0.0.1:{code:GetHttpPort}/"; IconFilename: "{app}\bin\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#MyAppExeName}"; Parameters: "--config ""{commonappdata}\{#MyAppName}\uvnvr.json"""; IconFilename: "{app}\bin\{#MyAppExeName}"; Tasks: desktopicon
+; One desktop shortcut. With the service it opens the web UI (the service is
+; already running); without it, the shortcut starts the console and browser.
+Name: "{autodesktop}\{#MyAppName}"; Filename: "http://127.0.0.1:{code:GetHttpPort}/"; IconFilename: "{app}\bin\{#MyAppExeName}"; Tasks: desktopicon; Check: IsServiceSelected
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#MyAppExeName}"; Parameters: "--config ""{commonappdata}\{#MyAppName}\uvnvr.json"" --open"; IconFilename: "{app}\bin\{#MyAppExeName}"; Tasks: desktopicon; Check: IsConsoleSelected
 
 [Registry]
 Root: HKLM; Subkey: "Software\UvNVR"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
@@ -98,7 +108,8 @@ Root: HKLM; Subkey: "Software\UvNVR"; ValueType: string; ValueName: "HttpPort"; 
 Root: HKLM; Subkey: "Software\UvNVR"; ValueType: string; ValueName: "RtspPort"; ValueData: "{code:GetRtspPort}"
 
 [Run]
-Filename: "http://127.0.0.1:{code:GetHttpPort}/"; Description: "{cm:LaunchWeb}"; Flags: shellexec nowait postinstall skipifsilent
+Filename: "http://127.0.0.1:{code:GetHttpPort}/"; Description: "{cm:LaunchWeb}"; Flags: shellexec nowait postinstall skipifsilent; Check: IsServiceSelected
+Filename: "{app}\bin\{#MyAppExeName}"; Parameters: "--config ""{commonappdata}\{#MyAppName}\uvnvr.json"" --open"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent; Check: IsConsoleSelected
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN UvNVR /F"; Flags: runhidden; RunOnceId: "DeleteTask"
@@ -118,6 +129,16 @@ end;
 function GetRtspPort(Param: String): String;
 begin
   Result := RtspPort;
+end;
+
+function IsServiceSelected: Boolean;
+begin
+  Result := WizardIsTaskSelected('service');
+end;
+
+function IsConsoleSelected: Boolean;
+begin
+  Result := not WizardIsTaskSelected('service');
 end;
 
 function ConfigPath: String;
@@ -201,11 +222,45 @@ begin
   end;
 
   Exe := ExpandConstant('{app}\bin\{#MyAppExeName}');
-  Cmd := '/Create /TN UvNVR /TR "\"' + Exe + '\" --config \"' + Config +
-         '\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F';
-  Exec(ExpandConstant('{sys}\schtasks.exe'), Cmd, '', SW_HIDE,
+  if WizardIsTaskSelected('service') then
+  begin
+    Cmd := 'create UvNVR binPath= "\"' + Exe + '\" --service --config \"' + Config +
+           '\"" start= auto obj= LocalSystem DisplayName= "UvNVR"';
+    Exec(ExpandConstant('{sys}\sc.exe'), Cmd, '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Log('sc create returned ' + IntToStr(ResultCode));
+    if ResultCode = 1073 then
+    begin
+      // Already registered (upgrade): update the binary path instead.
+      Cmd := 'config UvNVR binPath= "\"' + Exe + '\" --service --config \"' + Config +
+             '\"" start= auto';
+      Exec(ExpandConstant('{sys}\sc.exe'), Cmd, '', SW_HIDE,
+           ewWaitUntilTerminated, ResultCode);
+      Log('sc config returned ' + IntToStr(ResultCode));
+    end;
+    Exec(ExpandConstant('{sys}\sc.exe'),
+         'description UvNVR "UvNVR software network video recorder"', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\sc.exe'), 'start UvNVR', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Log('sc start returned ' + IntToStr(ResultCode));
+  end
+  else
+  begin
+    // The service task was cleared: remove a registration left by an
+    // earlier version or an upgrade.
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop UvNVR', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\sc.exe'), 'delete UvNVR', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Log('sc delete returned ' + IntToStr(ResultCode));
+  end;
+
+  // 0.17 installs used a boot scheduled task; drop it so it cannot start a
+  // second copy next to the service or the console shortcut.
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN UvNVR /F', '', SW_HIDE,
        ewWaitUntilTerminated, ResultCode);
-  Log('schtasks create returned ' + IntToStr(ResultCode));
+  Log('legacy task removal returned ' + IntToStr(ResultCode));
 
   Exec(ExpandConstant('{sys}\netsh.exe'),
        'advfirewall firewall delete rule name="UvNVR"', '', SW_HIDE,
@@ -216,8 +271,26 @@ begin
   Log('firewall update returned ' + IntToStr(ResultCode));
 end;
 
+procedure StopExistingService;
+var
+  ResultCode: Integer;
+begin
+  // An upgrade must not overwrite a running uvnvr.exe. sc stop returns as
+  // soon as the stop is pending, so give the process a moment to exit.
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop UvNVR', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+  begin
+    Exec(ExpandConstant('{sys}\cmd.exe'), '/c ping -n 7 127.0.0.1 >nul', '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Log('service stop wait finished');
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssInstall then
+    StopExistingService;
   if CurStep = ssPostInstall then
     ApplyServiceConfiguration;
 end;
@@ -228,6 +301,13 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
+    Exec(ExpandConstant('{sys}\sc.exe'),
+         'stop UvNVR', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode = 0 then
+      Exec(ExpandConstant('{sys}\cmd.exe'), '/c ping -n 7 127.0.0.1 >nul', '',
+           SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\sc.exe'),
+         'delete UvNVR', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\schtasks.exe'),
          '/Delete /TN UvNVR /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\netsh.exe'),

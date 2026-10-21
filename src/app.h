@@ -97,6 +97,16 @@ public:
   explicit App(Config config);
   ~App();
   int Run();
+  // Thread-safe; makes Run() return. Used by the Windows service control
+  // handler and by service registration transitions.
+  void RequestShutdown();
+  void SetOpenBrowser(bool open) {
+    open_browser_ = open;
+  }
+  // Invoked once the web server, media pipeline and RTSP listener are ready.
+  void SetStartedCallback(std::function<void()> callback) {
+    started_callback_ = std::move(callback);
+  }
 
 private:
   bool Init(std::string* error);
@@ -252,6 +262,8 @@ private:
   std::atomic<int64_t> last_audit_cleanup_{0};
   uint64_t last_cpu_total_ = 0;
   uint64_t last_cpu_idle_ = 0;
+  bool open_browser_ = false;
+  std::function<void()> started_callback_;
 };
 
 } // namespace uvnvr

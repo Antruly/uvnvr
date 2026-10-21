@@ -102,6 +102,17 @@ interface StartupConfig {
   config: { path: string; loaded: boolean }
 }
 
+interface ServiceStatus {
+  platform: string
+  manager: string
+  detail: string
+  supported: boolean
+  installed: boolean
+  running: boolean
+  autostart: boolean
+  runningAsService: boolean
+}
+
 const { t } = useI18n()
 const auth = useAuthStore()
 
@@ -146,6 +157,8 @@ const settings = reactive<Settings>({
 const smtpPassword = ref('')
 const summary = ref<Summary | null>(null)
 const startup = ref<StartupConfig | null>(null)
+const service = ref<ServiceStatus | null>(null)
+const serviceBusy = ref(false)
 const tokens = ref<TokenRow[]>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -177,12 +190,14 @@ function formatTime(seconds: number) {
 async function load() {
   error.value = ''
   try {
-    const [settingsResponse, summaryResponse, tokensResponse, startupResponse] = await Promise.all([
-      api<Settings>('/api/v1/settings'),
-      api<Summary>('/api/v1/system/overview'),
-      canUseApi() ? api<TokenRow[]>('/api/v1/tokens') : Promise.resolve([]),
-      api<StartupConfig>('/api/v1/system/config'),
-    ])
+    const [settingsResponse, summaryResponse, tokensResponse, startupResponse, serviceResponse] =
+      await Promise.all([
+        api<Settings>('/api/v1/settings'),
+        api<Summary>('/api/v1/system/overview'),
+        canUseApi() ? api<TokenRow[]>('/api/v1/tokens') : Promise.resolve([]),
+        api<StartupConfig>('/api/v1/system/config'),
+        api<ServiceStatus>('/api/v1/system/service'),
+      ])
     Object.assign(settings.security, settingsResponse.security)
     Object.assign(settings.audit, settingsResponse.audit)
     Object.assign(settings.event, settingsResponse.event)
@@ -195,6 +210,7 @@ async function load() {
     versionEdit.value = summaryResponse.version
     tokens.value = tokensResponse
     startup.value = startupResponse
+    service.value = serviceResponse
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -424,6 +440,60 @@ async function testEmail() {
     flash(t('system.emailTestSent'))
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
+async function loadService() {
+  try {
+    service.value = await api<ServiceStatus>('/api/v1/system/service')
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
+function waitForRestart(attempt = 0) {
+  window.setTimeout(async () => {
+    try {
+      service.value = await api<ServiceStatus>('/api/v1/system/service')
+      await load()
+    } catch {
+      if (attempt < 15) waitForRestart(attempt + 1)
+      else error.value = t('system.serviceFailed')
+    }
+  }, attempt === 0 ? 5000 : 2000)
+}
+
+async function installService() {
+  if (!canManage()) return
+  if (!window.confirm(t('system.serviceInstallConfirm'))) return
+  serviceBusy.value = true
+  error.value = ''
+  try {
+    await api('/api/v1/system/service/install', { method: 'POST' })
+    flash(t('system.serviceRestarting'))
+    waitForRestart()
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('system.serviceFailed')
+  } finally {
+    serviceBusy.value = false
+  }
+}
+
+async function uninstallService() {
+  if (!canManage()) return
+  if (!window.confirm(t('system.serviceUninstallConfirm'))) return
+  serviceBusy.value = true
+  error.value = ''
+  try {
+    const wasService = service.value?.runningAsService ?? false
+    await api('/api/v1/system/service/uninstall', { method: 'POST' })
+    flash(wasService ? t('system.serviceRestarting') : t('system.serviceUninstalled'))
+    if (wasService) waitForRestart()
+    else window.setTimeout(() => { void load() }, 1200)
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('system.serviceFailed')
+  } finally {
+    serviceBusy.value = false
   }
 }
 
@@ -738,6 +808,67 @@ onMounted(load)
           </div>
         </dl>
         <p class="small-note">{{ t('system.startupConfigHint') }}</p>
+      </article>
+
+      <article v-if="service" class="panel settings-card">
+        <div class="section-title">
+          <AppIcon name="shield" :size="20" />
+          <h3>{{ t('system.serviceTitle') }}</h3>
+        </div>
+        <dl class="meta-list">
+          <div>
+            <dt>{{ t('system.serviceManager') }}</dt>
+            <dd>{{ service.manager }}<span v-if="service.detail"> · {{ service.detail }}</span></dd>
+          </div>
+          <div>
+            <dt>{{ t('system.serviceState') }}</dt>
+            <dd>
+              {{
+                service.installed
+                  ? service.running
+                    ? t('system.serviceRunning')
+                    : t('system.serviceStopped')
+                  : t('system.serviceNotInstalled')
+              }}
+            </dd>
+          </div>
+          <div>
+            <dt>{{ t('system.serviceAutostart') }}</dt>
+            <dd>{{ service.autostart ? t('system.serviceEnabled') : t('system.serviceDisabled') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('system.serviceProcess') }}</dt>
+            <dd>{{ service.runningAsService ? t('system.serviceModeService') : t('system.serviceModeConsole') }}</dd>
+          </div>
+        </dl>
+        <p class="small-note">
+          {{ service.supported ? t('system.serviceHint') : t('system.serviceUnsupported') }}
+        </p>
+        <div class="modal-actions">
+          <button
+            v-if="service.supported && !service.installed"
+            type="button"
+            class="button primary"
+            :disabled="serviceBusy || !canManage()"
+            @click="installService"
+          >
+            <AppIcon name="shield" :size="15" />
+            {{ serviceBusy ? t('system.serviceBusy') : t('system.serviceInstall') }}
+          </button>
+          <button
+            v-else-if="service.supported"
+            type="button"
+            class="button danger"
+            :disabled="serviceBusy || !canManage()"
+            @click="uninstallService"
+          >
+            {{ serviceBusy ? t('system.serviceBusy') : t('system.serviceUninstall') }}
+          </button>
+          <button type="button" class="button" :disabled="serviceBusy" @click="loadService">
+            <AppIcon name="refresh" :size="15" />
+            {{ t('common.refresh') }}
+          </button>
+        </div>
       </article>
 
       <article v-if="summary?.maintenance" class="panel settings-card">

@@ -5,6 +5,7 @@
 #include "onvif.h"
 #include "openapi.h"
 #include "platform.h"
+#include "service.h"
 
 #include <algorithm>
 #include <array>
@@ -1894,6 +1895,10 @@ uvcpp::uvcpp_web_handler App::Protected(uvcpp::uvcpp_web_handler handler,
   };
 }
 
+void App::RequestShutdown() {
+  web_.stop();
+}
+
 int App::Run() {
   std::string error;
   if (!Init(&error)) {
@@ -2012,6 +2017,16 @@ int App::Run() {
   std::printf("ffmpeg: %s (%s)\n", media_->FfmpegPath().c_str(),
               media_->Available() ? "available" : "not found");
   std::fflush(stdout);
+  if (started_callback_) {
+    started_callback_();
+    started_callback_ = nullptr;
+  }
+  if (open_browser_) {
+    const std::string url = std::string(tls_enabled ? "https" : "http") + "://" + display_host +
+                            ":" + std::to_string(web_.bound_port()) + "/";
+    if (!platform::OpenUrl(url))
+      std::fprintf(stderr, "could not open a browser; visit %s\n", url.c_str());
+  }
   web_.join();
   if (recording_)
     recording_->Stop();
@@ -2069,7 +2084,7 @@ void App::RegisterPublicRoutes() {
                      "<script src=\"/api-docs/swagger-ui-bundle.js\"></script>"
                      "<script src=\"/api-docs/swagger-ui-standalone-preset.js\"></script>"
                      "<script>window.onload=function(){window.ui=SwaggerUIBundle({"
-                     "url:'/api/openapi.json',dom_id:'#swagger-ui',deepLinking:true,"
+                     "url:'/api/v1/openapi.json',dom_id:'#swagger-ui',deepLinking:true,"
                      "presets:[SwaggerUIBundle.presets.apis,SwaggerUIStandalonePreset],"
                      "layout:'StandaloneLayout'});};</script></body></html>";
                  resp.set_header("Content-Type", "text/html; charset=utf-8");
@@ -7967,6 +7982,101 @@ void App::RegisterSystemRoutes() {
                       });
                 },
                 "system.manage"));
+
+  web_.get("/api/v1/system/service",
+           Protected(
+               [](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                  uvcpp::uvcpp_web_next next) {
+                 SendJson(resp, 200, service::StatusJson());
+                 next();
+               },
+               "system.view"));
+
+  // Registration and removal run external service managers. The response is
+  // sent first, then this process shuts down so the replacement instance can
+  // bind the same ports.
+  web_.post(
+      "/api/v1/system/service/install",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, actor, ip, ua, op] {
+                  std::string error;
+                  const bool ok = service::Install(config_, &error);
+                  if (ok) {
+                    service::ScheduleStart(config_);
+                    op->data = json{{"installed", true}, {"restarting", true}};
+                  } else {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "service_install_failed";
+                    op->message = error;
+                    op->data = json{{"installed", false}, {"error", error}};
+                  }
+                  Audit("system", "warning", actor.username, ip, ua, "service", "",
+                        "service_install", ok ? "success" : "failure",
+                        ok ? "" : "service_install_failed", json{{"error", error}}.dump());
+                },
+                [this, op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                  if (!op->ok)
+                    return;
+                  std::thread([this] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+                    web_.stop();
+                  }).detach();
+                });
+          },
+          "system.manage"));
+
+  web_.post(
+      "/api/v1/system/service/uninstall",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            auto was_service = std::make_shared<bool>(false);
+            RunWork(
+                [this, actor, ip, ua, op, was_service] {
+                  std::string error;
+                  *was_service = service::Query().running_as_service;
+                  const bool ok = service::Uninstall(config_, &error);
+                  if (ok) {
+                    if (*was_service)
+                      service::ScheduleConsole(config_);
+                    op->data = json{{"installed", false}, {"restarting", *was_service}};
+                  } else {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "service_uninstall_failed";
+                    op->message = error;
+                    op->data = json{{"installed", true}, {"error", error}};
+                  }
+                  Audit("system", "warning", actor.username, ip, ua, "service", "",
+                        "service_uninstall", ok ? "success" : "failure",
+                        ok ? "" : "service_uninstall_failed", json{{"error", error}}.dump());
+                },
+                [this, op, was_service, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                  if (!op->ok || !*was_service)
+                    return;
+                  std::thread([this] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+                    web_.stop();
+                  }).detach();
+                });
+          },
+          "system.manage"));
 }
 
 } // namespace uvnvr

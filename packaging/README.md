@@ -15,11 +15,13 @@ The brand icon source is `resources/branding/uvnvr.svg`; regenerate all formats 
 Startup configuration is installed by each package:
 
 - Windows: the Inno Setup **Service ports** page writes
-  `%ProgramData%\UvNVR\uvnvr.json` and the boot task runs with `--config`.
-  The installer provides English and Simplified Chinese, creates desktop
-  shortcuts for the web UI and the application, and adds/removes the firewall
-  rule and boot task. The x64 MSI (`packaging/windows/msi`) uses
-  `HTTPPORT`/`RTSPPORT` properties and the same config/shortcut/task behavior.
+  `%ProgramData%\UvNVR\uvnvr.json`; the **Startup** page registers the `UvNVR`
+  service (`sc.exe`, automatic start) unless the operator clears it. The
+  installer provides English and Simplified Chinese, creates a single desktop
+  shortcut (web UI with the service, console + browser without it) and
+  adds/removes the firewall rule and service. The x64 MSI
+  (`packaging/windows/msi`) uses `HTTPPORT`/`RTSPPORT` properties, registers
+  the same service and creates the same shortcuts.
   Build it with:
   ```
   ISCC.exe /DMyAppVersion=<version> /DMyArch=x64 /DSourceDir=<stage> packaging\windows\uvnvr.iss

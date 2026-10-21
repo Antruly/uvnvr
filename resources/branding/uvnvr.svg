@@ -1,46 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">UvNVR</title>
-  <desc id="desc">A camera lens with a recording indicator, the UvNVR mark.</desc>
+  <desc id="desc">A clean aperture ring with a play mark, the UvNVR recording symbol.</desc>
   <defs>
-    <linearGradient id="bg" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0f172a"/>
-      <stop offset="0.55" stop-color="#111c34"/>
-      <stop offset="1" stop-color="#07111f"/>
+    <linearGradient id="bg" x1="72" y1="24" x2="440" y2="488" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0c1524"/>
+      <stop offset="0.55" stop-color="#0d1f33"/>
+      <stop offset="1" stop-color="#07101c"/>
     </linearGradient>
-    <linearGradient id="ring" x1="120" y1="120" x2="392" y2="392" gradientUnits="userSpaceOnUse">
+    <linearGradient id="ring" x1="126" y1="126" x2="386" y2="386" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#67e8f9"/>
-      <stop offset="0.55" stop-color="#38bdf8"/>
-      <stop offset="1" stop-color="#2563eb"/>
+      <stop offset="0.5" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#3b82f6"/>
     </linearGradient>
-    <radialGradient id="lens" cx="0" cy="0" r="1" gradientTransform="translate(232 228) rotate(48) scale(150)" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#a5f3fc"/>
-      <stop offset="0.45" stop-color="#22d3ee"/>
-      <stop offset="1" stop-color="#0e7490"/>
+    <radialGradient id="lens" cx="0" cy="0" r="1" gradientTransform="translate(224 214) rotate(45) scale(180)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#164e63"/>
+      <stop offset="0.55" stop-color="#0b2538"/>
+      <stop offset="1" stop-color="#07111f"/>
     </radialGradient>
-    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="10" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
+    <radialGradient id="sheen" cx="0" cy="0" r="1" gradientTransform="translate(184 166) rotate(45) scale(120)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a5f3fc" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#a5f3fc" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8"/>
     </filter>
   </defs>
 
-  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
-  <rect x="17.5" y="17.5" width="477" height="477" rx="114.5" fill="none" stroke="#1e3a5f" stroke-width="3"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+  <rect x="17.5" y="17.5" width="477" height="477" rx="114.5" fill="none" stroke="#1d3a57" stroke-width="3"/>
 
-  <circle cx="256" cy="256" r="146" fill="none" stroke="url(#ring)" stroke-width="24" opacity="0.95"/>
-  <circle cx="256" cy="256" r="112" fill="#07111f" stroke="#164e63" stroke-width="4"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="url(#ring)" stroke-width="22"
+          stroke-linecap="round" stroke-dasharray="790 152" transform="rotate(-36 256 256)"/>
+  <circle cx="256" cy="256" r="114" fill="url(#lens)" stroke="#2b6b85" stroke-width="2"/>
+  <circle cx="256" cy="256" r="92" fill="url(#sheen)"/>
 
-  <g opacity="0.95">
-    <path d="M256 144 L332 188 L332 324 L256 368 L180 324 L180 188 Z" fill="none" stroke="#0e7490" stroke-width="8" opacity="0.6"/>
-    <path d="M256 212 L308 242 L308 302 L256 332 L204 302 L204 242 Z" fill="url(#lens)"/>
-    <circle cx="256" cy="272" r="28" fill="#07111f"/>
-    <circle cx="256" cy="272" r="12" fill="#67e8f9" opacity="0.9"/>
-    <circle cx="238" cy="254" r="10" fill="#e0f2fe" opacity="0.75"/>
-  </g>
+  <path d="M240 203c-9-5-20 1-20 11v84c0 10 11 16 20 11l72-42c9-5 9-18 0-23l-72-41Z"
+        fill="#f8fafc"/>
+  <path d="M240 203c-9-5-20 1-20 11v84c0 10 11 16 20 11l72-42c9-5 9-18 0-23l-72-41Z"
+        fill="none" stroke="#dbeafe" stroke-width="2" opacity="0.7"/>
 
-  <circle cx="392" cy="120" r="34" fill="#ef4444" filter="url(#glow)"/>
-  <circle cx="392" cy="120" r="14" fill="#fecaca" opacity="0.9"/>
+  <circle cx="392" cy="120" r="34" fill="#0c1524"/>
+  <circle cx="392" cy="120" r="28" fill="#fb7185" filter="url(#soft)" opacity="0.55"/>
+  <circle cx="392" cy="120" r="22" fill="#fb7185"/>
+  <circle cx="392" cy="120" r="8" fill="#ffe4e6"/>
 </svg>

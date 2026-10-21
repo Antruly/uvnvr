@@ -1,6 +1,7 @@
 #include "app.h"
 #include "config.h"
 #include "platform.h"
+#include "service.h"
 
 #include <charconv>
 #include <cstdlib>
@@ -25,6 +26,9 @@ struct Options {
   bool version = false;
   bool print_config = false;
   bool fatal = false;
+  bool service = false;
+  bool open_browser = false;
+  std::string service_action;
 };
 
 #ifdef _WIN32
@@ -92,6 +96,8 @@ void PrintUsage(const char* argv0) {
             << "  --ffmpeg <path>    FFmpeg executable path\n"
             << "  --log-level <lvl>  trace, debug, info, warn or error (default: info)\n"
             << "  --maintenance      Enable maintenance mode\n"
+            << "  --service          Run as a Windows service (SCM entry point)\n"
+            << "  --open             Open the web UI in the default browser after startup\n"
             << "  --print-config     Print the effective configuration and exit\n"
             << "  --version          Print version and exit\n"
             << "  --help             Print this help and exit\n\n"
@@ -286,6 +292,15 @@ Options ParseOptions(int argc, char** argv) {
         overrides.log_level = value;
     } else if (arg == "--maintenance") {
       overrides.maintenance = true;
+    } else if (arg == "--service") {
+      options.service = true;
+    } else if (arg == "--open") {
+      options.open_browser = true;
+    } else if (arg == "--service-action") {
+      if (!TakeValue(argc, argv, &i, "--service-action", &value))
+        options.help = true;
+      else
+        options.service_action = value;
     } else {
       std::cerr << "unknown option: " << arg << "\n";
       options.help = true;
@@ -378,6 +393,22 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (!options.service_action.empty()) {
+    uvnvr::service::PerformAction(options.service_action, options.config);
+    return 0;
+  }
+
   uvnvr::App app(options.config);
+  app.SetOpenBrowser(options.open_browser);
+#ifdef _WIN32
+  if (options.service) {
+    // The SCM owns this process: run the normal startup under a service
+    // control handler so Stop and shutdown reach the web loop. Startup is
+    // reported as RUNNING only after the web and RTSP listeners are ready.
+    app.SetStartedCallback([] { uvnvr::service::NotifyStarted(); });
+    return uvnvr::service::RunWindowsService(
+        options.config, {[&app] { return app.Run(); }, [&app] { app.RequestShutdown(); }});
+  }
+#endif
   return app.Run();
 }
