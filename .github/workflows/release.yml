@@ -222,7 +222,9 @@ jobs:
             "HTTPPORT=18081", "RTSPPORT=18554"
           )
           if ($install.ExitCode -ne 0) {
-            Get-Content $log -Tail 100
+            Select-String -Path $log -Pattern 'Return value 3|Error 1721|Error 1722|Error 1723|CustomAction|Installation failed' -Context 3,3 |
+              ForEach-Object { $_.ToString() }
+            Get-Content $log -Tail 250
             throw "MSI install failed: $($install.ExitCode)"
           }
           if (!(Test-Path "C:\Program Files\UvNVR\bin\uvnvr.exe")) {
