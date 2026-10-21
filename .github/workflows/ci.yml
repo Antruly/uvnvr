@@ -70,7 +70,7 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.4.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.5.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 
@@ -85,6 +85,9 @@ jobs:
 
       - name: Channel groups and layouts integration test
         run: python3 tests/integration/groups_layouts.py ./build/uvnvr 18400
+
+      - name: ONVIF events integration test
+        run: python3 tests/integration/onvif_events.py ./build/uvnvr 18810
 
       - name: Upload server log on failure
         if: failure()

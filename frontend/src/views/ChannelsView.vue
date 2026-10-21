@@ -19,6 +19,7 @@ interface Channel {
   subUrl: string
   subEnabled: boolean
   enabled: boolean
+  eventsEnabled: boolean
   brand: string
   watermark: { text?: string; position?: string }
   lastStatus: string
@@ -83,6 +84,7 @@ const modal = reactive({
   subUrl: '',
   subEnabled: false,
   enabled: true,
+  eventsEnabled: false,
   brand: '',
   watermarkText: '',
   watermarkPosition: 'bottom-right',
@@ -174,6 +176,7 @@ function openCreate() {
     subUrl: '',
     subEnabled: false,
     enabled: true,
+    eventsEnabled: false,
     brand: '',
     watermarkText: '',
     watermarkPosition: 'bottom-right',
@@ -196,6 +199,7 @@ function openEdit(channel: Channel) {
     subUrl: channel.subUrl,
     subEnabled: channel.subEnabled,
     enabled: channel.enabled,
+    eventsEnabled: channel.eventsEnabled ?? false,
     brand: channel.brand,
     watermarkText: channel.watermark?.text ?? '',
     watermarkPosition: channel.watermark?.position ?? 'bottom-right',
@@ -215,6 +219,7 @@ async function save() {
       subUrl: modal.subUrl,
       subEnabled: modal.subEnabled,
       enabled: modal.enabled,
+      eventsEnabled: modal.eventsEnabled,
       brand: modal.brand,
       groupId: modal.groupId,
       watermark: {
@@ -320,6 +325,7 @@ async function probe(device: OnvifDevice) {
         subUrl: scan.result.profiles[1]?.streamUri ?? '',
         subEnabled: scan.result.profiles.length > 1,
         enabled: true,
+        eventsEnabled: true,
         brand: scan.result.device.manufacturer,
         watermarkText: '',
         watermarkPosition: 'bottom-right',
@@ -573,6 +579,10 @@ onMounted(load)
             <input v-model="modal.enabled" type="checkbox" />
             <span>{{ t('common.enabled') }}</span>
           </label>
+          <label class="check-row">
+            <input v-model="modal.eventsEnabled" type="checkbox" />
+            <span>{{ t('channels.eventsEnabled') }}</span>
+          </label>
           <label class="field">
             <span>{{ t('channels.watermark') }}</span>
             <input v-model="modal.watermarkText" class="input" />
@@ -589,6 +599,7 @@ onMounted(load)
         </div>
 
         <p class="small-note">{{ t('channels.hikvisionHint') }}</p>
+        <p class="small-note">{{ t('channels.eventsHint') }}</p>
 
         <div class="modal-actions">
           <button type="button" class="button" @click="modal.open = false">

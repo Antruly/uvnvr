@@ -347,6 +347,11 @@ void FillChannelRow(const uvcpp::uvcpp_db_table& table, size_t row, ChannelRow* 
   channel->updated_at = TableInt(table, row, "updated_at");
 }
 
+bool ChannelEventsEnabled(const ChannelRow& channel) {
+  const json media = json::parse(channel.media_json, nullptr, false);
+  return media.is_object() && media.value("events", false);
+}
+
 std::vector<std::string> ParsePermissions(const std::string& text) {
   std::vector<std::string> out;
   const json parsed = json::parse(text, nullptr, false);
@@ -1785,6 +1790,10 @@ int App::Run() {
   if (const char* ffmpeg = std::getenv("UVNVR_FFMPEG"); ffmpeg != nullptr && ffmpeg[0] != '\0') {
     media_->SetFfmpegPath(ffmpeg);
   }
+  onvif_events_ = std::make_unique<OnvifEventService>(
+      [this](int64_t channel_id, const std::string& type, const std::string& message) {
+        RaiseAlert(channel_id, type, "warning", message, "");
+      });
   media_->Start();
   SyncAllMedia();
   recording_ = std::make_unique<RecordingService>(&db_, config_.data_dir);
@@ -3411,6 +3420,7 @@ json App::ChannelJson(const ChannelRow& channel) const {
       {"enabled", channel.enabled},
       {"brand", channel.brand},
       {"media", media},
+      {"eventsEnabled", ChannelEventsEnabled(channel)},
       {"watermark", watermark},
       {"lastStatus", channel.last_status},
       {"lastError", channel.last_error},
@@ -3465,11 +3475,40 @@ std::string App::BuildChannelUrl(const ChannelRow& channel, bool sub, std::strin
 }
 
 void App::SyncMediaChannel(int64_t id) {
-  if (!media_)
-    return;
   ChannelRow channel;
   std::string error;
-  if (!LoadChannel(id, &channel, &error) || !channel.enabled) {
+  if (!LoadChannel(id, &channel, &error)) {
+    if (media_)
+      media_->Remove(id);
+    if (onvif_events_)
+      onvif_events_->Remove(id);
+    return;
+  }
+
+  if (onvif_events_) {
+    if (!channel.enabled || channel.protocol != "onvif" || !ChannelEventsEnabled(channel)) {
+      onvif_events_->Remove(id);
+    } else {
+      OnvifEventConfig config;
+      config.channel_id = id;
+      config.host = channel.host;
+      config.port = channel.port > 0 ? channel.port : 80;
+      config.username = channel.username;
+      if (!channel.password_enc.empty()) {
+        std::string decrypt_error;
+        config.password = DecryptSecret(channel.password_enc, &decrypt_error);
+        if (config.password.empty() && !decrypt_error.empty()) {
+          std::fprintf(stderr, "channel %lld ONVIF events: %s\n", static_cast<long long>(id),
+                       decrypt_error.c_str());
+        }
+      }
+      onvif_events_->Upsert(config);
+    }
+  }
+
+  if (!media_)
+    return;
+  if (!channel.enabled) {
     media_->Remove(id);
     return;
   }
@@ -3706,8 +3745,10 @@ void App::RegisterChannelRoutes() {
             const bool enabled = JsonBool(body, "enabled", true);
             const int64_t group_id = JsonInt(body, "groupId", 0);
             const std::string brand = JsonString(body, "brand");
-            const json media = body.contains("media") && body["media"].is_object() ? body["media"]
-                                                                                   : json::object();
+            json media = body.contains("media") && body["media"].is_object() ? body["media"]
+                                                                             : json::object();
+            if (body.contains("eventsEnabled"))
+              media["events"] = JsonBool(body, "eventsEnabled", false);
             const json watermark = body.contains("watermark") && body["watermark"].is_object()
                                        ? body["watermark"]
                                        : json::object();
@@ -3875,9 +3916,16 @@ void App::RegisterChannelRoutes() {
                                            : existing.enabled;
                   const std::string brand =
                       body.contains("brand") ? JsonString(body, "brand") : existing.brand;
-                  const std::string media_json = body.contains("media") && body["media"].is_object()
-                                                     ? body["media"].dump()
-                                                     : existing.media_json;
+                  std::string media_json = body.contains("media") && body["media"].is_object()
+                                               ? body["media"].dump()
+                                               : existing.media_json;
+                  if (body.contains("eventsEnabled")) {
+                    json media = json::parse(media_json, nullptr, false);
+                    if (!media.is_object())
+                      media = json::object();
+                    media["events"] = JsonBool(body, "eventsEnabled", false);
+                    media_json = media.dump();
+                  }
                   const std::string watermark_json =
                       body.contains("watermark") && body["watermark"].is_object()
                           ? body["watermark"].dump()
@@ -4023,8 +4071,12 @@ void App::RegisterChannelRoutes() {
                        op->data = json{{"ok", true}};
                      },
                      [this, op, channel_id, &resp, next] {
-                       if (op->ok && media_)
-                         media_->Remove(channel_id);
+                       if (op->ok) {
+                         if (media_)
+                           media_->Remove(channel_id);
+                         if (onvif_events_)
+                           onvif_events_->Remove(channel_id);
+                       }
                        SendOp(resp, *op);
                        next();
                      });
@@ -5727,6 +5779,8 @@ void App::RegisterRecordingRoutes() {
 
 App::~App() {
   StopMonitors();
+  if (onvif_events_)
+    onvif_events_->Stop();
 }
 
 void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,

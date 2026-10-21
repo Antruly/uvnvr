@@ -3,6 +3,7 @@
 #include "config.h"
 #include "media.h"
 #include "ntp.h"
+#include "onvif_events.h"
 #include "playback.h"
 #include "recording.h"
 #include "rtsp.h"
@@ -203,6 +204,7 @@ private:
   uvcpp::uvcpp_web_app web_;
   uvcpp::uvcpp_db_pool db_;
   std::unique_ptr<MediaService> media_;
+  std::unique_ptr<OnvifEventService> onvif_events_;
   std::unique_ptr<RecordingService> recording_;
   std::unique_ptr<PlaybackService> playback_;
   std::unique_ptr<RtspServer> rtsp_;

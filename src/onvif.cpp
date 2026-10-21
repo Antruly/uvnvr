@@ -118,7 +118,8 @@ std::string XmlEscape(const std::string& value) {
   return out;
 }
 
-std::string HttpPost(const std::string& url, const std::string& body, std::string* error) {
+std::string HttpPostTimeout(const std::string& url, const std::string& body, int timeout_seconds,
+                            std::string* error) {
   if (url.rfind("http://", 0) != 0) {
     if (error)
       *error = "only http:// ONVIF endpoints are supported";
@@ -161,7 +162,7 @@ std::string HttpPost(const std::string& url, const std::string& body, std::strin
       continue;
 #ifdef SO_RCVTIMEO
     struct timeval timeout;
-    timeout.tv_sec = 5;
+    timeout.tv_sec = timeout_seconds;
     timeout.tv_usec = 0;
     setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
                sizeof(timeout));
@@ -215,6 +216,10 @@ std::string HttpPost(const std::string& url, const std::string& body, std::strin
     return {};
   }
   return response.substr(body_start + 4);
+}
+
+std::string HttpPost(const std::string& url, const std::string& body, std::string* error) {
+  return HttpPostTimeout(url, body, 5, error);
 }
 
 std::string ExtractTag(const std::string& xml, const std::string& tag) {
@@ -307,7 +312,10 @@ std::string Envelope(const std::string& security, const std::string& body) {
          "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" "
          "xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\" "
          "xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" "
-         "xmlns:tt=\"http://www.onvif.org/ver10/schema\">"
+         "xmlns:tt=\"http://www.onvif.org/ver10/schema\" "
+         "xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\" "
+         "xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\" "
+         "xmlns:wsa5=\"http://www.w3.org/2005/08/addressing\">"
          "<s:Header>" +
          security + "</s:Header><s:Body>" + body + "</s:Body></s:Envelope>";
 }
@@ -324,6 +332,123 @@ std::string DeviceServiceUrl(const std::string& xaddr) {
   while (!base.empty() && base.back() == '/')
     base.pop_back();
   return base + "/onvif/device_service";
+}
+
+std::string Trim(std::string value) {
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+    value.erase(value.begin());
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+    value.pop_back();
+  return value;
+}
+
+std::string AttributeValue(const std::string& tag, const std::string& name) {
+  const std::string needle = name + "=";
+  size_t pos = tag.find(needle);
+  while (pos != std::string::npos) {
+    if (pos == 0 || std::isspace(static_cast<unsigned char>(tag[pos - 1])) || tag[pos - 1] == '<') {
+      break;
+    }
+    pos = tag.find(needle, pos + needle.size());
+  }
+  if (pos == std::string::npos)
+    return {};
+  pos += needle.size();
+  if (pos >= tag.size())
+    return {};
+  const char quote = tag[pos];
+  if (quote != '"' && quote != '\'')
+    return {};
+  const size_t end = tag.find(quote, pos + 1);
+  if (end == std::string::npos)
+    return {};
+  return tag.substr(pos + 1, end - pos - 1);
+}
+
+// Finds every `<prefix:tag ...>...</prefix:tag>` block, ignoring prefixes.
+std::vector<std::string> ExtractBlocks(const std::string& xml, const std::string& tag) {
+  std::vector<std::string> blocks;
+  size_t pos = 0;
+  while ((pos = xml.find('<', pos)) != std::string::npos) {
+    if (pos + 1 >= xml.size() || xml[pos + 1] == '/' || xml[pos + 1] == '?' ||
+        xml[pos + 1] == '!') {
+      ++pos;
+      continue;
+    }
+    size_t name_end = pos + 1;
+    while (name_end < xml.size() &&
+           (std::isalnum(static_cast<unsigned char>(xml[name_end])) || xml[name_end] == '_' ||
+            xml[name_end] == '-' || xml[name_end] == ':' || xml[name_end] == '.')) {
+      ++name_end;
+    }
+    std::string name = xml.substr(pos + 1, name_end - pos - 1);
+    const size_t colon = name.rfind(':');
+    if (colon != std::string::npos)
+      name = name.substr(colon + 1);
+    if (name != tag) {
+      pos = name_end;
+      continue;
+    }
+    const size_t open_end = xml.find('>', name_end);
+    if (open_end == std::string::npos)
+      break;
+    if (open_end > 0 && xml[open_end - 1] == '/') {
+      pos = open_end + 1;
+      continue;
+    }
+    size_t scan = open_end + 1;
+    size_t close_start = std::string::npos;
+    size_t close_end = std::string::npos;
+    while ((scan = xml.find("</", scan)) != std::string::npos) {
+      size_t end = scan + 2;
+      while (end < xml.size() &&
+             (std::isalnum(static_cast<unsigned char>(xml[end])) || xml[end] == '_' ||
+              xml[end] == '-' || xml[end] == ':' || xml[end] == '.')) {
+        ++end;
+      }
+      std::string close_name = xml.substr(scan + 2, end - (scan + 2));
+      const size_t close_colon = close_name.rfind(':');
+      if (close_colon != std::string::npos)
+        close_name = close_name.substr(close_colon + 1);
+      if (close_name == tag) {
+        close_start = scan;
+        close_end = end;
+        break;
+      }
+      scan = end;
+    }
+    if (close_start == std::string::npos)
+      break;
+    blocks.push_back(xml.substr(open_end + 1, close_start - open_end - 1));
+    pos = close_end;
+  }
+  return blocks;
+}
+
+std::vector<OnvifEvent> ParseNotificationEvents(const std::string& xml) {
+  std::vector<OnvifEvent> events;
+  for (const std::string& block : ExtractBlocks(xml, "NotificationMessage")) {
+    const std::string topic = Trim(ExtractTag(block, "Topic"));
+    bool found = false;
+    size_t pos = 0;
+    while ((pos = block.find("SimpleItem", pos)) != std::string::npos) {
+      const size_t tag_start = block.rfind('<', pos);
+      const size_t tag_end = block.find('>', pos);
+      if (tag_start == std::string::npos || tag_end == std::string::npos)
+        break;
+      const std::string tag = block.substr(tag_start, tag_end - tag_start);
+      const std::string name = AttributeValue(tag, "Name");
+      const std::string value = AttributeValue(tag, "Value");
+      if (!name.empty() || !value.empty()) {
+        events.push_back(OnvifEvent{topic, name, value});
+        found = true;
+      }
+      pos = tag_end + 1;
+    }
+    if (!found)
+      events.push_back(OnvifEvent{topic, "", ""});
+  }
+  return events;
 }
 
 } // namespace
@@ -481,6 +606,84 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
     info->profiles.push_back(std::move(profile));
   }
   return !info->profiles.empty();
+}
+
+bool ResolveOnvifEventUrl(const std::string& host, int port, const std::string& username,
+                          const std::string& password, std::string* url, std::string* error) {
+  if (url == nullptr) {
+    if (error != nullptr)
+      *error = "missing event URL output";
+    return false;
+  }
+  const std::string fallback = "http://" + host + ":" + std::to_string(port) + "/onvif/events";
+  const std::string device =
+      "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
+  std::string soap_error;
+  const std::string response =
+      SoapCall(device, SecurityHeader(username, password),
+               "<tds:GetCapabilities><tds:Category>Events</tds:Category></tds:GetCapabilities>",
+               &soap_error);
+  if (!response.empty()) {
+    const std::string events = ExtractTag(response, "Events");
+    const std::string xaddr = Trim(ExtractTag(events, "XAddr"));
+    if (!xaddr.empty()) {
+      *url = xaddr;
+      return true;
+    }
+  }
+  // Many cameras expose the event service at the conventional path even when
+  // GetCapabilities is not implemented or requires different credentials.
+  *url = fallback;
+  if (error != nullptr)
+    error->clear();
+  return true;
+}
+
+bool CreateOnvifEventSubscription(const std::string& event_url, const std::string& username,
+                                  const std::string& password, OnvifEventSubscription* subscription,
+                                  std::string* error) {
+  if (subscription == nullptr) {
+    if (error != nullptr)
+      *error = "missing subscription output";
+    return false;
+  }
+  const std::string body = "<tev:CreatePullPointSubscription>"
+                           "<tev:InitialTerminationTime>PT120S</tev:InitialTerminationTime>"
+                           "</tev:CreatePullPointSubscription>";
+  const std::string response = SoapCall(event_url, SecurityHeader(username, password), body, error);
+  if (response.empty())
+    return false;
+  const std::string reference = ExtractTag(response, "SubscriptionReference");
+  std::string address = Trim(ExtractTag(reference, "Address"));
+  if (address.empty())
+    address = Trim(ExtractTag(response, "Address"));
+  if (address.empty()) {
+    if (error != nullptr)
+      *error = "the camera did not return a subscription address";
+    return false;
+  }
+  subscription->address = address;
+  return true;
+}
+
+bool PullOnvifEvents(const std::string& address, const std::string& username,
+                     const std::string& password, int timeout_ms, std::vector<OnvifEvent>* events,
+                     std::string* error) {
+  if (events == nullptr) {
+    if (error != nullptr)
+      *error = "missing event output";
+    return false;
+  }
+  const int seconds = std::max(1, timeout_ms / 1000);
+  const std::string body =
+      "<tev:PullMessages><tev:Timeout>PT" + std::to_string(seconds) +
+      "S</tev:Timeout><tev:MessageLimit>32</tev:MessageLimit></tev:PullMessages>";
+  const std::string response = HttpPostTimeout(
+      address, Envelope(SecurityHeader(username, password), body), seconds + 5, error);
+  if (response.empty())
+    return false;
+  *events = ParseNotificationEvents(response);
+  return true;
 }
 
 } // namespace uvnvr

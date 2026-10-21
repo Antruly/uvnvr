@@ -223,6 +223,9 @@ const messages = {
       mainUrl: 'Main stream URL',
       subUrl: 'Sub stream URL',
       subEnabled: 'Enable sub stream',
+      eventsEnabled: 'Use camera ONVIF events',
+      eventsHint:
+        'ONVIF cameras can push motion, person, tamper and line-crossing events; they appear in Alerts (60-second cooldown per type).',
       state: 'State',
       streams: 'Enabled',
       lastError: 'Last error',
@@ -681,6 +684,9 @@ const messages = {
       mainUrl: '主码流地址',
       subUrl: '子码流地址',
       subEnabled: '启用子码流',
+      eventsEnabled: '使用摄像头 ONVIF 事件',
+      eventsHint:
+        'ONVIF 摄像头可推送移动、人形、遮挡与越线事件，并进入预警中心（同类事件 60 秒冷却）。',
       state: '状态',
       streams: '启用',
       lastError: '最后错误',
