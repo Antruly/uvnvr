@@ -22,6 +22,9 @@ All notable changes to UvNVR are documented here. The format follows
   groups to the deleted group's parent.
 - Layout changes are synced with a short debounce; switching accounts or
   browsers picks up the server copy.
+- Preview-only roles use `GET /api/v1/preview/channels`, which omits stream
+  URLs, usernames and stored error text; the full channel list still requires
+  `channel.view`.
 
 ## [0.3.0] - 2026-10-21
 
