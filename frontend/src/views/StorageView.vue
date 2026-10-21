@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import UsageMeter from '@/components/UsageMeter.vue'
@@ -21,8 +21,26 @@ interface Volume {
   usagePercent: number
 }
 
+interface ActiveRecording {
+  channelId: number
+  stream: string
+  active: boolean
+  path: string
+  bytes: number
+  startMs: number
+  volumeId: number
+  volumePath: string
+}
+
+interface RecordingStatus {
+  recordings: ActiveRecording[]
+  volume: { id?: number; path?: string; mode?: string }
+}
+
 const { t } = useI18n()
 const volumes = ref<Volume[]>([])
+const recordingStatus = ref<RecordingStatus | null>(null)
+let statusTimer: number | undefined
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
@@ -50,15 +68,37 @@ function formatBytes(value: number) {
   return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
+function formatTime(ms: number) {
+  if (!ms) return '—'
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(ms))
+}
+
 function detail(volume: Volume) {
   return `${formatBytes(volume.totalBytes - volume.freeBytes)} / ${formatBytes(volume.totalBytes)}`
+}
+
+async function loadStatus() {
+  try {
+    recordingStatus.value = await api<RecordingStatus>('/api/v1/recordings/status')
+  } catch {
+    /* Status is informational; the volume list still works. */
+  }
 }
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    volumes.value = await api<Volume[]>('/api/v1/storage/volumes')
+    const [volumeRows] = await Promise.all([
+      api<Volume[]>('/api/v1/storage/volumes'),
+      loadStatus(),
+    ])
+    volumes.value = volumeRows
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -111,7 +151,14 @@ async function add() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  statusTimer = window.setInterval(loadStatus, 5000)
+})
+
+onBeforeUnmount(() => {
+  if (statusTimer !== undefined) window.clearInterval(statusTimer)
+})
 </script>
 
 <template>
@@ -197,6 +244,45 @@ onMounted(load)
         </button>
       </div>
     </article>
+  </section>
+
+  <section class="panel recordings-status">
+    <div class="section-title">
+      <AppIcon name="playback" :size="18" />
+      <h3>{{ t('storage.activeRecordings') }}</h3>
+    </div>
+    <p class="small-note">
+      {{ t('storage.activeVolume', { path: recordingStatus?.volume?.path || '—' }) }}
+    </p>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>{{ t('playback.channel') }}</th>
+          <th>{{ t('playback.stream') }}</th>
+          <th>{{ t('storage.state') }}</th>
+          <th>{{ t('storage.currentFile') }}</th>
+          <th>{{ t('playback.size') }}</th>
+          <th>{{ t('storage.startedAt') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="item in recordingStatus?.recordings ?? []" :key="`${item.channelId}:${item.stream}`">
+          <td>#{{ item.channelId }}</td>
+          <td>{{ item.stream }}</td>
+          <td>
+            <span class="status-pill" :class="item.active ? 'ok' : 'muted'">
+              {{ item.active ? t('storage.recordingNow') : t('storage.recordingIdle') }}
+            </span>
+          </td>
+          <td class="mono file-path">{{ item.path || '—' }}</td>
+          <td>{{ formatBytes(item.bytes) }}</td>
+          <td>{{ formatTime(item.startMs) }}</td>
+        </tr>
+        <tr v-if="!recordingStatus?.recordings?.length">
+          <td colspan="6" class="empty-cell">{{ t('storage.noActiveRecordings') }}</td>
+        </tr>
+      </tbody>
+    </table>
   </section>
 
   <Teleport to="body">

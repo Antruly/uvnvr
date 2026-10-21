@@ -264,13 +264,23 @@ def main() -> int:
         assert status == 201, (status, channel)
 
         recordings = []
+        saw_active = False
         deadline = time.monotonic() + 110
         while time.monotonic() < deadline:
+            status, live = call("GET", "/api/v1/recordings/status")
+            if status == 200:
+                active = next(
+                    (item for item in live.get("recordings", []) if item.get("active")), None
+                )
+                if active:
+                    assert active["volumePath"] == str(volume), active
+                    saw_active = True
             status, rows = call("GET", "/api/v1/recordings?channelId=1&stream=main")
             if status == 200 and rows:
                 recordings = rows
                 break
             time.sleep(1)
+        assert saw_active, "the recording status endpoint never reported an active segment"
 
         assert recordings, "no recording segment was finalized"
         first = recordings[0]

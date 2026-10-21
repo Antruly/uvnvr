@@ -3309,3 +3309,19 @@ select.input {
   flex-wrap: wrap;
   margin-left: auto;
 }
+
+.recordings-status {
+  margin-top: 18px;
+  padding: 16px 20px 20px;
+}
+
+.file-path {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hidden-input {
+  display: none;
+}

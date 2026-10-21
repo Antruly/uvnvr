@@ -21,6 +21,9 @@ public:
   void Stop();
   void OnTs(int64_t channel_id, const std::string& stream, const uint8_t* data, size_t len);
 
+  // Active recorder/segment snapshots for the system UI.
+  std::string StatusJson();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <thread>
 #include <vector>
 
@@ -145,12 +146,39 @@ struct RecordingService::Impl {
     Segment segment;
     bool has_segment = false;
     std::string current_codec;
+    mutable std::mutex status_mutex;
+    struct StatusSnapshot {
+      bool active = false;
+      std::string path;
+      int64_t bytes = 0;
+      int64_t start_ms = 0;
+      int64_t volume_id = 0;
+      std::string volume_path;
+    } status;
+
+    void RefreshStatus() {
+      std::lock_guard<std::mutex> lock(status_mutex);
+      status.active = has_segment;
+      if (has_segment) {
+        status.path = segment.path;
+        status.bytes = segment.bytes;
+        status.start_ms = segment.start_ms;
+      } else {
+        status.path.clear();
+        status.bytes = 0;
+        status.start_ms = 0;
+      }
+      status.volume_id = volume.id;
+      status.volume_path = volume.path;
+    }
 
     Recorder(Impl* owner_in, int64_t channel, std::string stream_kind, VolumeInfo vol,
              int64_t minutes, int64_t size_mb, std::string mode)
         : owner(owner_in), channel_id(channel), stream(std::move(stream_kind)),
           volume(std::move(vol)), segment_minutes(std::max<int64_t>(1, minutes)),
-          segment_size_mb(std::max<int64_t>(16, size_mb)), segment_mode(std::move(mode)) {}
+          segment_size_mb(std::max<int64_t>(16, size_mb)), segment_mode(std::move(mode)) {
+      RefreshStatus();
+    }
 
     ~Recorder() {
       Stop();
@@ -193,6 +221,7 @@ struct RecordingService::Impl {
         std::fprintf(stderr, "[recording] cannot create %s: %s\n", dir.string().c_str(),
                      ec.message().c_str());
         has_segment = false;
+        RefreshStatus();
         return;
       }
       Segment value;
@@ -213,10 +242,12 @@ struct RecordingService::Impl {
       if (!value.file.is_open()) {
         std::fprintf(stderr, "[recording] cannot open %s\n", value.part_path.c_str());
         has_segment = false;
+        RefreshStatus();
         return;
       }
       segment = std::move(value);
       has_segment = true;
+      RefreshStatus();
       std::fprintf(stderr, "[recording] channel %lld %s -> %s\n",
                    static_cast<long long>(channel_id), stream.c_str(), segment.path.c_str());
       (void)start_offset;
@@ -236,6 +267,8 @@ struct RecordingService::Impl {
                      ec.message().c_str());
         std::filesystem::remove(segment.part_path, ec);
         has_segment = false;
+        segment = Segment{};
+        RefreshStatus();
         return;
       }
       std::fprintf(stderr, "[recording] finalized %s (%lld bytes)\n", segment.path.c_str(),
@@ -264,6 +297,7 @@ struct RecordingService::Impl {
       }
       has_segment = false;
       segment = Segment{};
+      RefreshStatus();
     }
 
     void WriteChunk(const std::shared_ptr<std::vector<uint8_t>>& chunk) {
@@ -331,6 +365,7 @@ struct RecordingService::Impl {
           OpenSegment(NowMs());
         }
       }
+      RefreshStatus();
     }
 
     void Run() {
@@ -550,6 +585,36 @@ struct RecordingService::Impl {
     }
   }
 
+  std::string StatusJson() {
+    VolumeInfo volume;
+    const bool has_volume = ActiveVolume(&volume);
+    nlohmann::json items = nlohmann::json::array();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      for (const auto& [key, recorder] : recorders) {
+        Recorder::StatusSnapshot snapshot;
+        {
+          std::lock_guard<std::mutex> status_lock(recorder->status_mutex);
+          snapshot = recorder->status;
+        }
+        items.push_back(nlohmann::json{{"channelId", recorder->channel_id},
+                                       {"stream", recorder->stream},
+                                       {"active", snapshot.active},
+                                       {"path", snapshot.path},
+                                       {"bytes", snapshot.bytes},
+                                       {"startMs", snapshot.start_ms},
+                                       {"volumeId", snapshot.volume_id},
+                                       {"volumePath", snapshot.volume_path}});
+      }
+    }
+    nlohmann::json result{{"recordings", std::move(items)},
+                          {"volume", has_volume ? nlohmann::json{{"id", volume.id},
+                                                                 {"path", volume.path},
+                                                                 {"mode", volume.mode}}
+                                                : nlohmann::json::object()}};
+    return result.dump();
+  }
+
   void SchedulerRun() {
     while (!stopping.load()) {
       VolumeInfo volume;
@@ -616,6 +681,10 @@ void RecordingService::Start() {
 
 void RecordingService::Stop() {
   impl_->Stop();
+}
+
+std::string RecordingService::StatusJson() {
+  return impl_->StatusJson();
 }
 
 void RecordingService::OnTs(int64_t channel_id, const std::string& stream, const uint8_t* data,

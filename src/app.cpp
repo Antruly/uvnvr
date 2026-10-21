@@ -5829,6 +5829,28 @@ void App::RegisterStorageRoutes() {
 }
 
 void App::RegisterRecordingRoutes() {
+  web_.get("/api/v1/recordings/status",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 auto op = std::make_shared<OpResult>();
+                 RunWork(
+                     [this, op] {
+                       if (!recording_) {
+                         op->data = json{{"recordings", json::array()}, {"volume", json::object()}};
+                         return;
+                       }
+                       op->data = json::parse(recording_->StatusJson(), nullptr, false);
+                       if (op->data.is_discarded())
+                         op->data = json::object();
+                     },
+                     [op, &resp, next] {
+                       SendOp(resp, *op);
+                       next();
+                     });
+               },
+               "storage.view"));
+
   web_.get("/api/v1/recordings",
            Protected(
                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
