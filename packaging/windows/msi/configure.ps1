@@ -13,8 +13,8 @@ $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Uv
 $startUrl = Join-Path $startDir 'UvNVR Web UI.url'
 
 if ($Uninstall) {
-    schtasks.exe /Delete /TN UvNVR /F 2>$null | Out-Null
-    netsh advfirewall firewall delete rule name="UvNVR" 2>$null | Out-Null
+    Unregister-ScheduledTask -TaskName 'UvNVR' -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
     Remove-Item $desktopUrl -Force -ErrorAction SilentlyContinue
     Remove-Item $startUrl -Force -ErrorAction SilentlyContinue
     Remove-Item $startDir -Force -ErrorAction SilentlyContinue
@@ -51,7 +51,11 @@ New-Item -ItemType Directory -Force $startDir | Out-Null
 "[InternetShortcut]`r`nURL=$url`r`n" | Set-Content -Path $desktopUrl -Encoding ASCII
 "[InternetShortcut]`r`nURL=$url`r`n" | Set-Content -Path $startUrl -Encoding ASCII
 
-$taskCommand = "`"$exe`" --config `"$configPath`""
-schtasks.exe /Create /TN UvNVR /TR $taskCommand /SC ONSTART /RU SYSTEM /RL HIGHEST /F | Out-Null
-netsh advfirewall firewall delete rule name="UvNVR" | Out-Null
-netsh advfirewall firewall add rule name="UvNVR" dir=in action=allow program="$exe" enable=yes | Out-Null
+$action = New-ScheduledTaskAction -Execute $exe -Argument "--config `"$configPath`""
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'UvNVR' -Action $action -Trigger $trigger -Principal $principal `
+    -Description 'UvNVR software network video recorder' -Force | Out-Null
+Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName 'UvNVR' -Direction Inbound -Program $exe -Action Allow `
+    -Profile Any | Out-Null
