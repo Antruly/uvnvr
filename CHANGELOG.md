@@ -4,6 +4,18 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-10-21
+
+### Added
+
+- ONVIF PullPoint event subscription per ONVIF channel (`eventsEnabled`): resolves
+  the event service through `GetCapabilities` with a `/onvif/events` fallback,
+  creates and renews subscriptions, and polls for notifications.
+- Motion, person, tamper and line/field-crossing topics are mapped to alerts with
+  a 60-second per-channel/type cooldown; false/cleared values are ignored.
+- Channel form toggle **Use camera ONVIF events**, channel JSON `eventsEnabled`,
+  and a mock-camera integration test covering the full SOAP/PullPoint flow.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added

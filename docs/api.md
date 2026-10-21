@@ -111,6 +111,27 @@ hours and 4 GiB of input, and temporary files are removed after the response.
 needed by preview-only roles (no usernames, URLs or stored error text) and
 requires only `preview.view`.
 
+## ONVIF events
+
+ONVIF channels accept `eventsEnabled` on create/update and return it in the
+channel JSON. When enabled, UvNVR resolves the camera's event service through
+`GetCapabilities` (falling back to `http://host:port/onvif/events`), creates a
+PullPoint subscription and polls notifications every few seconds.
+
+Recognized topics become alerts (`type`):
+
+| Topic fragment | Alert type |
+|---|---|
+| `CellMotionDetector`, `Motion` | `motion` |
+| `PeopleDetector`, `HumanDetector`, `ObjectDetector` | `person` |
+| `TamperDetector` | `tamper` |
+| `LineDetector`, `FieldDetector` | `intrusion` |
+
+Notifications with `IsMotion`/state values of false are ignored. Each type has a
+60-second per-channel cooldown. Subscriptions are renewed before the camera's
+termination time, and the poller reconnects with backoff when the camera is
+unreachable.
+
 ## Channel groups
 
 `GET /api/v1/channel-groups` returns the flat group list with channel counts:

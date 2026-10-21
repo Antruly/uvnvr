@@ -102,7 +102,10 @@ network, add the channel manually with the protocol **ONVIF** and the device hos
    use the sub stream to keep CPU and bandwidth low.
 4. Optionally set a watermark text and position. The watermark is drawn in the
    browser over preview and snapshots.
-5. Save. The channel begins connecting immediately.
+5. For ONVIF cameras, enable **Use camera ONVIF events**. UvNVR subscribes to the
+   camera's PullPoint service and turns motion, person, tamper and line-crossing
+   notifications into alerts.
+6. Save. The channel begins connecting immediately.
 
 Use **Reconnect** to retry a channel now instead of waiting for the exponential
 backoff. **Sync** copies selected channel fields and/or recording plans to other
@@ -247,6 +250,8 @@ Alert sources:
 - Motion detection on a low-resolution sampled frame. Sensitivity, region and
   cooldown are configurable. This is an experimental frame-difference detector,
   not AI.
+- ONVIF camera events (motion, person, tamper, line crossing) when enabled on the
+  channel. Each type has a 60-second per-channel cooldown.
 - Camera offline and recovery events.
 - Storage nearly full, disk errors and service errors.
 
