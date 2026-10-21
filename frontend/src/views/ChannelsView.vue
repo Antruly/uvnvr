@@ -68,6 +68,7 @@ const auth = useAuthStore()
 const canSnapshot = computed(() => auth.hasPermission('api.snapshot'))
 const failedThumbs = ref<Set<number>>(new Set())
 const thumbVersion = reactive<Record<number, number>>({})
+const thumbLoading = ref<Set<number>>(new Set())
 const previewImage = ref('')
 const channels = ref<Channel[]>([])
 const groups = ref<ChannelGroup[]>([])
@@ -498,10 +499,20 @@ function snapshotUrl(channel: Channel) {
 
 function thumbFailed(channel: Channel) {
   failedThumbs.value = new Set([...failedThumbs.value, channel.id])
+  const next = new Set(thumbLoading.value)
+  next.delete(channel.id)
+  thumbLoading.value = next
+}
+
+function thumbLoaded(channel: Channel) {
+  const next = new Set(thumbLoading.value)
+  next.delete(channel.id)
+  thumbLoading.value = next
 }
 
 function capture(channel: Channel) {
   const version = Date.now()
+  thumbLoading.value = new Set([...thumbLoading.value, channel.id])
   thumbVersion[channel.id] = version
   failedThumbs.value = new Set([...failedThumbs.value].filter((id) => id !== channel.id))
   previewImage.value = `/api/v1/channels/${channel.id}/snapshot?t=${version}`
@@ -882,9 +893,11 @@ onMounted(load)
                   :src="snapshotUrl(channel)"
                   loading="lazy"
                   alt=""
+                  @load="thumbLoaded(channel)"
                   @error="thumbFailed(channel)"
                 />
-                <AppIcon v-else name="camera" :size="15" />
+                <span v-if="thumbLoading.has(channel.id) && !failedThumbs.has(channel.id)" class="thumb-spinner"></span>
+                <AppIcon v-else-if="!canSnapshot" name="camera" :size="15" />
               </span>
               <div>
                 <strong>{{ channel.name }}</strong>

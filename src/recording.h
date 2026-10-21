@@ -4,6 +4,7 @@
 #include <db/uvcpp_db_pool.h>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace uvnvr {
 
@@ -24,6 +25,21 @@ public:
   // Starts or extends an event clip for every stream the channel's active
   // event plan covers. Called for motion/person/tamper/intrusion alerts.
   void OnEvent(int64_t channel_id);
+
+  // Segment currently being written. Playback uses part_path to follow a live
+  // recording before it is finalized and indexed.
+  struct ActiveSegment {
+    int64_t channel_id = 0;
+    std::string stream;
+    std::string part_path;
+    std::string final_path;
+    int64_t start_ms = 0;
+    int64_t bytes = 0;
+    std::string codec;
+    std::string record_type;
+    int64_t volume_id = 0;
+  };
+  std::vector<ActiveSegment> ActiveSegments();
 
   // Active recorder/segment snapshots for the system UI.
   std::string StatusJson();

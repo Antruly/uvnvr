@@ -418,7 +418,12 @@ def main() -> int:
             )
             if status == 200:
                 recording = next(
-                    (item for item in rows if item.get("recordType") == "event"), None
+                    (
+                        item
+                        for item in rows
+                        if item.get("recordType") == "event" and not item.get("active")
+                    ),
+                    None,
                 )
                 if recording:
                     break

@@ -55,7 +55,7 @@ const modal = reactive({
   mode: 'loop',
   maxUsagePct: 90,
   reserveGb: 5,
-  retentionDays: 30,
+  retentionDays: 0,
 })
 
 function flash(message: string) {

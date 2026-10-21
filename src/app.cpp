@@ -819,7 +819,7 @@ bool App::Migrate(std::string* error) {
       "mode TEXT NOT NULL DEFAULT 'loop',"
       "max_usage_pct INTEGER NOT NULL DEFAULT 90,"
       "reserve_gb INTEGER NOT NULL DEFAULT 5,"
-      "retention_days INTEGER NOT NULL DEFAULT 30,"
+      "retention_days INTEGER NOT NULL DEFAULT 0,"
       "enabled INTEGER NOT NULL DEFAULT 1,"
       "created_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS recordings ("
@@ -1978,6 +1978,10 @@ int App::Run() {
   playback_ = std::make_unique<PlaybackService>(
       &web_, &db_, static_cast<size_t>(config_.cache_mb) * 1024 * 1024,
       static_cast<size_t>(config_.readahead_mb) * 1024 * 1024);
+  playback_->SetActiveProvider([this] {
+    return recording_ ? recording_->ActiveSegments()
+                      : std::vector<RecordingService::ActiveSegment>();
+  });
   rtsp_ = std::make_unique<RtspServer>(
       [this](const std::string& user, const std::string& password) {
         return VerifyRtspCredentials(user, password);
@@ -4006,7 +4010,7 @@ void App::EnsureDefaults() {
   params.add("loop");
   params.add(90);
   params.add(5);
-  params.add(30);
+  params.add(0);
   params.add(1);
   params.add(NowSeconds());
   Exec("INSERT INTO storage_volumes(path, label, mode, max_usage_pct, reserve_gb, "
@@ -6679,7 +6683,7 @@ void App::RegisterStorageRoutes() {
             const std::string mode = JsonString(body, "mode", "loop");
             const int64_t max_usage = JsonInt(body, "maxUsagePct", 90);
             const int64_t reserve = JsonInt(body, "reserveGb", 5);
-            const int64_t retention = JsonInt(body, "retentionDays", 30);
+            const int64_t retention = JsonInt(body, "retentionDays", 0);
             if (path.empty() || path.size() > 1024 || UnsafeVolumePath(path) ||
                 (mode != "loop" && mode != "alert") || max_usage < 50 || max_usage > 99 ||
                 reserve < 0 || reserve > 1000 || retention < 0 || retention > 3650) {
@@ -6772,7 +6776,7 @@ void App::RegisterStorageRoutes() {
                  const std::string mode = JsonString(body, "mode", "loop");
                  const int64_t max_usage = JsonInt(body, "maxUsagePct", 90);
                  const int64_t reserve = JsonInt(body, "reserveGb", 5);
-                 const int64_t retention = JsonInt(body, "retentionDays", 30);
+                 const int64_t retention = JsonInt(body, "retentionDays", 0);
                  const bool enabled = JsonBool(body, "enabled", true);
                  if ((mode != "loop" && mode != "alert") || max_usage < 50 || max_usage > 99 ||
                      reserve < 0 || reserve > 1000 || retention < 1 || retention > 3650) {
@@ -7160,7 +7164,39 @@ void App::RegisterRecordingRoutes() {
                              {"sizeBytes", TableInt(table, i, "size_bytes")},
                              {"codec", TableText(table, i, "codec")},
                              {"recordType", TableText(table, i, "record_type")},
+                             {"active", false},
                          });
+                       }
+                       if (recording_) {
+                         const int64_t now_ms =
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+                         for (const auto& segment : recording_->ActiveSegments()) {
+                           if (channel_id > 0 && segment.channel_id != channel_id)
+                             continue;
+                           if (!stream.empty() && segment.stream != stream)
+                             continue;
+                           if (to_ms > 0 && segment.start_ms >= to_ms)
+                             continue;
+                           if (from_ms > 0 && now_ms <= from_ms)
+                             continue;
+                           const int64_t id =
+                               -(segment.channel_id * 2 + (segment.stream == "sub" ? 1 : 0) + 1);
+                           items->push_back(json{
+                               {"id", id},
+                               {"channelId", segment.channel_id},
+                               {"stream", segment.stream},
+                               {"path", segment.part_path},
+                               {"startMs", segment.start_ms},
+                               {"endMs", now_ms},
+                               {"durationMs", std::max<int64_t>(0, now_ms - segment.start_ms)},
+                               {"sizeBytes", segment.bytes},
+                               {"codec", segment.codec},
+                               {"recordType", segment.record_type},
+                               {"active", true},
+                           });
+                         }
                        }
                      },
                      [items, &resp, next] {

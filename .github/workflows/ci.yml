@@ -70,7 +70,7 @@ jobs:
           done
 
           cat "$RUNNER_TEMP/health.json"
-          grep -q '"version":"0.17.0"' "$RUNNER_TEMP/health.json"
+          grep -q '"version":"0.18.0"' "$RUNNER_TEMP/health.json"
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>UvNVR</title>'
           echo "smoke test passed"
 
@@ -115,6 +115,11 @@ jobs:
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/mediamtx/mediamtx
         run: python3 tests/integration/event_recording.py ./build/uvnvr 19610
+
+      - name: Active recording playback integration test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/mediamtx/mediamtx
+        run: python3 tests/integration/active_playback.py ./build/uvnvr 19110
 
       - name: RTSP output integration test
         env:

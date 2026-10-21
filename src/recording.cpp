@@ -167,6 +167,8 @@ struct RecordingService::Impl {
     struct StatusSnapshot {
       bool active = false;
       std::string path;
+      std::string part_path;
+      std::string codec;
       int64_t bytes = 0;
       int64_t start_ms = 0;
       int64_t volume_id = 0;
@@ -178,10 +180,14 @@ struct RecordingService::Impl {
       status.active = has_segment;
       if (has_segment) {
         status.path = segment.path;
+        status.part_path = segment.part_path;
+        status.codec = segment.codec;
         status.bytes = segment.bytes;
         status.start_ms = segment.start_ms;
       } else {
         status.path.clear();
+        status.part_path.clear();
+        status.codec.clear();
         status.bytes = 0;
         status.start_ms = 0;
       }
@@ -875,6 +881,51 @@ struct RecordingService::Impl {
     }
   }
 
+  void AppendActive(const std::map<std::string, std::shared_ptr<Recorder>>& map,
+                    std::vector<ActiveSegment>* out) {
+    for (const auto& [key, recorder] : map) {
+      (void)key;
+      Recorder::StatusSnapshot snapshot;
+      {
+        std::lock_guard<std::mutex> status_lock(recorder->status_mutex);
+        snapshot = recorder->status;
+      }
+      if (!snapshot.active || snapshot.part_path.empty())
+        continue;
+      ActiveSegment segment;
+      segment.channel_id = recorder->channel_id;
+      segment.stream = recorder->stream;
+      segment.part_path = snapshot.part_path;
+      if (snapshot.part_path.size() > 5 &&
+          snapshot.part_path.compare(snapshot.part_path.size() - 5, 5, ".part") == 0) {
+        segment.final_path = snapshot.part_path.substr(0, snapshot.part_path.size() - 5);
+      }
+      segment.start_ms = snapshot.start_ms;
+      segment.bytes = snapshot.bytes;
+      segment.codec = snapshot.codec;
+      segment.record_type = recorder->record_type;
+      segment.volume_id = snapshot.volume_id;
+      out->push_back(std::move(segment));
+    }
+  }
+
+  std::vector<ActiveSegment> ActiveSegments() {
+    std::vector<ActiveSegment> result;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      AppendActive(recorders, &result);
+    }
+    {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      AppendActive(event_recorders, &result);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const ActiveSegment& a, const ActiveSegment& b) {
+                return a.start_ms < b.start_ms;
+              });
+    return result;
+  }
+
   std::string StatusJson() {
     VolumeInfo volume;
     const bool has_volume = ActiveVolume(&volume);
@@ -892,6 +943,7 @@ struct RecordingService::Impl {
             {"recordType", recorder->record_type},
             {"active", snapshot.active},
             {"path", snapshot.path},
+            {"partPath", snapshot.part_path},
             {"bytes", snapshot.bytes},
             {"startMs", snapshot.start_ms},
             {"volumeId", snapshot.volume_id},
@@ -1019,6 +1071,10 @@ void RecordingService::Stop() {
 
 void RecordingService::OnEvent(int64_t channel_id) {
   impl_->OnEvent(channel_id);
+}
+
+std::vector<RecordingService::ActiveSegment> RecordingService::ActiveSegments() {
+  return impl_->ActiveSegments();
 }
 
 std::string RecordingService::StatusJson() {

@@ -276,8 +276,9 @@ def main() -> int:
                     assert active["volumePath"] == str(volume), active
                     saw_active = True
             status, rows = call("GET", "/api/v1/recordings?channelId=1&stream=main")
-            if status == 200 and rows:
-                recordings = rows
+            finalized = [item for item in rows if not item.get("active")] if status == 200 else []
+            if finalized:
+                recordings = finalized
                 break
             time.sleep(1)
         assert saw_active, "the recording status endpoint never reported an active segment"

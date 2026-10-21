@@ -48,6 +48,10 @@
   --info-bg: rgba(8, 47, 73, 0.2);
   --info-border: rgba(56, 189, 248, 0.3);
   --info-text: #bae6fd;
+  --violet: #a78bfa;
+  --violet-bg: rgba(76, 29, 149, 0.18);
+  --violet-border: rgba(167, 139, 250, 0.45);
+  --violet-text: #ddd6fe;
   --hairline: rgba(255, 255, 255, 0.045);
   --shadow-card: 0 18px 46px rgba(0, 0, 0, 0.26);
   --shadow-pop: 0 34px 100px rgba(0, 0, 0, 0.52);
@@ -103,6 +107,10 @@
   --info-bg: #eff6ff;
   --info-border: #bfdbfe;
   --info-text: #1d4ed8;
+  --violet: #7c3aed;
+  --violet-bg: #f5f3ff;
+  --violet-border: #ddd6fe;
+  --violet-text: #6d28d9;
   --hairline: rgba(15, 23, 42, 0.07);
   --shadow-card: 0 16px 40px rgba(30, 60, 90, 0.1);
   --shadow-pop: 0 30px 80px rgba(30, 60, 90, 0.2);
@@ -1851,8 +1859,8 @@ select.input {
 }
 
 .segmented button.active {
-  background: rgba(56, 189, 248, 0.14);
-  color: #e0f7ff;
+  background: var(--selected-bg);
+  color: var(--accent-contrast);
 }
 
 .count-badge {
@@ -2387,9 +2395,9 @@ select.input {
 }
 
 .layout-tab.active {
-  color: #e0f7ff;
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.12);
+  color: var(--accent-contrast);
+  border-color: var(--line-strong);
+  background: var(--selected-bg);
 }
 
 .layout-tab.add,
@@ -2422,9 +2430,9 @@ select.input {
 }
 
 .small-button.active {
-  color: #e0f7ff;
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.12);
+  color: var(--accent-contrast);
+  border-color: var(--line-strong);
+  background: var(--selected-bg);
 }
 
 .grid-number {
@@ -2875,31 +2883,31 @@ select.input {
 }
 
 .brush-button.active {
-  border-color: rgba(56, 189, 248, 0.4);
-  color: #e0f7ff;
-  background: rgba(56, 189, 248, 0.12);
+  border-color: var(--line-strong);
+  color: var(--accent-contrast);
+  background: var(--selected-bg);
 }
 
 .brush-button.timed.active {
-  border-color: rgba(34, 211, 238, 0.5);
+  border-color: var(--accent);
 }
 
 .brush-button.event.active {
-  border-color: rgba(251, 191, 36, 0.5);
-  color: #fde68a;
-  background: rgba(120, 53, 15, 0.18);
+  border-color: var(--warn-border);
+  color: var(--warn-text);
+  background: var(--warn-bg);
 }
 
 .brush-button.both.active {
-  border-color: rgba(167, 139, 250, 0.5);
-  color: #ddd6fe;
-  background: rgba(76, 29, 149, 0.18);
+  border-color: var(--violet-border);
+  color: var(--violet-text);
+  background: var(--violet-bg);
 }
 
 .brush-button.erase.active {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: #fecaca;
-  background: rgba(127, 29, 29, 0.18);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
 }
 
 .plan-count {
@@ -3844,4 +3852,51 @@ select.input {
 .auth-features svg {
   color: var(--accent);
   flex: 0 0 auto;
+}
+
+
+.timeline-track {
+  user-select: none;
+  touch-action: none;
+}
+
+.timeline-track.dragging {
+  cursor: grabbing;
+}
+
+.timeline-track.dragging .timeline-block {
+  opacity: 0.85;
+}
+
+
+.channel-thumb {
+  position: relative;
+}
+
+.thumb-spinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb-spinner::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+
+.scope-group {
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.scope-group:nth-child(odd) {
+  background: var(--surface-1);
 }

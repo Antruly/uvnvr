@@ -25,6 +25,7 @@ interface Recording {
   durationMs: number
   sizeBytes: number
   recordType: string
+  active?: boolean
 }
 
 const { t } = useI18n()
@@ -51,11 +52,13 @@ const error = ref('')
 const notice = ref('')
 const exporting = ref(false)
 const reverse = ref(false)
+const timelineDragging = ref(false)
 const rangeStart = ref('')
 const rangeEnd = ref('')
 const windowMs = ref(24 * 60 * 60 * 1000)
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
 let reverseTimer: number | undefined
+let recordingsTimer: number | undefined
 
 const dayStart = computed(() => new Date(`${day.value}T00:00:00`).getTime())
 const dayEnd = computed(() => dayStart.value + 24 * 60 * 60 * 1000)
@@ -220,22 +223,49 @@ function toggleReverse() {
   }
 }
 
-function seekTimeline(event: MouseEvent) {
+function timelineHit(event: PointerEvent | MouseEvent) {
   const track = event.currentTarget as HTMLElement
   const rect = track.getBoundingClientRect()
-  if (rect.width <= 0) return
+  if (rect.width <= 0) return null
   const target =
     windowStart.value +
     ((event.clientX - rect.left) / rect.width) * (windowEnd.value - windowStart.value)
   const hit = recordings.value.find(
     (recording) => target >= recording.startMs && target <= recording.endMs,
   )
-  if (!hit) return
-  selected.value = hit
-  onSeek(target)
+  return hit ? { hit, target } : null
 }
 
-async function loadRecordings() {
+function startTimelineDrag(event: PointerEvent) {
+  if (event.button !== 0) return
+  const track = event.currentTarget as HTMLElement
+  track.setPointerCapture(event.pointerId)
+  timelineDragging.value = true
+  const result = timelineHit(event)
+  if (result) {
+    selected.value = result.hit
+    positionMs.value = result.target
+  }
+}
+
+function moveTimelineDrag(event: PointerEvent) {
+  if (!timelineDragging.value) return
+  const result = timelineHit(event)
+  if (!result) return
+  selected.value = result.hit
+  positionMs.value = result.target
+}
+
+function endTimelineDrag(event: PointerEvent) {
+  if (!timelineDragging.value) return
+  timelineDragging.value = false
+  const result = timelineHit(event)
+  if (!result) return
+  selected.value = result.hit
+  onSeek(result.target)
+}
+
+async function loadRecordings(preserve = false) {
   if (channelId.value <= 0) return
   loading.value = true
   error.value = ''
@@ -246,13 +276,23 @@ async function loadRecordings() {
       from: String(dayStart.value),
       to: String(dayEnd.value),
     })
+    const previous = selected.value
     recordings.value = await api<Recording[]>(`/api/v1/recordings?${params.toString()}`)
-    if (recordings.value.length > 0) {
-      selected.value = recordings.value[0]
-      playStartMs.value = recordings.value[0].startMs
-      positionMs.value = recordings.value[0].startMs
-      rangeStart.value = toLocalInput(recordings.value[0].startMs)
-      rangeEnd.value = toLocalInput(recordings.value[0].endMs)
+    const previousMatch =
+      preserve && previous
+        ? (previous.active
+            ? recordings.value.find((row) => row.active)
+            : recordings.value.find((row) => row.id === previous.id)) ??
+          recordings.value.find((row) => row.startMs === previous.startMs)
+        : undefined
+    const chosen = previousMatch ?? recordings.value[0]
+    if (chosen) {
+      const keepPosition = preserve && previousMatch ? positionMs.value : chosen.startMs
+      selected.value = chosen
+      playStartMs.value = chosen.startMs
+      positionMs.value = keepPosition
+      rangeStart.value = toLocalInput(chosen.startMs)
+      rangeEnd.value = toLocalInput(chosen.endMs)
     } else {
       selected.value = null
       playStartMs.value = 0
@@ -355,6 +395,7 @@ watch(day, () => void loadRecordings())
 
 onBeforeUnmount(() => {
   if (reverseTimer !== undefined) window.clearInterval(reverseTimer)
+  if (recordingsTimer !== undefined) window.clearInterval(recordingsTimer)
 })
 
 onMounted(async () => {
@@ -365,6 +406,9 @@ onMounted(async () => {
       const match = channels.value.find((channel) => channel.id === requested)
       channelId.value = match?.id ?? channels.value[0].id
       await loadRecordings()
+      recordingsTimer = window.setInterval(() => {
+        if (!loading.value) void loadRecordings(true)
+      }, 5000)
     }
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
@@ -380,7 +424,7 @@ onMounted(async () => {
       <p>{{ t('playback.subtitle') }}</p>
     </div>
     <div class="head-actions">
-      <button class="button" @click="loadRecordings">
+      <button class="button" @click="loadRecordings()">
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
       </button>
@@ -390,13 +434,13 @@ onMounted(async () => {
       </button>
       <button
         class="button"
-        :disabled="!selected || !canDownload || exporting"
+        :disabled="!selected || selected.active || !canDownload || exporting"
         @click="exportMp4"
       >
         <AppIcon name="save" :size="16" />
         {{ exporting ? t('playback.exporting') : t('playback.exportMp4') }}
       </button>
-      <button class="button" :disabled="!selected" @click="download">
+      <button class="button" :disabled="!selected || selected.active" @click="download">
         <AppIcon name="save" :size="16" />
         {{ t('playback.download') }}
       </button>
@@ -491,7 +535,14 @@ onMounted(async () => {
             {{ tick.label }}
           </span>
         </div>
-        <div class="timeline-track" @click="seekTimeline">
+        <div
+          class="timeline-track"
+          :class="{ dragging: timelineDragging }"
+          @pointerdown="startTimelineDrag"
+          @pointermove="moveTimelineDrag"
+          @pointerup="endTimelineDrag"
+          @pointercancel="endTimelineDrag"
+        >
           <button
             v-for="recording in recordings"
             :key="recording.id"
@@ -530,14 +581,17 @@ onMounted(async () => {
             <td>{{ formatTime(recording.endMs) }}</td>
             <td>{{ Math.round(recording.durationMs / 1000) }}s</td>
             <td>{{ formatBytes(recording.sizeBytes) }}</td>
-            <td><span class="pill">{{ recording.recordType }}</span></td>
+            <td>
+              <span class="pill">{{ recording.recordType }}</span>
+              <span v-if="recording.active" class="status-pill info">{{ t('playback.live') }}</span>
+            </td>
             <td>
               <button class="button small" @click="playFrom(recording)">
                 <AppIcon name="playback" :size="14" />
                 {{ t('playback.play') }}
               </button>
               <button
-                v-if="canMaintain"
+                v-if="canMaintain && !recording.active"
                 class="button small danger"
                 @click="removeRecording(recording)"
               >

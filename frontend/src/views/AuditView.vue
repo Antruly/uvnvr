@@ -70,6 +70,12 @@ function categoryLabel(category: string) {
   return translated === key ? category : translated
 }
 
+function auditValue(group: 'levels' | 'results' | 'actions' | 'objects', value: string) {
+  const key = `audit.${group}.${value}`
+  const translated = t(key)
+  return translated === key ? value : translated
+}
+
 function formatTime(seconds: number) {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'short',
@@ -247,7 +253,7 @@ onMounted(() => void load())
             <td class="muted nowrap">{{ formatTime(row.ts) }}</td>
             <td><span class="pill">{{ categoryLabel(row.category) }}</span></td>
             <td>
-              <span class="status-pill" :class="row.level">{{ row.level }}</span>
+              <span class="status-pill" :class="row.level">{{ auditValue('levels', row.level) }}</span>
             </td>
             <td>
               <strong>{{ row.actor || '—' }}</strong>
@@ -255,12 +261,12 @@ onMounted(() => void load())
             </td>
             <td class="muted mono">{{ row.ip || '—' }}</td>
             <td>
-              <strong>{{ row.action }}</strong>
+              <strong>{{ auditValue('actions', row.action) }}</strong>
               <small v-if="row.errorCode" class="block error-text">{{ row.errorCode }}</small>
             </td>
             <td>
               <span class="status-pill" :class="row.result === 'success' ? 'ok' : 'danger'">
-                {{ row.result }}
+                {{ auditValue('results', row.result) }}
               </span>
             </td>
             <td>

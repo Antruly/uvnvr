@@ -1,8 +1,10 @@
 #pragma once
 
+#include "recording.h"
 #include "storage_cache.h"
 
 #include <cstdint>
+#include <functional>
 #include <db/uvcpp_db_pool.h>
 #include <memory>
 #include <string>
@@ -27,6 +29,11 @@ public:
   // requested range at once.
   void Open(uvcpp::uvcpp_ws_connection* connection, int64_t channel_id, const std::string& stream,
             int64_t start_ms, int64_t end_ms, double speed);
+
+  // Playback follows segments that are still being written by asking this
+  // provider for the active recorders.
+  using ActiveFn = std::function<std::vector<RecordingService::ActiveSegment>()>;
+  void SetActiveProvider(ActiveFn provider);
 
   BlockCache::Stats CacheStats() const;
 
