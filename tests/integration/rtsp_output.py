@@ -205,12 +205,20 @@ def main() -> int:
                 "lavfi",
                 "-i",
                 "testsrc2=size=320x240:rate=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
                 "-c:v",
                 encoder,
                 "-g",
                 "30",
                 "-pix_fmt",
                 "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
                 "-f",
                 "rtsp",
                 "-rtsp_transport",
@@ -304,7 +312,11 @@ def main() -> int:
             assert video is not None, stream
             assert video["codec_name"] == "h264", video
             assert video.get("width") == 320 and video.get("height") == 240, video
-            print(f"RTSP {transport}: {video}")
+            audio = next(
+                (item for item in stream["streams"] if item["codec_type"] == "audio"), None
+            )
+            assert audio is not None and audio["codec_name"] == "aac", stream["streams"]
+            print(f"RTSP {transport}: video={video['codec_name']} audio={audio['codec_name']}")
 
         if encoder265:
             publisher265 = subprocess.Popen(
@@ -368,6 +380,7 @@ def main() -> int:
             print(f"RTSP h265: {video}")
         else:
             print("skipping H.265 output: no libkvazaar encoder")
+
         print("RTSP output integration passed")
         return 0
     finally:

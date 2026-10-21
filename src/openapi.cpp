@@ -97,6 +97,8 @@ const Endpoint kEndpoints[] = {
     {"post", "/api/v1/plans/sync", "Copy plans to other channels", "Plans", "plan.manage",
      "application/json"},
 
+    {"get", "/api/v1/storage/browse", "Browse storage directories", "Storage", "storage.manage",
+     "application/json"},
     {"get", "/api/v1/storage/volumes", "List storage volumes", "Storage", "storage.view",
      "application/json"},
     {"post", "/api/v1/storage/volumes", "Add a storage volume", "Storage", "storage.manage",

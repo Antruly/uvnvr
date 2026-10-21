@@ -948,6 +948,8 @@ bool App::Migrate(std::string* error) {
       {"recording.segment_size_mb", "256"},
       {"recording.segment_mode", "time"},
       {"recording.retention_days", "30"},
+      {"recording.batch_mb", "8"},
+      {"recording.batch_ms", "500"},
       {"event.enabled", "1"},
       {"event.pre_seconds", "10"},
       {"event.post_seconds", "30"},
@@ -1956,6 +1958,11 @@ int App::Run() {
     media_->SetFfmpegPath(ffmpeg);
   }
   media_->SetGpuEnabled(GetSettingInt("system.gpu_enabled", 1) != 0);
+  if (!media_->Available()) {
+    RaiseAlert(0, "service_error", "error",
+               "FFmpeg is not available; live preview, recording and snapshots cannot start.",
+               "");
+  }
   onvif_events_ = std::make_unique<OnvifEventService>(
       [this](int64_t channel_id, const std::string& type, const std::string& message) {
         RaiseAlert(channel_id, type, "warning", message, "");
@@ -1989,6 +1996,7 @@ int App::Run() {
   std::string rtsp_error;
   if (!rtsp_->Start(&rtsp_error)) {
     std::fprintf(stderr, "RTSP server unavailable: %s\n", rtsp_error.c_str());
+    RaiseAlert(0, "service_error", "error", "RTSP server unavailable: " + rtsp_error, "");
   } else {
     std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
   }
@@ -2195,6 +2203,17 @@ std::string CsvField(const std::string& value) {
   }
   out += '"';
   return out;
+}
+
+bool UnsafeVolumePath(const std::string& path) {
+  if (path.empty())
+    return true;
+  std::error_code ec;
+  const std::filesystem::path normalized = std::filesystem::weakly_canonical(path, ec);
+  if (ec)
+    return true;
+  const std::filesystem::path root = normalized.root_path();
+  return !root.empty() && normalized == root;
 }
 
 struct MotionRegion {
@@ -6292,6 +6311,72 @@ void App::RegisterPlanRoutes() {
 
 void App::RegisterStorageRoutes() {
   web_.get(
+      "/api/v1/storage/browse",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const std::string path = req.query("path") ? *req.query("path") : "";
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [path, op] {
+                  json roots = json::array();
+                  json entries = json::array();
+                  if (path.empty()) {
+#ifdef _WIN32
+                    for (char letter = 'A'; letter <= 'Z'; ++letter) {
+                      const std::string drive = std::string(1, letter) + ":\\";
+                      std::error_code ec;
+                      if (std::filesystem::exists(drive, ec) && !ec)
+                        roots.push_back(drive);
+                    }
+#else
+                    roots.push_back("/");
+                    for (const char* base : {"/mnt", "/media", "/srv", "/var/lib"}) {
+                      std::error_code ec;
+                      if (std::filesystem::is_directory(base, ec) && !ec)
+                        roots.push_back(base);
+                    }
+#endif
+                    op->data = json{{"path", ""},
+                                    {"parent", ""},
+                                    {"entries", entries},
+                                    {"roots", roots}};
+                    return;
+                  }
+                  std::error_code ec;
+                  const std::filesystem::path directory =
+                      std::filesystem::weakly_canonical(path, ec);
+                  if (ec || !std::filesystem::is_directory(directory, ec)) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "not_a_directory";
+                    op->message = "the path is not a readable directory";
+                    return;
+                  }
+                  std::filesystem::directory_iterator iterator(
+                      directory, std::filesystem::directory_options::skip_permission_denied, ec);
+                  const std::filesystem::directory_iterator end;
+                  while (!ec && iterator != end) {
+                    std::error_code entry_ec;
+                    if (iterator->is_directory(entry_ec) && !entry_ec) {
+                      entries.push_back(json{{"name", iterator->path().filename().string()},
+                                             {"path", iterator->path().string()}});
+                    }
+                    iterator.increment(ec);
+                  }
+                  op->data = json{{"path", directory.string()},
+                                  {"parent", directory.parent_path().string()},
+                                  {"entries", entries},
+                                  {"roots", roots}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "storage.manage"));
+
+  web_.get(
       "/api/v1/storage/volumes",
       Protected(
           [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
@@ -6369,10 +6454,11 @@ void App::RegisterStorageRoutes() {
             const int64_t max_usage = JsonInt(body, "maxUsagePct", 90);
             const int64_t reserve = JsonInt(body, "reserveGb", 5);
             const int64_t retention = JsonInt(body, "retentionDays", 30);
-            if (path.empty() || path.size() > 1024 || (mode != "loop" && mode != "alert") ||
-                max_usage < 50 || max_usage > 99 || reserve < 0 || reserve > 1000 ||
-                retention < 0 || retention > 3650) {
-              SendError(resp, 400, "invalid_volume", "invalid volume settings");
+            if (path.empty() || path.size() > 1024 || UnsafeVolumePath(path) ||
+                (mode != "loop" && mode != "alert") || max_usage < 50 || max_usage > 99 ||
+                reserve < 0 || reserve > 1000 || retention < 0 || retention > 3650) {
+              SendError(resp, 400, "invalid_volume",
+                        "invalid volume settings, or the path is a filesystem root");
               next();
               return;
             }
@@ -6391,6 +6477,19 @@ void App::RegisterStorageRoutes() {
                     op->message = "cannot create the storage directory: " + ec.message();
                     return;
                   }
+                  const std::filesystem::path write_probe =
+                      std::filesystem::path(path) / ".uvnvr-write-test";
+                  {
+                    std::ofstream probe(write_probe, std::ios::binary | std::ios::trunc);
+                    if (!probe) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "path_not_writable";
+                      op->message = "the storage directory is not writable";
+                      return;
+                    }
+                  }
+                  std::filesystem::remove(write_probe, ec);
                   uvcpp::uvcpp_db_params params;
                   params.add(path);
                   params.add(label);
@@ -7266,14 +7365,26 @@ void App::MonitorRun() {
 #ifdef _WIN32
           ULARGE_INTEGER free_bytes{};
           ULARGE_INTEGER total_bytes{};
-          if (!GetDiskFreeSpaceExA(path.c_str(), &free_bytes, &total_bytes, nullptr))
+          if (!GetDiskFreeSpaceExA(path.c_str(), &free_bytes, &total_bytes, nullptr)) {
+            if (now - last_disk_error_alert_at_ > 3600) {
+              RaiseAlert(0, "disk_error", "error",
+                         "Cannot read free space for storage volume " + path, "");
+              last_disk_error_alert_at_ = now;
+            }
             continue;
+          }
           const uint64_t total = total_bytes.QuadPart;
           const uint64_t free = free_bytes.QuadPart;
 #else
           struct statvfs stat {};
-          if (statvfs(path.c_str(), &stat) != 0)
+          if (statvfs(path.c_str(), &stat) != 0) {
+            if (now - last_disk_error_alert_at_ > 3600) {
+              RaiseAlert(0, "disk_error", "error",
+                         "Cannot read storage volume " + path + ": " + std::strerror(errno), "");
+              last_disk_error_alert_at_ = now;
+            }
             continue;
+          }
           const uint64_t total = static_cast<uint64_t>(stat.f_blocks) * stat.f_frsize;
           const uint64_t free = static_cast<uint64_t>(stat.f_bavail) * stat.f_frsize;
 #endif

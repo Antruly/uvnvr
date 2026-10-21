@@ -153,6 +153,10 @@ struct RecordingService::Impl {
     std::atomic<bool> finished{false};
     int64_t event_start_ms = 0;
     bool event_start_used = false;
+    int64_t batch_bytes = 8 * 1024 * 1024;
+    int64_t batch_ms = 500;
+    int64_t pending_bytes = 0;
+    int64_t last_flush_ms = 0;
     mutable std::mutex status_mutex;
     struct StatusSnapshot {
       bool active = false;
@@ -186,7 +190,23 @@ struct RecordingService::Impl {
           volume(std::move(vol)), segment_minutes(std::max<int64_t>(1, minutes)),
           segment_size_mb(std::max<int64_t>(16, size_mb)), segment_mode(std::move(mode)),
           event_mode(record_type_in == "event"), record_type(std::move(record_type_in)) {
+      batch_bytes =
+          std::clamp<int64_t>(GetSettingInt(owner->db, "recording.batch_mb", 8) * 1024 * 1024,
+                              64 * 1024, 256 * 1024 * 1024);
+      batch_ms = std::clamp<int64_t>(GetSettingInt(owner->db, "recording.batch_ms", 500), 10, 5000);
+      last_flush_ms = NowMs();
       RefreshStatus();
+    }
+
+    void MaybeFlush(bool force) {
+      if (!segment.file.is_open())
+        return;
+      const int64_t now = NowMs();
+      if (!force && pending_bytes < batch_bytes && now - last_flush_ms < batch_ms)
+        return;
+      segment.file.flush();
+      pending_bytes = 0;
+      last_flush_ms = now;
     }
 
     // Event clips start with the buffered pre-roll and stop at the deadline.
@@ -282,6 +302,8 @@ struct RecordingService::Impl {
       segment = std::move(value);
       has_segment = true;
       event_start_used = true;
+      pending_bytes = 0;
+      last_flush_ms = NowMs();
       RefreshStatus();
       std::fprintf(stderr, "[recording] channel %lld %s -> %s\n",
                    static_cast<long long>(channel_id), stream.c_str(), segment.path.c_str());
@@ -389,7 +411,8 @@ struct RecordingService::Impl {
             segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
                                static_cast<std::streamsize>(split_at - offset));
             segment.bytes += static_cast<int64_t>(split_at - offset);
-            segment.file.flush();
+            pending_bytes += static_cast<int64_t>(split_at - offset);
+            MaybeFlush(true);
           }
           offset = split_at;
           Finalize();
@@ -402,7 +425,8 @@ struct RecordingService::Impl {
         segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
                            static_cast<std::streamsize>(count));
         segment.bytes += static_cast<int64_t>(count);
-        segment.file.flush();
+        pending_bytes += static_cast<int64_t>(count);
+        MaybeFlush(false);
         offset = chunk->size();
         if (due && now - segment.start_ms > segment.limit_ms + 5000) {
           Finalize();

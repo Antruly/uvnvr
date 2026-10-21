@@ -181,6 +181,24 @@ def main() -> int:
         )
         assert status == 400, (status, invalid)
 
+        status, browse = server.call(
+            "GET", f"/api/v1/storage/browse?path={server.volume}"
+        )
+        assert status == 200 and "entries" in browse, (status, browse)
+        status, root_volume = server.call(
+            "POST",
+            "/api/v1/storage/volumes",
+            {
+                "path": "/",
+                "label": "root",
+                "mode": "loop",
+                "maxUsagePct": 95,
+                "reserveGb": 0,
+                "retentionDays": 0,
+            },
+        )
+        assert status == 400, (status, root_volume)
+
         status, created = server.call(
             "POST",
             "/api/v1/storage/volumes",

@@ -267,10 +267,14 @@ std::string HexBytes(const uint8_t* data, size_t len) {
   return out;
 }
 
-struct NalUnit {
+struct MediaUnit {
+  bool audio = false;
   std::vector<uint8_t> data;
   uint32_t pts = 0;
   bool last = false;
+  std::string codec;
+  int sample_rate = 0;
+  int channels = 0;
 };
 
 // Extracts H.264/H.265 NAL units from an MPEG-TS stream and keeps its SPS/PPS
@@ -281,11 +285,29 @@ public:
   bool CodecReady() const {
     return !codec_.empty();
   }
+  bool ProbeReady() const {
+    return !codec_.empty() && (audio_pid_ < 0 || !audio_codec_.empty());
+  }
+  bool HasAudio() const {
+    return !audio_codec_.empty();
+  }
   bool HasParameters() const {
     return !sps_.empty() && !pps_.empty();
   }
   const std::string& Codec() const {
     return codec_;
+  }
+  const std::string& AudioCodec() const {
+    return audio_codec_;
+  }
+  int AudioSampleRate() const {
+    return audio_sample_rate_;
+  }
+  int AudioChannels() const {
+    return audio_channels_;
+  }
+  const std::string& AacConfig() const {
+    return aac_config_;
   }
 
   std::string Sdp() const {
@@ -315,10 +337,25 @@ public:
         sdp << ";sprop-parameter-sets=" << Base64Encode(sps_) << "," << Base64Encode(pps_);
       sdp << "\r\na=control:trackID=0\r\n";
     }
+    if (!audio_codec_.empty()) {
+      if (audio_codec_ == "aac") {
+        const int rate = audio_sample_rate_ > 0 ? audio_sample_rate_ : 48000;
+        const int channels = audio_channels_ > 0 ? audio_channels_ : 2;
+        sdp << "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/" << rate << "/" << channels
+            << "\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;"
+               "indexlength=3;indexdeltalength=3;config="
+            << aac_config_ << "\r\na=control:trackID=1\r\n";
+      } else {
+        const bool pcma = audio_codec_ == "pcma";
+        const int payload_type = pcma ? 8 : 0;
+        sdp << "m=audio 0 RTP/AVP " << payload_type << "\r\na=rtpmap:" << payload_type
+            << (pcma ? " PCMA" : " PCMU") << "/8000\r\na=control:trackID=1\r\n";
+      }
+    }
     return sdp.str();
   }
 
-  void Feed(const uint8_t* data, size_t len, std::vector<NalUnit>* out) {
+  void Feed(const uint8_t* data, size_t len, std::vector<MediaUnit>* out) {
     pending_.insert(pending_.end(), data, data + len);
     size_t offset = 0;
     while (pending_.size() - offset >= 188) {
@@ -343,7 +380,7 @@ private:
                                  90);
   }
 
-  void ParsePacket(const uint8_t* packet, std::vector<NalUnit>* out) {
+  void ParsePacket(const uint8_t* packet, std::vector<MediaUnit>* out) {
     const int pid = ((packet[1] & 0x1f) << 8) | packet[2];
     const bool pusi = (packet[1] & 0x40) != 0;
     const int adaptation = (packet[3] >> 4) & 0x03;
@@ -362,6 +399,8 @@ private:
       ParsePmt(data, length);
     } else if (pid == video_pid_) {
       ParsePes(data, length, pusi, out);
+    } else if (pid == audio_pid_) {
+      ParseAudioPes(data, length, pusi, out);
     }
   }
 
@@ -409,12 +448,22 @@ private:
       if (video_pid_ < 0 && (stream_type == 0x1b || stream_type == 0x24)) {
         video_pid_ = pid;
         codec_ = stream_type == 0x1b ? "h264" : "h265";
+      } else if (audio_pid_ < 0 && stream_type == 0x0f) {
+        audio_pid_ = pid;
+        audio_codec_ = "aac";
+        audio_sample_rate_ = 48000;
+        audio_channels_ = 2;
+      } else if (audio_pid_ < 0 && (stream_type == 0x90 || stream_type == 0x91)) {
+        audio_pid_ = pid;
+        audio_codec_ = stream_type == 0x90 ? "pcma" : "pcmu";
+        audio_sample_rate_ = 8000;
+        audio_channels_ = 1;
       }
       i += 5 + es_info_length;
     }
   }
 
-  void ParsePes(const uint8_t* data, size_t length, bool pusi, std::vector<NalUnit>* out) {
+  void ParsePes(const uint8_t* data, size_t length, bool pusi, std::vector<MediaUnit>* out) {
     if (pusi) {
       FlushPes(out);
       pes_.clear();
@@ -444,7 +493,7 @@ private:
     pes_header_done_ = true;
   }
 
-  void FlushPes(std::vector<NalUnit>* out) {
+  void FlushPes(std::vector<MediaUnit>* out) {
     if (pes_.size() <= pes_payload_offset_)
       return;
     const size_t first = out != nullptr ? out->size() : 0;
@@ -472,7 +521,102 @@ private:
       out->back().last = true;
   }
 
-  void HandleNal(const uint8_t* nal, size_t length, std::vector<NalUnit>* out) {
+  void ParseAudioPes(const uint8_t* data, size_t length, bool pusi, std::vector<MediaUnit>* out) {
+    if (pusi) {
+      FlushAudioPes(out);
+      audio_pes_.clear();
+      audio_header_done_ = false;
+      audio_payload_offset_ = 9;
+    }
+    audio_pes_.insert(audio_pes_.end(), data, data + length);
+    if (audio_header_done_ || audio_pes_.size() < 9)
+      return;
+    if (!(audio_pes_[0] == 0 && audio_pes_[1] == 0 && audio_pes_[2] == 1)) {
+      audio_header_done_ = true;
+      return;
+    }
+    const uint8_t flags = audio_pes_[7];
+    const size_t header_length = audio_pes_[8];
+    if (header_length >= 5) {
+      audio_payload_offset_ = 9 + header_length;
+      if (flags & 0x80) {
+        const uint8_t* p = audio_pes_.data() + 9;
+        audio_pts_ = (static_cast<uint32_t>((p[0] >> 1) & 0x07) << 30) |
+                     (static_cast<uint32_t>(p[1]) << 22) |
+                     (static_cast<uint32_t>((p[2] >> 1) & 0x7f) << 15) |
+                     (static_cast<uint32_t>(p[3]) << 7) | (static_cast<uint32_t>(p[4]) >> 1);
+        audio_has_pts_ = true;
+      }
+    }
+    audio_header_done_ = true;
+  }
+
+  void FlushAudioPes(std::vector<MediaUnit>* out) {
+    if (audio_pes_.size() <= audio_payload_offset_)
+      return;
+    const uint8_t* payload = audio_pes_.data() + audio_payload_offset_;
+    const size_t length = audio_pes_.size() - audio_payload_offset_;
+    const uint32_t base_pts = audio_has_pts_ ? audio_pts_ : NowTimestamp();
+    if (audio_codec_ == "aac") {
+      static const int kRates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000,
+                                   22050, 16000, 12000, 11025, 8000,  7350};
+      size_t offset = 0;
+      size_t frames = 0;
+      while (offset + 7 <= length) {
+        if (!(payload[offset] == 0xff && (payload[offset + 1] & 0xf0) == 0xf0)) {
+          ++offset;
+          continue;
+        }
+        const int profile = (payload[offset + 2] >> 6) & 0x03;
+        const int frequency_index = (payload[offset + 2] >> 2) & 0x0f;
+        const int channels =
+            ((payload[offset + 2] & 0x01) << 2) | ((payload[offset + 3] >> 6) & 0x03);
+        const int frame_length = ((payload[offset + 3] & 0x03) << 11) | (payload[offset + 4] << 3) |
+                                 ((payload[offset + 5] >> 5) & 0x07);
+        const size_t header_length = (payload[offset + 1] & 0x01) ? 7 : 9;
+        if (frame_length < static_cast<int>(header_length) ||
+            offset + static_cast<size_t>(frame_length) > length)
+          break;
+        const int rate =
+            frequency_index >= 0 && frequency_index < 13 ? kRates[frequency_index] : 48000;
+        const int object_type = profile + 1;
+        const int config = (object_type << 11) | (frequency_index << 7) | (channels << 3);
+        char config_text[8];
+        std::snprintf(config_text, sizeof(config_text), "%04x", config & 0xffff);
+        aac_config_ = config_text;
+        audio_sample_rate_ = rate;
+        audio_channels_ = channels > 0 ? channels : 2;
+        if (out != nullptr) {
+          MediaUnit unit;
+          unit.audio = true;
+          unit.codec = "aac";
+          unit.sample_rate = rate;
+          unit.channels = audio_channels_;
+          unit.data.assign(payload + offset + header_length, payload + offset + frame_length);
+          unit.pts = base_pts + static_cast<uint32_t>(frames * 1024 * 90000 / rate);
+          out->push_back(std::move(unit));
+        }
+        offset += static_cast<size_t>(frame_length);
+        ++frames;
+      }
+      if (out != nullptr && frames > 0)
+        out->back().last = true;
+      return;
+    }
+    if (out != nullptr) {
+      MediaUnit unit;
+      unit.audio = true;
+      unit.codec = audio_codec_;
+      unit.sample_rate = 8000;
+      unit.channels = 1;
+      unit.data.assign(payload, payload + length);
+      unit.pts = base_pts;
+      unit.last = true;
+      out->push_back(std::move(unit));
+    }
+  }
+
+  void HandleNal(const uint8_t* nal, size_t length, std::vector<MediaUnit>* out) {
     if (length == 0 || codec_.empty())
       return;
     if (codec_ == "h264") {
@@ -500,7 +644,8 @@ private:
     }
     if (out == nullptr)
       return;
-    NalUnit unit;
+    MediaUnit unit;
+    unit.codec = codec_;
     unit.data.assign(nal, nal + length);
     unit.pts = pes_has_pts_ ? pes_pts_ : NowTimestamp();
     out->push_back(std::move(unit));
@@ -508,17 +653,27 @@ private:
 
   std::vector<uint8_t> pending_;
   std::vector<uint8_t> pes_;
+  std::vector<uint8_t> audio_pes_;
   int pmt_pid_ = -1;
   int video_pid_ = -1;
+  int audio_pid_ = -1;
   std::string codec_;
+  std::string audio_codec_;
+  std::string aac_config_;
+  int audio_sample_rate_ = 0;
+  int audio_channels_ = 0;
   std::string sps_;
   std::string pps_;
   std::string vps_;
   std::string profile_level_id_;
   size_t pes_payload_offset_ = 9;
+  size_t audio_payload_offset_ = 9;
   bool pes_header_done_ = false;
+  bool audio_header_done_ = false;
   bool pes_has_pts_ = false;
+  bool audio_has_pts_ = false;
   uint32_t pes_pts_ = 0;
+  uint32_t audio_pts_ = 0;
 };
 
 std::string Response(int status, const std::string& reason, const std::string& cseq,
@@ -544,10 +699,17 @@ struct RtspServer::Impl {
   struct Session {
     Socket fd = kInvalidSocket;
     Socket udp = kInvalidSocket;
+    Socket udp_audio = kInvalidSocket;
     sockaddr_in client{};
+    sockaddr_in audio_client{};
     bool tcp = true;
+    bool audio_tcp = true;
+    bool audio_setup = false;
+    bool audio_available = false;
     int rtp_channel = 0;
     int rtcp_channel = 1;
+    int audio_rtp_channel = 2;
+    int audio_rtcp_channel = 3;
     int64_t channel_id = 0;
     std::string stream;
     std::string session_id;
@@ -562,9 +724,17 @@ struct RtspServer::Impl {
     uint16_t sequence = 0;
     uint32_t timestamp = 0;
     uint32_t ssrc = 0;
+    uint16_t audio_sequence = 0;
+    uint32_t audio_timestamp = 0;
+    uint32_t audio_ssrc = 0;
+    std::string audio_codec;
+    int audio_rate = 48000;
+    int audio_channels = 2;
     TsParser parser;
     uint64_t packet_count = 0;
     uint64_t octet_count = 0;
+    uint64_t audio_packet_count = 0;
+    uint64_t audio_octet_count = 0;
     int64_t last_rtcp_ms = 0;
     std::atomic<bool> detached{false};
 
@@ -576,6 +746,8 @@ struct RtspServer::Impl {
         sender.join();
       if (udp != kInvalidSocket)
         CloseSocket(udp);
+      if (udp_audio != kInvalidSocket)
+        CloseSocket(udp_audio);
       if (fd != kInvalidSocket)
         CloseSocket(fd);
     }
@@ -585,42 +757,97 @@ struct RtspServer::Impl {
       SendAll(fd, data);
     }
 
-    void SendRtp(const std::vector<uint8_t>& payload, bool marker, uint32_t rtp_timestamp) {
+    void SendRtpPacket(bool audio_track, const std::vector<uint8_t>& payload, bool marker,
+                       uint32_t rtp_timestamp, int payload_type) {
+      uint16_t& track_sequence = audio_track ? audio_sequence : sequence;
+      uint32_t& track_timestamp = audio_track ? audio_timestamp : timestamp;
+      const uint32_t track_ssrc = audio_track ? audio_ssrc : ssrc;
+      const bool over_tcp = audio_track ? audio_tcp : tcp;
+      const int channel = audio_track ? audio_rtp_channel : rtp_channel;
+      Socket& socket = audio_track ? udp_audio : udp;
+      sockaddr_in& peer = audio_track ? audio_client : client;
       std::vector<uint8_t> packet(12 + payload.size());
       packet[0] = 0x80;
-      packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | 96);
-      const uint16_t current_sequence = ++sequence;
+      packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | payload_type);
+      const uint16_t current_sequence = ++track_sequence;
       packet[2] = static_cast<uint8_t>(current_sequence >> 8);
       packet[3] = static_cast<uint8_t>(current_sequence & 0xff);
-      timestamp = rtp_timestamp;
-      packet[4] = static_cast<uint8_t>(timestamp >> 24);
-      packet[5] = static_cast<uint8_t>(timestamp >> 16);
-      packet[6] = static_cast<uint8_t>(timestamp >> 8);
-      packet[7] = static_cast<uint8_t>(timestamp & 0xff);
-      packet[8] = static_cast<uint8_t>(ssrc >> 24);
-      packet[9] = static_cast<uint8_t>(ssrc >> 16);
-      packet[10] = static_cast<uint8_t>(ssrc >> 8);
-      packet[11] = static_cast<uint8_t>(ssrc & 0xff);
+      track_timestamp = rtp_timestamp;
+      packet[4] = static_cast<uint8_t>(track_timestamp >> 24);
+      packet[5] = static_cast<uint8_t>(track_timestamp >> 16);
+      packet[6] = static_cast<uint8_t>(track_timestamp >> 8);
+      packet[7] = static_cast<uint8_t>(track_timestamp & 0xff);
+      packet[8] = static_cast<uint8_t>(track_ssrc >> 24);
+      packet[9] = static_cast<uint8_t>(track_ssrc >> 16);
+      packet[10] = static_cast<uint8_t>(track_ssrc >> 8);
+      packet[11] = static_cast<uint8_t>(track_ssrc & 0xff);
       std::copy(payload.begin(), payload.end(), packet.begin() + 12);
-      if (tcp) {
+      if (over_tcp) {
         std::string frame;
         frame.reserve(packet.size() + 4);
         frame.push_back('$');
-        frame.push_back(static_cast<char>(rtp_channel));
+        frame.push_back(static_cast<char>(channel));
         const uint16_t length = static_cast<uint16_t>(packet.size());
         frame.push_back(static_cast<char>(length >> 8));
         frame.push_back(static_cast<char>(length & 0xff));
         frame.append(reinterpret_cast<const char*>(packet.data()), packet.size());
         WriteTcp(frame);
-      } else {
-        ::sendto(udp, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()),
-                 0, reinterpret_cast<const sockaddr*>(&client), sizeof(client));
+      } else if (socket != kInvalidSocket) {
+        ::sendto(socket, reinterpret_cast<const char*>(packet.data()),
+                 static_cast<int>(packet.size()), 0, reinterpret_cast<const sockaddr*>(&peer),
+                 sizeof(peer));
       }
-      ++packet_count;
-      octet_count += payload.size();
+      if (audio_track) {
+        ++audio_packet_count;
+        audio_octet_count += payload.size();
+      } else {
+        ++packet_count;
+        octet_count += payload.size();
+      }
     }
 
-    void SendNal(const NalUnit& nal) {
+    void SendRtp(const std::vector<uint8_t>& payload, bool marker, uint32_t rtp_timestamp) {
+      SendRtpPacket(false, payload, marker, rtp_timestamp, 96);
+    }
+
+    void SendAudio(const MediaUnit& unit) {
+      if (!audio_available || !audio_setup || unit.data.empty())
+        return;
+      if (unit.codec == "aac") {
+        if (unit.data.size() > 8191)
+          return;
+        std::vector<uint8_t> payload(4 + unit.data.size());
+        payload[0] = 0x00;
+        payload[1] = 0x10; // AU-headers-length: one 16-bit AU header
+        const uint16_t au_size = static_cast<uint16_t>(unit.data.size() << 3);
+        payload[2] = static_cast<uint8_t>(au_size >> 8);
+        payload[3] = static_cast<uint8_t>(au_size & 0xff);
+        std::copy(unit.data.begin(), unit.data.end(), payload.begin() + 4);
+        const uint32_t rate = unit.sample_rate > 0 ? static_cast<uint32_t>(unit.sample_rate)
+                                                   : static_cast<uint32_t>(audio_rate);
+        const uint32_t rtp_time =
+            unit.pts != 0 ? static_cast<uint32_t>(static_cast<uint64_t>(unit.pts) * rate / 90000ULL)
+                          : static_cast<uint32_t>(NowMillis() * rate / 1000ULL);
+        SendRtpPacket(true, payload, unit.last, rtp_time, 97);
+        return;
+      }
+      const int payload_type = unit.codec == "pcma" ? 8 : 0;
+      uint32_t rtp_time =
+          unit.pts != 0 ? static_cast<uint32_t>(static_cast<uint64_t>(unit.pts) * 8000 / 90000ULL)
+                        : static_cast<uint32_t>(NowMillis() * 8);
+      size_t offset = 0;
+      while (offset < unit.data.size()) {
+        const size_t count = std::min<size_t>(160, unit.data.size() - offset);
+        std::vector<uint8_t> payload(unit.data.begin() + static_cast<long>(offset),
+                                     unit.data.begin() + static_cast<long>(offset + count));
+        const bool last = unit.last && offset + count >= unit.data.size();
+        SendRtpPacket(true, payload, last, rtp_time, payload_type);
+        rtp_time += static_cast<uint32_t>(count);
+        offset += count;
+      }
+    }
+
+    void SendNal(const MediaUnit& nal) {
       if (nal.data.empty())
         return;
       const uint32_t rtp_time = nal.pts != 0 ? nal.pts : static_cast<uint32_t>(NowMillis() * 90);
@@ -673,11 +900,7 @@ struct RtspServer::Impl {
       }
     }
 
-    void SendRtcpSr() {
-      const int64_t now_ms = NowMillis();
-      if (now_ms - last_rtcp_ms < 5000)
-        return;
-      last_rtcp_ms = now_ms;
+    void SendRtcpSrPacket(bool audio_track) {
       const auto now = std::chrono::system_clock::now().time_since_epoch();
       const uint64_t seconds =
           static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now).count()) +
@@ -695,28 +918,43 @@ struct RtspServer::Impl {
         packet[offset + 2] = static_cast<uint8_t>(value >> 8);
         packet[offset + 3] = static_cast<uint8_t>(value);
       };
-      put32(4, ssrc);
+      put32(4, audio_track ? audio_ssrc : ssrc);
       put32(8, static_cast<uint32_t>(seconds));
       put32(12, fraction);
-      put32(16, timestamp);
-      put32(20, static_cast<uint32_t>(packet_count));
-      put32(24, static_cast<uint32_t>(octet_count));
-      if (tcp) {
+      put32(16, audio_track ? audio_timestamp : timestamp);
+      put32(20, static_cast<uint32_t>(audio_track ? audio_packet_count : packet_count));
+      put32(24, static_cast<uint32_t>(audio_track ? audio_octet_count : octet_count));
+      const bool over_tcp = audio_track ? audio_tcp : tcp;
+      const int channel = audio_track ? audio_rtcp_channel : rtcp_channel;
+      Socket& socket = audio_track ? udp_audio : udp;
+      sockaddr_in& peer = audio_track ? audio_client : client;
+      if (over_tcp) {
         std::string frame;
         frame.reserve(packet.size() + 4);
         frame.push_back('$');
-        frame.push_back(static_cast<char>(rtcp_channel));
+        frame.push_back(static_cast<char>(channel));
         const uint16_t length = static_cast<uint16_t>(packet.size());
         frame.push_back(static_cast<char>(length >> 8));
         frame.push_back(static_cast<char>(length & 0xff));
         frame.append(reinterpret_cast<const char*>(packet.data()), packet.size());
         WriteTcp(frame);
-      } else {
-        sockaddr_in rtcp_client = client;
-        rtcp_client.sin_port = htons(static_cast<uint16_t>(ntohs(client.sin_port) + 1));
-        ::sendto(udp, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()),
-                 0, reinterpret_cast<const sockaddr*>(&rtcp_client), sizeof(rtcp_client));
+      } else if (socket != kInvalidSocket) {
+        sockaddr_in rtcp_client = peer;
+        rtcp_client.sin_port = htons(static_cast<uint16_t>(ntohs(peer.sin_port) + 1));
+        ::sendto(socket, reinterpret_cast<const char*>(packet.data()),
+                 static_cast<int>(packet.size()), 0,
+                 reinterpret_cast<const sockaddr*>(&rtcp_client), sizeof(rtcp_client));
       }
+    }
+
+    void SendRtcpSr() {
+      const int64_t now_ms = NowMillis();
+      if (now_ms - last_rtcp_ms < 5000)
+        return;
+      last_rtcp_ms = now_ms;
+      SendRtcpSrPacket(false);
+      if (audio_setup)
+        SendRtcpSrPacket(true);
     }
 
     void Sender() {
@@ -737,10 +975,14 @@ struct RtspServer::Impl {
           if (queue.size() > 512)
             queue.pop_front();
         }
-        std::vector<NalUnit> nals;
+        std::vector<MediaUnit> nals;
         parser.Feed(chunk->data(), chunk->size(), &nals);
-        for (const auto& nal : nals)
-          SendNal(nal);
+        for (const auto& unit : nals) {
+          if (unit.audio)
+            SendAudio(unit);
+          else
+            SendNal(unit);
+        }
         SendRtcpSr();
       }
     }
@@ -868,6 +1110,8 @@ struct RtspServer::Impl {
       session->client = peer;
       session->session_id = RandomToken();
       session->ssrc = static_cast<uint32_t>(std::stoul(RandomToken().substr(0, 8), nullptr, 16));
+      session->audio_ssrc =
+          static_cast<uint32_t>(std::stoul(RandomToken().substr(0, 8), nullptr, 16));
       std::thread([this, session] { ClientLoop(session); }).detach();
     }
   }
@@ -882,10 +1126,10 @@ struct RtspServer::Impl {
     auto state = std::make_shared<State>();
     auto sink = [state](const uint8_t* data, size_t len) {
       std::lock_guard<std::mutex> lock(state->mutex);
-      if (state->parser.CodecReady())
+      if (state->parser.ProbeReady())
         return;
       state->parser.Feed(data, len, nullptr);
-      if (state->parser.CodecReady())
+      if (state->parser.ProbeReady())
         state->cv.notify_all();
     };
     std::string attach_error;
@@ -899,10 +1143,10 @@ struct RtspServer::Impl {
     {
       std::unique_lock<std::mutex> lock(state->mutex);
       ready = state->cv.wait_for(lock, std::chrono::seconds(2),
-                                 [&state] { return state->parser.CodecReady(); });
+                                 [&state] { return state->parser.ProbeReady(); });
     }
     detach(channel, stream, id);
-    if (!ready) {
+    if (!ready && !state->parser.CodecReady()) {
       if (error)
         *error = "codec information is not available";
       return false;
@@ -1059,27 +1303,44 @@ struct RtspServer::Impl {
           continue;
         }
         const std::string sdp = probe.Sdp();
+        session->audio_available = probe.HasAudio();
+        session->audio_codec = probe.AudioCodec();
+        session->audio_rate = probe.AudioSampleRate() > 0 ? probe.AudioSampleRate() : 48000;
+        session->audio_channels = probe.AudioChannels() > 0 ? probe.AudioChannels() : 2;
         session->WriteTcp(
             Response(200, "OK", cseq,
                      "Content-Base: " + request.url + "\r\nCache-Control: no-cache\r\n", sdp));
       } else if (request.method == "SETUP") {
         const std::string transport = request.header("Transport");
+        const bool audio_track = request.url.find("trackID=1") != std::string::npos;
         session->channel_id = channel;
         session->stream = stream;
+        if (audio_track) {
+          if (!session->audio_available) {
+            session->WriteTcp(Response(404, "Not Found", cseq, ""));
+            continue;
+          }
+          session->audio_setup = true;
+        }
+        bool& over_tcp = audio_track ? session->audio_tcp : session->tcp;
+        int& rtp_channel = audio_track ? session->audio_rtp_channel : session->rtp_channel;
+        int& rtcp_channel = audio_track ? session->audio_rtcp_channel : session->rtcp_channel;
+        const uint32_t track_ssrc = audio_track ? session->audio_ssrc : session->ssrc;
         if (transport.find("RTP/AVP/TCP") != std::string::npos) {
-          session->tcp = true;
+          over_tcp = true;
           const size_t interleaved = transport.find("interleaved=");
           if (interleaved != std::string::npos) {
             const int first = std::atoi(transport.c_str() + interleaved + 12);
-            session->rtp_channel = first;
-            session->rtcp_channel = first + 1;
+            rtp_channel = first;
+          } else {
+            rtp_channel = audio_track ? 2 : 0;
           }
+          rtcp_channel = rtp_channel + 1;
           session->WriteTcp(Response(
               200, "OK", cseq,
-              "Transport: RTP/AVP/TCP;unicast;interleaved=" + std::to_string(session->rtp_channel) +
-                  "-" + std::to_string(session->rtcp_channel) +
-                  ";ssrc=" + std::to_string(session->ssrc) + "\r\nSession: " + session->session_id +
-                  ";timeout=60\r\n"));
+              "Transport: RTP/AVP/TCP;unicast;interleaved=" + std::to_string(rtp_channel) + "-" +
+                  std::to_string(rtcp_channel) + ";ssrc=" + std::to_string(track_ssrc) +
+                  "\r\nSession: " + session->session_id + ";timeout=60\r\n"));
         } else {
           const size_t client_port = transport.find("client_port=");
           int rtp_port = 0;
@@ -1090,26 +1351,30 @@ struct RtspServer::Impl {
             session->WriteTcp(Response(461, "Unsupported Transport", cseq, ""));
             continue;
           }
-          session->tcp = false;
-          session->client.sin_port = htons(static_cast<uint16_t>(rtp_port));
-          session->udp = ::socket(AF_INET, SOCK_DGRAM, 0);
+          over_tcp = false;
+          Socket& socket = audio_track ? session->udp_audio : session->udp;
+          if (socket != kInvalidSocket)
+            CloseSocket(socket);
+          socket = ::socket(AF_INET, SOCK_DGRAM, 0);
           sockaddr_in local{};
           local.sin_family = AF_INET;
           local.sin_addr.s_addr = htonl(INADDR_ANY);
           local.sin_port = 0;
-          ::bind(session->udp, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+          ::bind(socket, reinterpret_cast<sockaddr*>(&local), sizeof(local));
 #ifdef _WIN32
           int local_len = sizeof(local);
 #else
           socklen_t local_len = sizeof(local);
 #endif
-          getsockname(session->udp, reinterpret_cast<sockaddr*>(&local), &local_len);
+          getsockname(socket, reinterpret_cast<sockaddr*>(&local), &local_len);
           const int server_port = ntohs(local.sin_port);
+          sockaddr_in& peer = audio_track ? session->audio_client : session->client;
+          peer.sin_port = htons(static_cast<uint16_t>(rtp_port));
           session->WriteTcp(Response(
               200, "OK", cseq,
               "Transport: RTP/AVP;unicast;client_port=" + std::to_string(rtp_port) + "-" +
                   std::to_string(rtp_port + 1) + ";server_port=" + std::to_string(server_port) +
-                  "-" + std::to_string(server_port + 1) + ";ssrc=" + std::to_string(session->ssrc) +
+                  "-" + std::to_string(server_port + 1) + ";ssrc=" + std::to_string(track_ssrc) +
                   "\r\nSession: " + session->session_id + ";timeout=60\r\n"));
         }
       } else if (request.method == "PLAY") {
@@ -1130,9 +1395,24 @@ struct RtspServer::Impl {
             session->sender = std::thread([session] { session->Sender(); });
           }
         }
+        std::string rtp_info = "RTP-Info: url=" + request.url +
+                               ";seq=" + std::to_string(session->sequence) +
+                               ";rtptime=" + std::to_string(session->timestamp);
+        if (session->audio_setup) {
+          std::string audio_url = request.url;
+          const size_t marker = audio_url.find("trackID=");
+          if (marker != std::string::npos) {
+            const size_t slash = audio_url.rfind('/', marker);
+            if (slash != std::string::npos)
+              audio_url.resize(slash);
+          }
+          audio_url += "/trackID=1";
+          rtp_info += ",url=" + audio_url + ";seq=" + std::to_string(session->audio_sequence) +
+                      ";rtptime=" + std::to_string(session->audio_timestamp);
+        }
         session->WriteTcp(Response(200, "OK", cseq,
-                                   "Session: " + session->session_id + "\r\nRTP-Info: url=" +
-                                       request.url + ";seq=1;rtptime=0\r\nRange: npt=0.000-\r\n"));
+                                   "Session: " + session->session_id + "\r\n" + rtp_info +
+                                       "\r\nRange: npt=0.000-\r\n"));
       } else if (request.method == "PAUSE") {
         session->playing = false;
         session->WriteTcp(Response(200, "OK", cseq, "Session: " + session->session_id + "\r\n"));

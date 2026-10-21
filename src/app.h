@@ -227,6 +227,8 @@ private:
   std::map<int64_t, std::vector<uint8_t>> last_motion_frame_;
   std::map<int64_t, int64_t> motion_cooldown_;
   int64_t last_storage_alert_ms_ = 0;
+  int64_t last_disk_error_alert_at_ = 0;
+  int64_t last_service_error_alert_at_ = 0;
   std::vector<unsigned char> secret_key_;
   std::mutex tickets_mutex_;
   std::unordered_map<std::string, StreamTicket> tickets_;
