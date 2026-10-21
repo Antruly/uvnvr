@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <uv.h>
 #include <vector>
 
 #ifdef _WIN32
@@ -126,7 +128,7 @@ struct RecordingService::Impl {
     std::string codec;
     std::string path;
     std::string part_path;
-    std::ofstream file;
+    uv_file fd = -1;
   };
 
   struct Recorder {
@@ -157,6 +159,10 @@ struct RecordingService::Impl {
     int64_t batch_ms = 500;
     int64_t pending_bytes = 0;
     int64_t last_flush_ms = 0;
+    uv_loop_t loop{};
+    bool loop_ready = false;
+    bool fs_done = false;
+    int fs_result = 0;
     mutable std::mutex status_mutex;
     struct StatusSnapshot {
       bool active = false;
@@ -198,13 +204,110 @@ struct RecordingService::Impl {
       RefreshStatus();
     }
 
+    static void OnFs(uv_fs_t* req) {
+      auto* self = static_cast<Recorder*>(req->data);
+      self->fs_result = static_cast<int>(req->result);
+      self->fs_done = true;
+    }
+
+    // Starts one uv_fs request and pumps the recorder's private loop until the
+    // completion callback runs. libuv hands these requests to io_uring when the
+    // kernel supports it and otherwise uses its threadpool.
+    int CompleteFs(uv_fs_t* req, int submitted) {
+      if (submitted < 0) {
+        uv_fs_req_cleanup(req);
+        return submitted;
+      }
+      while (!fs_done)
+        uv_run(&loop, UV_RUN_ONCE);
+      const int result = fs_result;
+      uv_fs_req_cleanup(req);
+      return result;
+    }
+
+    uv_file OpenFile(const std::string& path) {
+      if (!loop_ready)
+        return -1;
+      uv_fs_t req;
+      req.data = this;
+      fs_done = false;
+      fs_result = 0;
+      const int rc =
+          uv_fs_open(&loop, &req, path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644, OnFs);
+      return CompleteFs(&req, rc);
+    }
+
+    bool WriteFile(const uint8_t* data, size_t length) {
+      size_t written = 0;
+      while (written < length) {
+        uv_buf_t buffer = uv_buf_init(reinterpret_cast<char*>(const_cast<uint8_t*>(data + written)),
+                                      static_cast<unsigned int>(length - written));
+        uv_fs_t req;
+        req.data = this;
+        fs_done = false;
+        fs_result = 0;
+        const int rc = uv_fs_write(&loop, &req, segment.fd, &buffer, 1, -1, OnFs);
+        const int result = CompleteFs(&req, rc);
+        if (result <= 0)
+          return false;
+        written += static_cast<size_t>(result);
+      }
+      return true;
+    }
+
+    bool SyncFile() {
+      if (!loop_ready || segment.fd < 0)
+        return true;
+      uv_fs_t req;
+      req.data = this;
+      fs_done = false;
+      fs_result = 0;
+      const int rc = uv_fs_fsync(&loop, &req, segment.fd, OnFs);
+      return CompleteFs(&req, rc) == 0;
+    }
+
+    bool CloseFile(uv_file fd) {
+      if (fd < 0)
+        return true;
+      if (!loop_ready)
+        return false;
+      uv_fs_t req;
+      req.data = this;
+      fs_done = false;
+      fs_result = 0;
+      const int rc = uv_fs_close(&loop, &req, fd, OnFs);
+      return CompleteFs(&req, rc) == 0;
+    }
+
+    bool RenameFile(const std::string& from, const std::string& to) {
+      if (!loop_ready)
+        return false;
+      uv_fs_t req;
+      req.data = this;
+      fs_done = false;
+      fs_result = 0;
+      const int rc = uv_fs_rename(&loop, &req, from.c_str(), to.c_str(), OnFs);
+      return CompleteFs(&req, rc) == 0;
+    }
+
+    bool RemoveFile(const std::string& path) {
+      if (!loop_ready)
+        return false;
+      uv_fs_t req;
+      req.data = this;
+      fs_done = false;
+      fs_result = 0;
+      const int rc = uv_fs_unlink(&loop, &req, path.c_str(), OnFs);
+      return CompleteFs(&req, rc) == 0;
+    }
+
     void MaybeFlush(bool force) {
-      if (!segment.file.is_open())
+      if (segment.fd < 0)
         return;
       const int64_t now = NowMs();
       if (!force && pending_bytes < batch_bytes && now - last_flush_ms < batch_ms)
         return;
-      segment.file.flush();
+      SyncFile();
       pending_bytes = 0;
       last_flush_ms = now;
     }
@@ -292,8 +395,8 @@ struct RecordingService::Impl {
                                std::to_string(value.seq);
       value.path = (dir / (base + ".ts")).string();
       value.part_path = (dir / (base + ".ts.part")).string();
-      value.file.open(value.part_path, std::ios::binary | std::ios::trunc);
-      if (!value.file.is_open()) {
+      value.fd = OpenFile(value.part_path);
+      if (value.fd < 0) {
         std::fprintf(stderr, "[recording] cannot open %s\n", value.part_path.c_str());
         has_segment = false;
         RefreshStatus();
@@ -313,25 +416,23 @@ struct RecordingService::Impl {
     void Finalize() {
       if (!has_segment)
         return;
-      if (segment.file.is_open()) {
-        segment.file.flush();
-        segment.file.close();
+      if (segment.fd >= 0) {
+        SyncFile();
+        CloseFile(segment.fd);
+        segment.fd = -1;
       }
-      std::error_code ec;
       // An event that produced no media (for example while the camera was
       // offline) should not leave an empty index row or file behind.
       if (event_mode && segment.bytes == 0) {
-        std::filesystem::remove(segment.part_path, ec);
+        RemoveFile(segment.part_path);
         has_segment = false;
         segment = Segment{};
         RefreshStatus();
         return;
       }
-      std::filesystem::rename(segment.part_path, segment.path, ec);
-      if (ec) {
-        std::fprintf(stderr, "[recording] cannot finalize %s: %s\n", segment.part_path.c_str(),
-                     ec.message().c_str());
-        std::filesystem::remove(segment.part_path, ec);
+      if (!RenameFile(segment.part_path, segment.path)) {
+        std::fprintf(stderr, "[recording] cannot finalize %s\n", segment.part_path.c_str());
+        RemoveFile(segment.part_path);
         has_segment = false;
         segment = Segment{};
         RefreshStatus();
@@ -384,7 +485,7 @@ struct RecordingService::Impl {
       }
       if (!has_segment)
         OpenSegment(NowMs());
-      if (!segment.file.is_open())
+      if (segment.fd < 0)
         return;
       const auto keyframes = KeyframeOffsets(chunk->data(), chunk->size());
       size_t offset = 0;
@@ -408,10 +509,11 @@ struct RecordingService::Impl {
         }
         if (due && found_keyframe) {
           if (split_at > offset) {
-            segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
-                               static_cast<std::streamsize>(split_at - offset));
-            segment.bytes += static_cast<int64_t>(split_at - offset);
-            pending_bytes += static_cast<int64_t>(split_at - offset);
+            const size_t count = split_at - offset;
+            if (!WriteFile(chunk->data() + offset, count))
+              std::fprintf(stderr, "[recording] write failed for %s\n", segment.path.c_str());
+            segment.bytes += static_cast<int64_t>(count);
+            pending_bytes += static_cast<int64_t>(count);
             MaybeFlush(true);
           }
           offset = split_at;
@@ -422,8 +524,8 @@ struct RecordingService::Impl {
         // No keyframe in this chunk: write the remainder and only force a split
         // when the segment has been waiting well past its target.
         const size_t count = chunk->size() - offset;
-        segment.file.write(reinterpret_cast<const char*>(chunk->data() + offset),
-                           static_cast<std::streamsize>(count));
+        if (!WriteFile(chunk->data() + offset, count))
+          std::fprintf(stderr, "[recording] write failed for %s\n", segment.path.c_str());
         segment.bytes += static_cast<int64_t>(count);
         pending_bytes += static_cast<int64_t>(count);
         MaybeFlush(false);
@@ -437,6 +539,11 @@ struct RecordingService::Impl {
     }
 
     void Run() {
+      if (uv_loop_init(&loop) == 0) {
+        loop_ready = true;
+      } else {
+        std::fprintf(stderr, "[recording] cannot initialize the file I/O loop\n");
+      }
       while (true) {
         std::shared_ptr<std::vector<uint8_t>> item;
         {
@@ -466,6 +573,11 @@ struct RecordingService::Impl {
       }
       finished = true;
       Finalize();
+      if (loop_ready) {
+        uv_run(&loop, UV_RUN_DEFAULT);
+        uv_loop_close(&loop);
+        loop_ready = false;
+      }
     }
   };
 

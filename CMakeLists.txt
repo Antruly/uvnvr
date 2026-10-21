@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(uvnvr VERSION 0.15.0 LANGUAGES CXX)
+project(uvnvr VERSION 0.16.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -133,7 +133,20 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 
-target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
+# Recording uses libuv's fs requests directly (io_uring on Linux when the
+# kernel supports it). libuvcpp links libuv privately, so link it explicitly.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(LIBUV QUIET IMPORTED_TARGET libuv)
+endif()
+if(TARGET PkgConfig::LIBUV)
+  target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} PkgConfig::LIBUV OpenSSL::Crypto
+                                     OpenSSL::SSL)
+else()
+  find_library(UV_LIBRARY NAMES uv libuv REQUIRED)
+  target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} ${UV_LIBRARY} OpenSSL::Crypto
+                                     OpenSSL::SSL)
+endif()
 if(WIN32)
   # uvcpp's Windows headers pull in <windows.h>; keep its min/max macros from
   # breaking std::min/std::max in this project (MSVC sees C2589 otherwise).
