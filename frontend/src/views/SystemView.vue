@@ -286,16 +286,53 @@ async function copyToken() {
 async function syncNtp() {
   error.value = ''
   try {
-    const result = await api<{ offsetMs: number; applied: boolean; applyError?: string }>(
-      '/api/v1/system/ntp/sync',
-      { method: 'POST' },
-    )
+    const result = await api<{
+      offsetMs: number
+      applied: boolean
+      applyError?: string
+      cameras?: { synced: number; failed: number; skipped: number }
+    }>('/api/v1/system/ntp/sync', { method: 'POST' })
     settings.system.ntpOffsetMs = result.offsetMs
+    const cameraText = result.cameras
+      ? ` · ${t('system.cameraSyncResult', {
+          synced: result.cameras.synced,
+          failed: result.cameras.failed,
+        })}`
+      : ''
     flash(
-      result.applied
+      (result.applied
         ? t('system.ntpSynced')
-        : `${t('system.ntpOffset')}: ${result.offsetMs} ms${result.applyError ? ` (${result.applyError})` : ''}`,
+        : `${t('system.ntpOffset')}: ${result.offsetMs} ms${result.applyError ? ` (${result.applyError})` : ''}`) +
+        cameraText,
     )
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  }
+}
+
+async function syncBrowserTime() {
+  error.value = ''
+  try {
+    const result = await api<{
+      serverTimeApplied: boolean
+      applyError?: string
+      cameras?: { synced: number; failed: number; skipped: number }
+    }>('/api/v1/system/time/sync', {
+      method: 'POST',
+      body: JSON.stringify({ epochMs: Date.now() }),
+    })
+    const cameraText = result.cameras
+      ? ` · ${t('system.cameraSyncResult', {
+          synced: result.cameras.synced,
+          failed: result.cameras.failed,
+        })}`
+      : ''
+    flash(
+      (result.serverTimeApplied
+        ? t('system.browserTimeSynced')
+        : `${result.applyError ?? t('common.error')}`) + cameraText,
+    )
+    await load()
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
   }
@@ -393,6 +430,9 @@ onMounted(load)
               <input :value="`${settings.system.ntpOffsetMs} ms`" class="input" readonly />
               <button type="button" class="button small" @click="syncNtp">
                 {{ t('system.ntpSync') }}
+              </button>
+              <button type="button" class="button small" @click="syncBrowserTime">
+                {{ t('system.browserSync') }}
               </button>
             </div>
           </label>

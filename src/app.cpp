@@ -3722,6 +3722,82 @@ bool App::VerifyRtspCredentials(const std::string& username, const std::string& 
   return HasPermission(user, "rtsp.access");
 }
 
+bool App::ApplySystemTime(int64_t epoch_ms, std::string* error) {
+#ifdef _WIN32
+  FILETIME file_time;
+  ULARGE_INTEGER value;
+  value.QuadPart = static_cast<ULONGLONG>(epoch_ms) * 10000ULL + 116444736000000000ULL;
+  file_time.dwLowDateTime = value.LowPart;
+  file_time.dwHighDateTime = value.HighPart;
+  SYSTEMTIME system_time;
+  if (!FileTimeToSystemTime(&file_time, &system_time) || !SetSystemTime(&system_time)) {
+    if (error != nullptr)
+      *error = "SetSystemTime failed; run the service with sufficient privileges";
+    return false;
+  }
+#else
+  struct timeval tv {};
+  tv.tv_sec = static_cast<time_t>(epoch_ms / 1000);
+  tv.tv_usec = static_cast<suseconds_t>((epoch_ms % 1000) * 1000);
+  if (settimeofday(&tv, nullptr) != 0) {
+    if (error != nullptr)
+      *error = std::string("settimeofday failed: ") + std::strerror(errno) +
+               " (CAP_SYS_TIME is required)";
+    return false;
+  }
+#endif
+  if (error != nullptr)
+    error->clear();
+  return true;
+}
+
+json App::SyncCameraTimes(int64_t epoch_ms) {
+  json cameras = json::array();
+  int64_t synced = 0;
+  int64_t failed = 0;
+  int64_t skipped = 0;
+  std::string load_error;
+  const auto channels = LoadChannels(&load_error);
+  for (const auto& channel : channels) {
+    if (!channel.enabled || channel.host.empty())
+      continue;
+    if (channel.protocol != "onvif" && channel.protocol != "hikvision" &&
+        channel.protocol != "dahua") {
+      ++skipped;
+      continue;
+    }
+    std::string password;
+    if (!channel.password_enc.empty()) {
+      std::string decrypt_error;
+      password = DecryptSecret(channel.password_enc, &decrypt_error);
+      if (password.empty() && !decrypt_error.empty()) {
+        ++failed;
+        cameras.push_back(json{{"channelId", channel.id},
+                               {"name", channel.name},
+                               {"ok", false},
+                               {"error", decrypt_error}});
+        continue;
+      }
+    }
+    const int port = channel.protocol == "onvif" && channel.port > 0 ? channel.port : 80;
+    std::string camera_error;
+    const bool ok = SetOnvifTime(channel.host, port, channel.username, password, epoch_ms,
+                                 &camera_error);
+    if (ok)
+      ++synced;
+    else
+      ++failed;
+    cameras.push_back(json{{"channelId", channel.id},
+                           {"name", channel.name},
+                           {"ok", ok},
+                           {"error", camera_error}});
+  }
+  return json{{"synced", synced},
+              {"failed", failed},
+              {"skipped", skipped},
+              {"cameras", cameras}};
+}
+
 bool App::CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                                int64_t start_ms, int64_t end_ms, double speed, std::string* token,
                                int64_t* expires_at, std::string* error) {
@@ -6335,37 +6411,59 @@ void App::RegisterSystemRoutes() {
             RunWork(
                 [this, epoch_ms, actor, op] {
                   std::string error;
-#ifdef _WIN32
-                  FILETIME file_time;
-                  ULARGE_INTEGER value;
-                  value.QuadPart =
-                      static_cast<ULONGLONG>(epoch_ms) * 10000ULL + 116444736000000000ULL;
-                  file_time.dwLowDateTime = value.LowPart;
-                  file_time.dwHighDateTime = value.HighPart;
-                  SYSTEMTIME system_time;
-                  if (!FileTimeToSystemTime(&file_time, &system_time) ||
-                      !SetSystemTime(&system_time)) {
-                    error = "SetSystemTime failed; run the service with sufficient privileges";
-                  }
-#else
-                  struct timeval tv {};
-                  tv.tv_sec = static_cast<time_t>(epoch_ms / 1000);
-                  tv.tv_usec = static_cast<suseconds_t>((epoch_ms % 1000) * 1000);
-                  if (settimeofday(&tv, nullptr) != 0) {
-                    error = std::string("settimeofday failed: ") + std::strerror(errno) +
-                            " (CAP_SYS_TIME is required)";
-                  }
-#endif
-                  if (!error.empty()) {
+                  const bool applied = ApplySystemTime(epoch_ms, &error);
+                  const json cameras = SyncCameraTimes(epoch_ms);
+                  Audit("system", "warning", actor.username, "", "", "system", "", "time_sync",
+                        applied ? "success" : "failure", "", json{{"epochMs", epoch_ms},
+                                                                    {"applyError", error},
+                                                                    {"cameras", cameras}}
+                                                                   .dump());
+                  op->data = json{{"ok", true},
+                                  {"serverMs", epoch_ms},
+                                  {"serverTimeApplied", applied},
+                                  {"applyError", error},
+                                  {"cameras", cameras}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "system.manage"));
+
+  web_.post(
+      "/api/v1/system/ntp/sync",
+      Protected(
+          [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, op] {
+                  const std::string server = GetSetting("system.ntp_server", "pool.ntp.org");
+                  int64_t offset = 0;
+                  std::string ntp_error;
+                  if (!QueryNtpOffset(server, &offset, &ntp_error)) {
                     op->ok = false;
-                    op->status = 403;
-                    op->code = "time_sync_failed";
-                    op->message = error;
+                    op->status = 502;
+                    op->code = "ntp_failed";
+                    op->message = ntp_error;
                     return;
                   }
-                  Audit("system", "warning", actor.username, "", "", "system", "", "time_sync",
-                        "success", "", json{{"epochMs", epoch_ms}}.dump());
-                  op->data = json{{"ok", true}, {"serverMs", epoch_ms}};
+                  const int64_t target_ms = NowSeconds() * 1000 + offset;
+                  std::string apply_error;
+                  const bool applied = ApplySystemTime(target_ms, &apply_error);
+                  const json cameras = SyncCameraTimes(target_ms);
+                  std::string db_error;
+                  SetSetting("system.ntp_last_offset_ms", std::to_string(offset), &db_error);
+                  SetSetting("system.ntp_last_sync", std::to_string(NowSeconds()), &db_error);
+                  Audit("system", "warning", "system", "", "", "system", "", "ntp_sync",
+                        applied ? "success" : "failure", "",
+                        json{{"offsetMs", offset}, {"applyError", apply_error}}.dump());
+                  op->data = json{{"offsetMs", offset},
+                                  {"serverMs", target_ms},
+                                  {"applied", applied},
+                                  {"applyError", apply_error},
+                                  {"cameras", cameras}};
                 },
                 [op, &resp, next] {
                   SendOp(resp, *op);

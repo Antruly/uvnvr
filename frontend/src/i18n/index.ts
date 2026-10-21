@@ -489,6 +489,9 @@ const messages = {
       ntpOffset: 'NTP offset',
       ntpSync: 'Sync now',
       ntpSynced: 'NTP offset applied.',
+      browserSync: 'Use browser time',
+      browserTimeSynced: 'Server time updated from the browser.',
+      cameraSyncResult: 'cameras synced {synced}, failed {failed}',
     },
     help: {
       title: 'Help',
@@ -995,6 +998,9 @@ const messages = {
       ntpOffset: 'NTP 偏差',
       ntpSync: '立即同步',
       ntpSynced: 'NTP 偏差已应用。',
+      browserSync: '使用浏览器时间校准',
+      browserTimeSynced: '已用浏览器时间校准服务端。',
+      cameraSyncResult: '摄像头同步 {synced} 个，失败 {failed} 个',
     },
     help: {
       title: '帮助手册',

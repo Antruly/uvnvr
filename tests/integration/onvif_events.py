@@ -26,6 +26,7 @@ MOCK_PORT = PORT + 200
 
 class MockOnvif(http.server.BaseHTTPRequestHandler):
     pulls = 0
+    time_updates = 0
     lock = threading.Lock()
 
     def log_message(self, *_args):
@@ -54,6 +55,14 @@ class MockOnvif(http.server.BaseHTTPRequestHandler):
                 f"<wsa5:Address>http://127.0.0.1:{MOCK_PORT}/pull1</wsa5:Address>"
                 "</tev:SubscriptionReference></tev:CreatePullPointSubscriptionResponse>"
                 "</s:Body></s:Envelope>"
+            )
+        elif "SetSystemDateAndTime" in body:
+            with MockOnvif.lock:
+                MockOnvif.time_updates += 1
+            response = (
+                '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+                'xmlns:tds="http://www.onvif.org/ver10/device/wsdl">'
+                "<s:Body><tds:SetSystemDateAndTimeResponse/></s:Body></s:Envelope>"
             )
         elif "PullMessages" in body:
             with MockOnvif.lock:
@@ -192,6 +201,16 @@ def main() -> int:
         assert alert is not None, "no ONVIF motion alert was created"
         print(f"ONVIF motion alert: {alert['message']}")
         assert "motion" in alert["message"].lower()
+
+        status, sync = call(
+            "POST",
+            "/api/v1/system/time/sync",
+            {"epochMs": int(time.time() * 1000)},
+        )
+        assert status == 200, (status, sync)
+        assert sync["cameras"]["synced"] >= 1, sync
+        assert MockOnvif.time_updates >= 1, MockOnvif.time_updates
+        print(f"camera time sync: {sync['cameras']}")
         print("ONVIF event integration passed")
         return 0
     finally:

@@ -55,4 +55,8 @@ bool PullOnvifEvents(const std::string& address, const std::string& username,
                      const std::string& password, int timeout_ms, std::vector<OnvifEvent>* events,
                      std::string* error);
 
+// Sets the camera clock through the ONVIF device service (Manual UTC time).
+bool SetOnvifTime(const std::string& host, int port, const std::string& username,
+                  const std::string& password, int64_t epoch_ms, std::string* error);
+
 } // namespace uvnvr

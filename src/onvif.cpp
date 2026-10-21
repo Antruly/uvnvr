@@ -686,4 +686,42 @@ bool PullOnvifEvents(const std::string& address, const std::string& username,
   return true;
 }
 
+bool SetOnvifTime(const std::string& host, int port, const std::string& username,
+                  const std::string& password, int64_t epoch_ms, std::string* error) {
+  const std::time_t seconds = static_cast<std::time_t>(epoch_ms / 1000);
+  std::tm tm{};
+#ifdef _WIN32
+  gmtime_s(&tm, &seconds);
+#else
+  gmtime_r(&seconds, &tm);
+#endif
+  char body[512];
+  std::snprintf(body, sizeof(body),
+                "<tds:SetSystemDateAndTime>"
+                "<tds:DateTimeType>Manual</tds:DateTimeType>"
+                "<tds:DaylightSavings>false</tds:DaylightSavings>"
+                "<tds:UTCDateTime>"
+                "<tt:Time><tt:Hour>%02d</tt:Hour><tt:Minute>%02d</tt:Minute>"
+                "<tt:Second>%02d</tt:Second></tt:Time>"
+                "<tt:Date><tt:Year>%d</tt:Year><tt:Month>%d</tt:Month>"
+                "<tt:Day>%d</tt:Day></tt:Date>"
+                "</tds:UTCDateTime>"
+                "</tds:SetSystemDateAndTime>",
+                tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+  const std::string service =
+      "http://" + host + ":" + std::to_string(port > 0 ? port : 80) + "/onvif/device_service";
+  const std::string response =
+      SoapCall(service, SecurityHeader(username, password), body, error);
+  if (response.empty())
+    return false;
+  if (response.find("Fault") != std::string::npos ||
+      response.find("faultstring") != std::string::npos) {
+    const std::string reason = ExtractTag(response, "Text");
+    if (error != nullptr)
+      *error = reason.empty() ? "the camera rejected the time update" : reason;
+    return false;
+  }
+  return true;
+}
+
 } // namespace uvnvr

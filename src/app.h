@@ -130,6 +130,8 @@ private:
                           std::string* token, int64_t* expires_at, std::string* error);
   bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
   bool VerifyRtspCredentials(const std::string& username, const std::string& password);
+  bool ApplySystemTime(int64_t epoch_ms, std::string* error);
+  json SyncCameraTimes(int64_t epoch_ms);
   bool CreatePlaybackTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                             int64_t start_ms, int64_t end_ms, double speed, std::string* token,
                             int64_t* expires_at, std::string* error);
