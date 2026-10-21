@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="UvNVR"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Antruly"
+           UpgradeCode="c5e0b182-87fb-4650-9250-62bbcf136152">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="UvNVR software network video recorder" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of UvNVR is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="HTTPPORT" Value="8080" />
+    <Property Id="RTSPPORT" Value="554" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="UvNVR" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ConfigureScriptComponent"
+                 Guid="9460308e-650e-4574-8c6b-68babe8029dc">
+        <File Id="ConfigureScript" Source="$(var.MsiScript)" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="UvNVR" Level="1">
+      <ComponentGroupRef Id="UvNVRFiles" />
+      <ComponentRef Id="ConfigureScriptComponent" />
+    </Feature>
+
+    <CustomAction Id="Configure.SetProperty"
+                  Property="WixQuietExecCmdLine"
+                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#ConfigureScript]&quot; -HttpPort [HTTPPORT] -RtspPort [RTSPPORT] -InstallDir &quot;[INSTALLFOLDER]&quot;" />
+    <CustomAction Id="Configure"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+    <CustomAction Id="Unconfigure.SetProperty"
+                  Property="WixQuietExecCmdLine"
+                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#ConfigureScript]&quot; -Uninstall" />
+    <CustomAction Id="Unconfigure"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="Configure.SetProperty" Before="Configure">NOT Installed OR REINSTALL</Custom>
+      <Custom Action="Configure" After="InstallFiles">NOT Installed OR REINSTALL</Custom>
+      <Custom Action="Unconfigure.SetProperty" Before="Unconfigure">Installed AND NOT REINSTALL</Custom>
+      <Custom Action="Unconfigure" Before="RemoveFiles">Installed AND NOT REINSTALL</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

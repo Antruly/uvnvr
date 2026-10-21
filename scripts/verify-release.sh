@@ -33,6 +33,7 @@ done
 
 expected=(
   "uvnvr-${VERSION}-windows-x64-setup.exe"
+  "uvnvr-${VERSION}-windows-x64.msi"
   "uvnvr-${VERSION}-windows-x64.zip"
   "uvnvr-${VERSION}-windows-arm64-setup.exe"
   "uvnvr-${VERSION}-windows-arm64.zip"

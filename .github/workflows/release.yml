@@ -188,12 +188,68 @@ jobs:
           zip -qr "uvnvr-${VERSION}-windows-x64.zip" "uvnvr-${VERSION}-windows-x64"
           makensis -V2 -DVERSION="$VERSION" -DARCH=x64 -DOUTDIR="$(cygpath -w "$ROOT/dist-packages")" -DSOURCE="$(cygpath -w "$OUT")" -DROOT="$(cygpath -w "$ROOT")" "$ROOT/packaging/windows/uvnvr.nsi"
 
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          choco install wixtoolset -y --no-progress
+          $candidates = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.10\bin"
+          )
+          $wix = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $wix) { throw "WiX Toolset was not installed" }
+          $env:Path = "$wix;$env:Path"
+          $version = "${{ steps.version.outputs.version }}"
+          $source = "$env:GITHUB_WORKSPACE\dist-packages\uvnvr-$version-windows-x64"
+          $msiSource = "$env:RUNNER_TEMP\uvnvr-msi-source"
+          Remove-Item $msiSource -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item $source $msiSource -Recurse
+          Remove-Item "$msiSource\uvnvr.json" -Force -ErrorAction SilentlyContinue
+          $script = "$env:GITHUB_WORKSPACE\packaging\windows\msi\configure.ps1"
+          heat dir $msiSource -cg UvNVRFiles -dr INSTALLFOLDER -gg -g1 -sfrag -srd -sreg -var var.SourceDir -out "$env:RUNNER_TEMP\files.wxs"
+          candle -arch x64 -ext WixUtilExtension -dSourceDir="$msiSource" -dVersion="$version" -dMsiScript="$script" -out "$env:RUNNER_TEMP\product.wixobj" "$env:GITHUB_WORKSPACE\packaging\windows\msi\product.wxs"
+          candle -arch x64 -ext WixUtilExtension -dSourceDir="$msiSource" -dVersion="$version" -out "$env:RUNNER_TEMP\files.wixobj" "$env:RUNNER_TEMP\files.wxs"
+          light -ext WixUtilExtension -out "$env:GITHUB_WORKSPACE\dist-packages\uvnvr-$version-windows-x64.msi" "$env:RUNNER_TEMP\product.wixobj" "$env:RUNNER_TEMP\files.wixobj"
+
+      - name: Smoke-test MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "$env:GITHUB_WORKSPACE\dist-packages\*.msi" | Select-Object -First 1
+          $log = "$env:RUNNER_TEMP\msi-install.log"
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            "/i", "`"$($msi.FullName)`"", "/qn", "/l*v", "`"$log`"",
+            "HTTPPORT=18081", "RTSPPORT=18554"
+          )
+          if ($install.ExitCode -ne 0) {
+            Get-Content $log -Tail 100
+            throw "MSI install failed: $($install.ExitCode)"
+          }
+          if (!(Test-Path "C:\Program Files\UvNVR\bin\uvnvr.exe")) {
+            throw "the MSI did not install the executable"
+          }
+          $config = Get-Content "$env:ProgramData\UvNVR\uvnvr.json" -Raw | ConvertFrom-Json
+          if ($config.http.port -ne 18081) {
+            throw "the MSI did not apply HTTPPORT: $($config.http.port)"
+          }
+          $uninstall = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            "/x", "`"$($msi.FullName)`"", "/qn"
+          )
+          if ($uninstall.ExitCode -ne 0) {
+            throw "MSI uninstall failed: $($uninstall.ExitCode)"
+          }
+          if (Test-Path "C:\Program Files\UvNVR\bin\uvnvr.exe") {
+            throw "the uninstaller left the executable"
+          }
+          Write-Host "MSI install/uninstall smoke test passed"
+
       - uses: actions/upload-artifact@v7
         with:
           name: uvnvr-windows-x64
           path: |
             dist-packages/*.zip
             dist-packages/*.exe
+            dist-packages/*.msi
           if-no-files-found: error
 
   macos:
@@ -351,7 +407,8 @@ jobs:
           mkdir -p release-assets
           find artifacts -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.zip' \
-               -o -name '*.exe' -o -name '*.pkg' -o -name '*.dmg' -o -name '*.tar.xz' \) \
+               -o -name '*.exe' -o -name '*.msi' -o -name '*.pkg' -o -name '*.dmg' \
+               -o -name '*.tar.xz' \) \
             -exec cp -v {} release-assets/ \;
 
       - name: Attach FFmpeg source offer
