@@ -75,7 +75,10 @@ std::string DetectCodec(const uint8_t* data, size_t len) {
     if (h264_type == 5 || h264_type == 7)
       return "h264";
     const int h265_type = (nal >> 1) & 0x3f;
-    if (h265_type == 19 || h265_type == 20 || h265_type == 32 || h265_type == 33)
+    // Only IDR/CRA types are unambiguous. H.264 P-slices such as 0x41 also
+    // decode to H.265 type 32 if SPS/VPS types are accepted, which used to
+    // flap the segment codec between h264 and h265.
+    if (h265_type == 19 || h265_type == 20 || h265_type == 21)
       return "h265";
   }
   return {};
@@ -89,7 +92,7 @@ std::vector<size_t> KeyframeOffsets(const uint8_t* data, size_t len) {
     const uint8_t nal = data[i + 3];
     const int h264_type = nal & 0x1f;
     const int h265_type = (nal >> 1) & 0x3f;
-    if (h264_type == 5 || h265_type == 19 || h265_type == 20) {
+    if (h264_type == 5 || h265_type == 19 || h265_type == 20 || h265_type == 21) {
       const size_t absolute = i - 3;
       offsets.push_back((absolute / 188) * 188);
     }

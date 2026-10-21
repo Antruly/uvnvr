@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -31,7 +32,23 @@ FFMPEG = shutil.which("ffmpeg")
 MEDIAMTX = os.environ.get("MEDIAMTX_BIN") or shutil.which("mediamtx")
 
 
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def pick_port(preferred: int) -> int:
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", preferred))
+            return preferred
+        except OSError:
+            return free_port()
+
+
 def main() -> int:
+    global PORT, RTSP_PORT, MEDIAMTX_PORT
     if not FFMPEG or not MEDIAMTX:
         print("skipping recording test: ffmpeg or MediaMTX is not available")
         return 0
@@ -44,6 +61,12 @@ def main() -> int:
         print("skipping recording test: no H.264 encoder in ffmpeg")
         return 0
 
+    PORT = pick_port(PORT)
+    RTSP_PORT = pick_port(PORT + 100)
+    MEDIAMTX_PORT = pick_port(PORT + 200)
+    rtp_port = pick_port(MEDIAMTX_PORT + 1)
+    rtcp_port = pick_port(MEDIAMTX_PORT + 2)
+
     temp = Path(tempfile.mkdtemp(prefix="uvnvr-recording-"))
     data_dir = temp / "data"
     data_dir.mkdir()
@@ -55,8 +78,8 @@ def main() -> int:
             [
                 f"rtspAddress: :{MEDIAMTX_PORT}",
                 "rtspTransports: [tcp]",
-                f"rtpAddress: :{MEDIAMTX_PORT + 1}",
-                f"rtcpAddress: :{MEDIAMTX_PORT + 2}",
+                f"rtpAddress: :{rtp_port}",
+                f"rtcpAddress: :{rtcp_port}",
                 "rtmp: false",
                 "hls: false",
                 "webrtc: false",
@@ -87,7 +110,20 @@ def main() -> int:
     mediamtx = subprocess.Popen(
         [MEDIAMTX, str(mediamtx_config)], stdout=log, stderr=log
     )
-    time.sleep(1)
+    ready = False
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", MEDIAMTX_PORT), timeout=0.5).close()
+            ready = True
+            break
+        except OSError:
+            time.sleep(0.2)
+    if not ready:
+        print("skipping recording test: MediaMTX did not listen")
+        mediamtx.terminate()
+        mediamtx.wait(timeout=5)
+        shutil.rmtree(temp, ignore_errors=True)
+        return 0
     publisher = subprocess.Popen(
         [
             FFMPEG,
