@@ -71,14 +71,19 @@ $existing = Get-Service -Name 'UvNVR' -ErrorAction SilentlyContinue
 if ($existing) {
     Stop-Service -Name 'UvNVR' -Force -ErrorAction SilentlyContinue
     try { $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) } catch {}
+    & sc.exe delete UvNVR | Out-Null
+    for ($i = 0; $i -lt 40; $i++) {
+        if (-not (Get-Service -Name 'UvNVR' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 250
+    }
 }
 Start-Sleep -Milliseconds 500
-& sc.exe create UvNVR binPath= $binPath start= auto obj= LocalSystem DisplayName= 'UvNVR' | Out-Null
-if ($LASTEXITCODE -eq 1073) {
-    & sc.exe config UvNVR binPath= $binPath start= auto | Out-Null
-}
+# New-Service passes BinaryPathName through unchanged, so quotes inside the
+# command line survive (native argument passing in PowerShell 5.1 does not).
+New-Service -Name 'UvNVR' -BinaryPathName $binPath -StartupType Automatic `
+    -DisplayName 'UvNVR' -ErrorAction Stop | Out-Null
 & sc.exe description UvNVR 'UvNVR software network video recorder' | Out-Null
-& sc.exe start UvNVR | Out-Null
+Start-Service -Name 'UvNVR' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName 'UvNVR' -Direction Inbound -Program $exe -Action Allow `
     -Profile Any | Out-Null
