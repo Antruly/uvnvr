@@ -124,8 +124,8 @@ if(WIN32)
   # only covers the installer itself. Generate the script so the icon path is
   # absolute, independent of the resource compiler's working directory.
   enable_language(RC)
-  file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/uvnvr.ico"
-       UVNVR_ICON_PATH)
+  # Forward slashes: rc/windres treat backslashes in quoted strings as escapes.
+  set(UVNVR_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/uvnvr.ico")
   configure_file(resources/windows/uvnvr.rc.in
                  "${CMAKE_BINARY_DIR}/generated/uvnvr.rc" @ONLY)
   target_sources(uvnvr PRIVATE "${CMAKE_BINARY_DIR}/generated/uvnvr.rc")
