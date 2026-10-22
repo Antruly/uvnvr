@@ -10,8 +10,9 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <shellapi.h>
 #include <windows.h>
+// shellapi.h relies on types (UINT, POINT, EXTERN_C) that windows.h defines.
+#include <shellapi.h>
 #else
 #include <fcntl.h>
 #include <sys/utsname.h>
