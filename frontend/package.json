@@ -25,9 +25,9 @@
   "devDependencies": {
     "@types/node": "24.19.2",
     "@vitejs/plugin-vue": "6.0.10",
-    "swagger-ui-dist": "^5.34.0",
+    "swagger-ui-dist": "^5.34.1",
     "typescript": "5.9.3",
-    "vite": "8.3.4",
-    "vue-tsc": "3.3.13"
+    "vite": "8.3.5",
+    "vue-tsc": "3.3.14"
   }
 }
