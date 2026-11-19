@@ -1,8 +1,23 @@
 # UvNVR 0.18.1
 
-Installer and camera onboarding fixes.
+Installer and camera onboarding fixes, saved camera credentials and a channel
+capacity limit.
 
 ## Highlights
+
+- **One-click add with saved camera credentials.** **Settings → Camera
+  defaults** stores a default camera username and password. The password is
+  encrypted with the instance key and never returned by the API. **Scan
+  ONVIF** shows a **Use saved camera credentials** checkbox, pre-checked when
+  defaults exist; one-click add and **Add selected** then work without
+  retyping the account for every camera. The saved account is also stored on
+  the resulting channels, so recording and ONVIF events authenticate the same
+  way.
+- **Channel capacity, 128 by default.** **Settings → Camera defaults** sets the
+  maximum number of channels (1–1024, default 128). New channels, CSV imports
+  and bulk adds stop with HTTP 409 `channel_limit` at the cap; the Channels
+  page shows `count / limit` and disables add/import at the limit. Lowering
+  the limit keeps existing channels.
 
 - **Port changes now apply on upgrades.** The ports page previously wrote
   `%ProgramData%\UvNVR\uvnvr.json` only when the file did not exist, so an

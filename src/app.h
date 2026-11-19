@@ -160,6 +160,11 @@ private:
   std::string GetSetting(const std::string& key, const std::string& fallback);
   int64_t GetSettingInt(const std::string& key, int64_t fallback);
   bool SetSetting(const std::string& key, const std::string& value, std::string* error);
+  // Uses the stored default camera credentials when `use_default` is set;
+  // otherwise passes the supplied values through.
+  bool ResolveCameraCredentials(bool use_default, const std::string& username,
+                                const std::string& password, std::string* out_username,
+                                std::string* out_password, std::string* error);
   bool Exec(const std::string& sql, const uvcpp::uvcpp_db_params& params, int64_t* affected,
             std::string* error);
   bool Query(const std::string& sql, const uvcpp::uvcpp_db_params& params,

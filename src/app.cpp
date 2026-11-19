@@ -676,6 +676,25 @@ bool App::SetSetting(const std::string& key, const std::string& value, std::stri
       params, nullptr, error);
 }
 
+bool App::ResolveCameraCredentials(bool use_default, const std::string& username,
+                                   const std::string& password, std::string* out_username,
+                                   std::string* out_password, std::string* error) {
+  if (!use_default) {
+    *out_username = username;
+    *out_password = password;
+    return true;
+  }
+  *out_username = GetSetting("camera.default_username", "");
+  const std::string encrypted = GetSetting("camera.default_password_enc", "");
+  if (out_username->empty() || encrypted.empty()) {
+    if (error != nullptr)
+      *error = "no default camera credentials are configured; set them in Settings";
+    return false;
+  }
+  *out_password = DecryptSecret(encrypted, error);
+  return !out_password->empty() || (error != nullptr && error->empty());
+}
+
 int64_t App::CountUsers() {
   uvcpp::uvcpp_db_table table;
   std::string error;
@@ -2555,9 +2574,65 @@ void App::RegisterCoreRoutes() {
                              return;
                          }
                        }
+                       if (body.contains("camera") && body["camera"].is_object()) {
+                         const auto& camera = body["camera"];
+                         auto set_string = [&](const char* key, const std::string& value) -> bool {
+                           std::string db_error;
+                           if (!SetSetting(std::string("camera.") + key, value, &db_error)) {
+                             *error = db_error;
+                             return false;
+                           }
+                           return true;
+                         };
+                         if (camera.contains("defaultUsername")) {
+                           const std::string username =
+                               JsonString(camera, "defaultUsername");
+                           if (username.size() > 128) {
+                             *error = "the default camera username is too long";
+                             return;
+                           }
+                           if (!set_string("default_username", username))
+                             return;
+                         }
+                         if (camera.contains("password") && camera["password"].is_string() &&
+                             !camera["password"].get<std::string>().empty()) {
+                           std::string encrypt_error;
+                           const std::string encrypted =
+                               EncryptSecret(camera["password"].get<std::string>(),
+                                             &encrypt_error);
+                           if (encrypted.empty()) {
+                             *error = encrypt_error;
+                             return;
+                           }
+                           if (!set_string("default_password_enc", encrypted))
+                             return;
+                         }
+                         if (JsonBool(camera, "clearPassword", false) &&
+                             !set_string("default_password_enc", ""))
+                           return;
+                         if (camera.contains("maxChannels")) {
+                           const int64_t limit = JsonInt(camera, "maxChannels", 128);
+                           if (limit < 1 || limit > 1024) {
+                             *error = "maxChannels must be between 1 and 1024";
+                             return;
+                           }
+                           std::string db_error;
+                           if (!SetSetting("channel.max_channels", std::to_string(limit),
+                                           &db_error)) {
+                             *error = db_error;
+                             return;
+                           }
+                         }
+                       }
                        *settings = SettingsJson();
+                       // Never write camera/SMTP passwords into the audit log.
+                       json audit_body = body;
+                       for (const char* group : {"smtp", "camera"}) {
+                         if (audit_body.contains(group) && audit_body[group].is_object())
+                           audit_body[group].erase("password");
+                       }
                        Audit("system", "info", user.username, ip, ua, "settings", "", "update",
-                             "success", "", body.dump());
+                             "success", "", audit_body.dump());
                      },
                      [error, settings, &resp, next] {
                        if (!error->empty()) {
@@ -2771,7 +2846,11 @@ json App::SettingsJson() {
                     {"username", GetSetting("smtp.username", "")},
                     {"from", GetSetting("smtp.from", "")},
                     {"to", GetSetting("smtp.to", "")},
-                    {"hasPassword", !GetSetting("smtp.password_enc", "").empty()}}}};
+                    {"hasPassword", !GetSetting("smtp.password_enc", "").empty()}}},
+      {"camera", json{{"defaultUsername", GetSetting("camera.default_username", "")},
+                      {"hasDefaultPassword",
+                       !GetSetting("camera.default_password_enc", "").empty()},
+                      {"maxChannels", GetSettingInt("channel.max_channels", 128)}}}};
 }
 
 namespace {
@@ -4614,6 +4693,34 @@ void App::RegisterChannelRoutes() {
                },
                "channel.view"));
 
+  web_.get(
+      "/api/v1/channels/onboarding",
+      Protected(
+          [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            auto result = std::make_shared<json>();
+            RunWork(
+                [this, result] {
+                  uvcpp::uvcpp_db_table table;
+                  std::string error;
+                  int64_t count = 0;
+                  if (Query("SELECT COUNT(*) AS count FROM channels", {}, &table, &error) &&
+                      !table.empty())
+                    count = TableInt(table, 0, "count");
+                  *result = json{
+                      {"defaultUsername", GetSetting("camera.default_username", "")},
+                      {"hasDefaultPassword",
+                       !GetSetting("camera.default_password_enc", "").empty()},
+                      {"maxChannels", GetSettingInt("channel.max_channels", 128)},
+                      {"channelCount", count}};
+                },
+                [result, &resp, next] {
+                  SendJson(resp, 200, *result);
+                  next();
+                });
+          },
+          "channel.view"));
+
   web_.get("/api/v1/preview/channels",
            Protected(
                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
@@ -4672,6 +4779,7 @@ void App::RegisterChannelRoutes() {
             const int64_t http_port = JsonInt(body, "httpPort", 80);
             const std::string username = JsonString(body, "username");
             const std::string password = JsonString(body, "password");
+            const bool use_default = JsonBool(body, "useDefaultCredentials", false);
             const std::string main_url = JsonString(body, "mainUrl");
             const std::string sub_url = JsonString(body, "subUrl");
             const bool sub_explicit = body.contains("subEnabled");
@@ -4757,13 +4865,25 @@ void App::RegisterChannelRoutes() {
             const std::string ua = req.header("User-Agent", "");
             auto op = std::make_shared<OpResult>();
             RunWork(
-                [this, name, protocol, host, port, http_port, username, password, main_url,
-                 sub_url, sub_explicit, sub_enabled, enabled, group_id, brand, media, watermark,
-                 actor, ip, ua, op] {
+                [this, name, protocol, host, port, http_port, username, password, use_default,
+                 main_url, sub_url, sub_explicit, sub_enabled, enabled, group_id, brand, media,
+                 watermark, actor, ip, ua, op] {
                   std::string resolved_main = main_url;
                   std::string resolved_sub = sub_url;
                   std::string resolved_brand = brand;
                   bool resolved_sub_enabled = sub_enabled;
+                  std::string resolved_username;
+                  std::string resolved_password;
+                  std::string credential_error;
+                  if (!ResolveCameraCredentials(use_default, username, password,
+                                                &resolved_username, &resolved_password,
+                                                &credential_error)) {
+                    op->ok = false;
+                    op->status = 400;
+                    op->code = "camera_defaults_missing";
+                    op->message = credential_error;
+                    return;
+                  }
                   if (protocol == "onvif" && resolved_main.empty()) {
                     // The operator supplied host and credentials but no
                     // stream URL: read the profiles over ONVIF and use the
@@ -4774,7 +4894,8 @@ void App::RegisterChannelRoutes() {
                     std::string probe_error;
                     const std::string xaddr = "http://" + host + ":" +
                                               std::to_string(http_port) + "/onvif/device_service";
-                    if (!ProbeOnvif(xaddr, username, password, &info, &probe_error) ||
+                    if (!ProbeOnvif(xaddr, resolved_username, resolved_password, &info,
+                                    &probe_error) ||
                         info.profiles.empty() || info.profiles.front().stream_uri.empty()) {
                       op->ok = false;
                       op->status = 502;
@@ -4795,6 +4916,21 @@ void App::RegisterChannelRoutes() {
                   }
                   if (resolved_sub_enabled && resolved_sub.empty())
                     resolved_sub_enabled = false;
+                  const int64_t max_channels =
+                      GetSettingInt("channel.max_channels", 128);
+                  uvcpp::uvcpp_db_table count_table;
+                  std::string count_error;
+                  if (Query("SELECT COUNT(*) AS count FROM channels", {}, &count_table,
+                            &count_error) &&
+                      !count_table.empty() &&
+                      TableInt(count_table, 0, "count") >= max_channels) {
+                    op->ok = false;
+                    op->status = 409;
+                    op->code = "channel_limit";
+                    op->message = "the channel limit (" + std::to_string(max_channels) +
+                                  ") has been reached; raise it in Settings";
+                    return;
+                  }
                   if (group_id > 0) {
                     uvcpp::uvcpp_db_table group_table;
                     uvcpp::uvcpp_db_params group_params;
@@ -4811,8 +4947,9 @@ void App::RegisterChannelRoutes() {
                     }
                   }
                   std::string encrypt_error;
-                  const std::string password_enc = EncryptSecret(password, &encrypt_error);
-                  if (!password.empty() && password_enc.empty()) {
+                  const std::string password_enc =
+                      EncryptSecret(resolved_password, &encrypt_error);
+                  if (!resolved_password.empty() && password_enc.empty()) {
                     op->ok = false;
                     op->status = 500;
                     op->code = "encrypt_failed";
@@ -4824,7 +4961,7 @@ void App::RegisterChannelRoutes() {
                   params.add(protocol);
                   params.add(host);
                   params.add(port);
-                  params.add(username);
+                  params.add(resolved_username);
                   params.add(password_enc);
                   params.add(resolved_main);
                   params.add(resolved_sub);
@@ -6065,6 +6202,7 @@ void App::RegisterOnvifRoutes() {
                   const std::string xaddr = JsonString(body, "xaddr");
                   const std::string username = JsonString(body, "username");
                   const std::string password = JsonString(body, "password");
+                  const bool use_default = JsonBool(body, "useDefaultCredentials", false);
                   if (xaddr.empty()) {
                     SendError(resp, 400, "missing_xaddr", "xaddr is required");
                     next();
@@ -6072,10 +6210,20 @@ void App::RegisterOnvifRoutes() {
                   }
                   auto op = std::make_shared<OpResult>();
                   RunWork(
-                      [xaddr, username, password, op] {
+                      [this, xaddr, username, password, use_default, op] {
                         OnvifInfo info;
                         std::string error;
-                        if (!ProbeOnvif(xaddr, username, password, &info, &error)) {
+                        std::string resolved_user;
+                        std::string resolved_pass;
+                        if (!ResolveCameraCredentials(use_default, username, password,
+                                                      &resolved_user, &resolved_pass, &error)) {
+                          op->ok = false;
+                          op->status = 400;
+                          op->code = "camera_defaults_missing";
+                          op->message = error;
+                          return;
+                        }
+                        if (!ProbeOnvif(xaddr, resolved_user, resolved_pass, &info, &error)) {
                           op->ok = false;
                           op->status = 502;
                           op->code = "probe_failed";
@@ -6117,6 +6265,7 @@ void App::RegisterOnvifRoutes() {
                   const int port = static_cast<int>(JsonInt(body, "httpPort", 80));
                   const std::string username = JsonString(body, "username");
                   const std::string password = JsonString(body, "password");
+                  const bool use_default = JsonBool(body, "useDefaultCredentials", false);
                   const std::string preferred = JsonString(body, "brand");
                   if (host.empty() || port < 1 || port > 65535) {
                     SendError(resp, 400, "invalid_host", "host and a valid httpPort are required");
@@ -6125,9 +6274,20 @@ void App::RegisterOnvifRoutes() {
                   }
                   auto op = std::make_shared<OpResult>();
                   RunWork(
-                      [host, port, username, password, preferred, op] {
+                      [this, host, port, username, password, use_default, preferred, op] {
                         std::string onvif_error;
                         std::string brand_error;
+                        std::string resolved_user;
+                        std::string resolved_pass;
+                        if (!ResolveCameraCredentials(use_default, username, password,
+                                                      &resolved_user, &resolved_pass,
+                                                      &onvif_error)) {
+                          op->ok = false;
+                          op->status = 400;
+                          op->code = "camera_defaults_missing";
+                          op->message = onvif_error;
+                          return;
+                        }
                         const std::string preferred_lower = [&preferred] {
                           std::string value = preferred;
                           for (char& c : value)
@@ -6139,7 +6299,8 @@ void App::RegisterOnvifRoutes() {
                           OnvifInfo info;
                           const std::string xaddr = "http://" + host + ":" + std::to_string(port) +
                                                     "/onvif/device_service";
-                          if (!ProbeOnvif(xaddr, username, password, &info, &onvif_error) ||
+                          if (!ProbeOnvif(xaddr, resolved_user, resolved_pass, &info,
+                                          &onvif_error) ||
                               info.profiles.empty()) {
                             if (onvif_error.empty())
                               onvif_error = "the camera did not return usable ONVIF profiles";
@@ -6164,8 +6325,8 @@ void App::RegisterOnvifRoutes() {
 
                         const auto try_brand = [&]() {
                           BrandDeviceInfo info;
-                          if (!ProbeBrandHttp(host, port, username, password, preferred_lower,
-                                              &info, &brand_error))
+                          if (!ProbeBrandHttp(host, port, resolved_user, resolved_pass,
+                                              preferred_lower, &info, &brand_error))
                             return false;
                           op->data = json{{"protocol", info.protocol},
                                           {"name", info.name.empty() ? info.model : info.name},

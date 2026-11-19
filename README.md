@@ -30,7 +30,9 @@ bilingual web UI.
 
 0.18.1 fixes installer port changes on upgrades, keeps ONVIF cameras on the ONVIF
 transport when added from discovery, lets a manual ONVIF add read the camera's
-profiles, and makes a plain RTSP channel require only its stream URL. It builds on
+profiles, and makes a plain RTSP channel require only its stream URL. It also
+adds saved camera credentials for one-click/bulk ONVIF add and a configurable
+channel capacity (128 by default). It builds on
 0.18.0's live-recording playback, draggable timeline and system-service management,
 0.17.0's Inno Setup installer and UI refresh, 0.16.0's io_uring recording I/O,
 0.15.0's Hikvision/Dahua encoder control, 0.14.0's ONVIF encoder control, 0.13.0's
@@ -324,7 +326,7 @@ tests/             unit/integration/e2e tests
 | 0.16.0 | ✅ libuv/io_uring recording I/O with fsync batching |
 | 0.17.0 | ✅ Inno Setup Windows installer, ONVIF bulk add, UI/icons and light-theme refresh |
 | 0.18.0 | ✅ Live recording playback, draggable timeline, service management, new icon, About/Help rewrite |
-| 0.18.1 | ✅ Installer port updates, ONVIF one-click add, URL-only RTSP channels, visible channel errors |
+| 0.18.1 | ✅ Installer port updates, ONVIF one-click add, saved camera credentials, 128-channel capacity, URL-only RTSP |
 
 ## Contributing and security
 

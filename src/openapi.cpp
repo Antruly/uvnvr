@@ -62,6 +62,9 @@ const Endpoint kEndpoints[] = {
      "maintenance + admin", "application/json"},
 
     {"get", "/api/v1/channels", "List channels", "Channels", "channel.view", "application/json"},
+    {"get", "/api/v1/channels/onboarding",
+     "Default camera credentials and the channel capacity", "Channels", "channel.view",
+     "application/json"},
     {"get", "/api/v1/preview/channels", "Preview-only channel metadata", "Channels", "preview.view",
      "application/json"},
     {"post", "/api/v1/channels", "Create a channel", "Channels", "channel.create",

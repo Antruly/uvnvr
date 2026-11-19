@@ -287,6 +287,15 @@ const messages = {
       reconnecting: 'Reconnect requested.',
       scanOnvif: 'Scan ONVIF',
       scanHint: 'Uses WS-Discovery on the local network. Enter camera credentials before probing.',
+      useSavedCredentials: 'Use saved camera credentials',
+      savedCredentialsHint:
+        'Using the default account “{username}” from Settings → Camera defaults.',
+      noSavedCredentials:
+        'No default camera credentials are saved. Enter them here, or set them in Settings → Camera defaults for one-click adds.',
+      savedPasswordPlaceholder: 'Saved in Settings',
+      channelCount: '{count} / {limit} channels',
+      limitReached:
+        'The channel limit of {limit} has been reached. Raise it in Settings → Camera defaults.',
       startScan: 'Start scan',
       scanning: 'Scanning…',
       probe: 'Probe',
@@ -638,6 +647,16 @@ const messages = {
       emailTest: 'Send test email',
       emailTestSent: 'Test email sent.',
       emailQQHint: 'QQ Mail preset: smtp.qq.com:465 with an authorization code, not your login password.',
+      cameraDefaults: 'Camera defaults',
+      cameraDefaultsHint:
+        'Used by Scan ONVIF and one-click add when “Use saved credentials” is checked. The password is stored encrypted and never returned by the API.',
+      defaultCameraUsername: 'Default camera username',
+      defaultCameraPassword: 'Default camera password',
+      defaultCameraKeepPassword: 'Leave empty to keep the saved password',
+      clearCameraPassword: 'Clear the saved camera password',
+      maxChannels: 'Maximum channels',
+      maxChannelsHint:
+        'New channels are rejected after this limit (default 128, maximum 1024). Lowering the limit keeps existing channels.',
       gpuEnabled: 'Use hardware decoding for snapshots and motion samples when available',
       performance: 'Performance tier (motion sampling limit)',
       gpu: 'GPU',
@@ -964,6 +983,13 @@ const messages = {
       reconnecting: '已请求重连。',
       scanOnvif: '扫描 ONVIF',
       scanHint: '在局域网内使用 WS-Discovery 扫描，探测前请填写摄像头账号密码。',
+      useSavedCredentials: '使用已保存的摄像头凭据',
+      savedCredentialsHint: '正在使用“设置 → 摄像头默认凭据”中的账号“{username}”。',
+      noSavedCredentials:
+        '尚未保存默认摄像头凭据。可在此填写，或到“设置 → 摄像头默认凭据”保存后实现一键添加。',
+      savedPasswordPlaceholder: '已在设置中保存',
+      channelCount: '{count} / {limit} 通道',
+      limitReached: '已达到 {limit} 个通道上限，请在“设置 → 摄像头默认凭据”中调高。',
       startScan: '开始扫描',
       scanning: '扫描中…',
       probe: '探测',
@@ -1309,6 +1335,16 @@ const messages = {
       emailTest: '发送测试邮件',
       emailTestSent: '测试邮件已发送。',
       emailQQHint: 'QQ 邮箱预设：smtp.qq.com:465，密码使用授权码，不是登录密码。',
+      cameraDefaults: '摄像头默认凭据',
+      cameraDefaultsHint:
+        '在 ONVIF 扫描和一键添加中勾选“使用已保存凭据”时使用。密码加密保存，接口不会返回明文。',
+      defaultCameraUsername: '默认摄像头用户名',
+      defaultCameraPassword: '默认摄像头密码',
+      defaultCameraKeepPassword: '留空表示保持已保存的密码',
+      clearCameraPassword: '清除已保存的摄像头密码',
+      maxChannels: '最大通道数',
+      maxChannelsHint:
+        '超过该数量后拒绝新增通道（默认 128，最大 1024）。调低限制不会删除已有通道。',
       gpuEnabled: '可用时对抓拍与移动侦测采样使用硬件解码',
       performance: '性能档位（移动侦测并发上限）',
       gpu: 'GPU',

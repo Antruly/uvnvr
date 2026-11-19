@@ -43,6 +43,7 @@ header for cookie-authenticated mutating requests.
 | POST | `/api/v1/system/service/install` | system.manage |
 | POST | `/api/v1/system/service/uninstall` | system.manage |
 | GET | `/api/v1/channels` | channel.view |
+| GET | `/api/v1/channels/onboarding` | channel.view |
 | GET | `/api/v1/preview/channels` | preview.view |
 | POST | `/api/v1/channels/detect` | channel.manage |
 | POST | `/api/v1/channels` | channel.create |
@@ -454,8 +455,30 @@ Ports and the data directory are applied at startup. See
 ## Runtime settings
 
 `GET /api/v1/settings` returns the editable groups (`security`, `audit`,
-`event`, `motion`, `system`, `smtp`); `PUT` accepts any subset of them. Event
-recording uses:
+`event`, `motion`, `system`, `smtp`, `camera`); `PUT` accepts any subset of
+them. The `camera` group holds the default camera account used by one-click
+adds and the channel capacity:
+
+```json
+{
+  "camera": {
+    "defaultUsername": "admin",
+    "password": "write-only; omit to keep the saved value",
+    "clearPassword": false,
+    "maxChannels": 128
+  }
+}
+```
+
+`GET` returns `defaultUsername`, `hasDefaultPassword` and `maxChannels`; the
+password is encrypted at rest and never returned. New channels are rejected
+with HTTP 409 `channel_limit` once the count reaches `maxChannels` (default
+128, allowed 1–1024). `GET /api/v1/channels/onboarding` exposes the same
+onboarding summary plus the current channel count. The ONVIF probe, detect and
+channel-create endpoints accept `"useDefaultCredentials": true` to use the
+saved account instead of the supplied username/password.
+
+Event recording uses:
 
 ```json
 {

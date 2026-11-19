@@ -63,6 +63,13 @@ interface ChannelGroup {
   channels: number
 }
 
+interface ChannelOnboarding {
+  defaultUsername: string
+  hasDefaultPassword: boolean
+  maxChannels: number
+  channelCount: number
+}
+
 const { t } = useI18n()
 const auth = useAuthStore()
 const canSnapshot = computed(() => auth.hasPermission('api.snapshot'))
@@ -77,6 +84,12 @@ const groupModal = reactive({ open: false, name: '', parentId: 0 })
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
+const onboarding = ref<ChannelOnboarding | null>(null)
+const useSavedCredentials = ref(false)
+const formUseSavedCredentials = ref(false)
+const atChannelLimit = computed(
+  () => onboarding.value !== null && onboarding.value.channelCount >= onboarding.value.maxChannels,
+)
 const modal = reactive({
   open: false,
   mode: 'create' as 'create' | 'edit',
@@ -365,6 +378,7 @@ async function detectFromModal() {
         username: modal.username,
         password: modal.password,
         brand: preferred,
+        useDefaultCredentials: formUseSavedCredentials.value,
       }),
     })
     Object.assign(modal, {
@@ -402,6 +416,7 @@ async function addDevice(device: OnvifDevice): Promise<boolean> {
         xaddr: device.xaddr,
         username: scan.username,
         password: scan.password,
+        useDefaultCredentials: useSavedCredentials.value,
       }),
     })
     const profile = result.profiles[0]
@@ -415,6 +430,7 @@ async function addDevice(device: OnvifDevice): Promise<boolean> {
       httpPort,
       username: scan.username,
       password: scan.password,
+      useDefaultCredentials: useSavedCredentials.value,
       mainUrl: profile?.streamUri ?? '',
       subUrl: subProfile?.streamUri ?? '',
       subEnabled: Boolean(subProfile),
@@ -576,6 +592,11 @@ async function load() {
     ])
     channels.value = channelRows
     groups.value = groupRows
+    try {
+      onboarding.value = await api<ChannelOnboarding>('/api/v1/channels/onboarding')
+    } catch {
+      onboarding.value = null
+    }
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -585,6 +606,13 @@ async function load() {
 
 function openCreate() {
   error.value = ''
+  formUseSavedCredentials.value = false
+  if (atChannelLimit.value) {
+    error.value = t('channels.limitReached', {
+      limit: onboarding.value?.maxChannels ?? 128,
+    })
+    return
+  }
   Object.assign(modal, {
     open: true,
     mode: 'create',
@@ -610,6 +638,7 @@ function openCreate() {
 
 function openEdit(channel: Channel) {
   error.value = ''
+  formUseSavedCredentials.value = false
   Object.assign(modal, {
     open: true,
     mode: 'edit',
@@ -672,6 +701,8 @@ async function save() {
       port: isOnvif.value ? Number(modal.httpPort) || 80 : Number(modal.port) || 554,
       httpPort: Number(modal.httpPort) || 80,
       username: modal.username,
+      useDefaultCredentials:
+        formUseSavedCredentials.value && (isOnvif.value || isBrandProtocol.value),
       mainUrl: modal.mainUrl.trim(),
       subUrl: modal.subUrl.trim(),
       subEnabled: isRtsp.value ? Boolean(modal.subUrl.trim()) : modal.subEnabled,
@@ -725,8 +756,9 @@ async function reconnect(channel: Channel) {
   }
 }
 
-function openScan() {
+async function openScan() {
   error.value = ''
+  useSavedCredentials.value = false
   Object.assign(scan, {
     open: true,
     scanning: false,
@@ -742,6 +774,16 @@ function openScan() {
   Object.keys(scanErrors).forEach((key) => delete scanErrors[key])
   scanError.value = ''
   scanNotice.value = ''
+  try {
+    const info = await api<ChannelOnboarding>('/api/v1/channels/onboarding')
+    onboarding.value = info
+    if (info.defaultUsername && info.hasDefaultPassword) {
+      useSavedCredentials.value = true
+      scan.username = info.defaultUsername
+    }
+  } catch {
+    // No saved credentials: the operator enters them for this scan.
+  }
 }
 
 async function discover() {
@@ -779,6 +821,7 @@ async function probe(device: OnvifDevice) {
         xaddr: device.xaddr,
         username: scan.username,
         password: scan.password,
+        useDefaultCredentials: useSavedCredentials.value,
       }),
     })
     if (scan.result?.profiles.length) {
@@ -842,6 +885,9 @@ onMounted(load)
       <p>{{ t('channels.subtitle') }}</p>
     </div>
     <div class="head-actions">
+      <span v-if="onboarding" class="pill">
+        {{ t('channels.channelCount', { count: onboarding.channelCount, limit: onboarding.maxChannels }) }}
+      </span>
       <span class="muted">{{ t('preview.onlineCount', { online: onlineCount, total: channels.length }) }}</span>
       <button class="button" @click="load">
         <AppIcon name="refresh" :size="16" />
@@ -864,14 +910,14 @@ onMounted(load)
       />
       <button
         class="button"
-        :disabled="importing"
-        :title="t('channels.csvHint')"
+        :disabled="importing || atChannelLimit"
+        :title="atChannelLimit ? t('channels.limitReached', { limit: onboarding?.maxChannels ?? 128 }) : t('channels.csvHint')"
         @click="importInput?.click()"
       >
         <AppIcon name="plus" :size="16" />
         {{ importing ? `${importDone}/${importTotal}` : t('channels.importCsv') }}
       </button>
-      <button class="button primary" @click="openCreate">
+      <button class="button primary" :disabled="atChannelLimit" @click="openCreate">
         <AppIcon name="plus" :size="16" />
         {{ t('channels.addChannel') }}
       </button>
@@ -1059,6 +1105,13 @@ onMounted(load)
               {{ detecting ? t('common.loading') : t('channels.autoDetectAction') }}
             </button>
           </label>
+          <label
+            v-if="(isOnvif || isBrandProtocol) && onboarding?.defaultUsername && onboarding?.hasDefaultPassword"
+            class="check-row"
+          >
+            <input v-model="formUseSavedCredentials" type="checkbox" />
+            <span>{{ t('channels.useSavedCredentials') }}</span>
+          </label>
           <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.host') }}</span>
             <input v-model="modal.host" class="input" placeholder="192.168.1.64" />
@@ -1073,7 +1126,12 @@ onMounted(load)
           </label>
           <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.username') }}</span>
-            <input v-model="modal.username" class="input" autocomplete="off" />
+            <input
+              v-model="modal.username"
+              class="input"
+              autocomplete="off"
+              :disabled="formUseSavedCredentials"
+            />
           </label>
           <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.password') }}</span>
@@ -1082,6 +1140,7 @@ onMounted(load)
               class="input"
               type="password"
               autocomplete="new-password"
+              :disabled="formUseSavedCredentials"
               :placeholder="modal.mode === 'edit' ? t('channels.keepPassword') : ''"
             />
           </label>
@@ -1208,14 +1267,36 @@ onMounted(load)
         <p class="small-note">{{ t('channels.scanHint') }}</p>
         <p v-if="scanNotice" class="notice">{{ scanNotice }}</p>
         <p v-if="scanError" class="form-error">{{ scanError }}</p>
+        <template v-if="onboarding?.defaultUsername && onboarding?.hasDefaultPassword">
+          <label class="check-row">
+            <input v-model="useSavedCredentials" type="checkbox" />
+            <span>{{ t('channels.useSavedCredentials') }}</span>
+          </label>
+          <p class="small-note">
+            {{ t('channels.savedCredentialsHint', { username: onboarding.defaultUsername }) }}
+          </p>
+        </template>
+        <p v-else class="small-note">{{ t('channels.noSavedCredentials') }}</p>
         <div class="modal-columns">
           <label class="field">
             <span>{{ t('channels.username') }}</span>
-            <input v-model="scan.username" class="input" autocomplete="off" />
+            <input
+              v-model="scan.username"
+              class="input"
+              autocomplete="off"
+              :disabled="useSavedCredentials"
+            />
           </label>
           <label class="field">
             <span>{{ t('channels.password') }}</span>
-            <input v-model="scan.password" class="input" type="password" autocomplete="new-password" />
+            <input
+              v-model="scan.password"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              :disabled="useSavedCredentials"
+              :placeholder="useSavedCredentials ? t('channels.savedPasswordPlaceholder') : ''"
+            />
           </label>
         </div>
         <div class="head-actions">
@@ -1226,7 +1307,7 @@ onMounted(load)
           <button
             v-if="scan.devices.length > 0"
             class="button primary"
-            :disabled="scanAdding || scanSelection.size === 0"
+            :disabled="scanAdding || scanSelection.size === 0 || atChannelLimit"
             @click="addSelected"
           >
             <AppIcon name="plus" :size="16" />
@@ -1237,8 +1318,9 @@ onMounted(load)
             }}
           </button>
         </div>
-        <p v-if="scanNotice" class="notice">{{ scanNotice }}</p>
-        <p v-if="scanError" class="form-error">{{ scanError }}</p>
+        <p v-if="atChannelLimit" class="form-error">
+          {{ t('channels.limitReached', { limit: onboarding?.maxChannels ?? 128 }) }}
+        </p>
         <table class="data-table">
           <thead>
             <tr>
@@ -1274,7 +1356,7 @@ onMounted(load)
                   </button>
                   <button
                     class="button small primary"
-                    :disabled="scan.probing === device.xaddr || scanAdding || scanStatus[device.xaddr] === 'added'"
+                    :disabled="scan.probing === device.xaddr || scanAdding || scanStatus[device.xaddr] === 'added' || atChannelLimit"
                     @click="quickAdd(device)"
                   >
                     {{

@@ -141,6 +141,20 @@ thumbnail; the camera button refreshes it and double-clicking the thumbnail
 opens a large view. **Reconnect** retries immediately. **Sync** copies selected channel fields and/or recording plans to other
 channels after showing a diff.
 
+### Saved credentials and channel capacity
+
+Set **Settings → Camera defaults** once with the username and password used by
+your cameras. The password is stored encrypted and is never returned by the
+API. **Scan ONVIF** then shows **Use saved camera credentials** (pre-checked
+when defaults exist); leave it checked and **Add now** / **Add selected**
+authenticate the probe and the new channel without retyping the account.
+Uncheck it to use a different account for one scan.
+
+The same card sets **Maximum channels** (default **128**, allowed 1–1024).
+New channels, CSV imports and bulk adds stop at the limit with a clear error;
+the Channels page shows `count / limit` and disables the add/import buttons at
+the cap. Lowering the limit does not delete existing channels.
+
 Use **Groups** to organize channels into a tree. Create a group, optionally
 under a parent, and pick it in the channel form. Channels without a group appear
 under **Ungrouped**. Deleting a group moves its channels to ungrouped and

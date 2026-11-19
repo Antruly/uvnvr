@@ -6,6 +6,20 @@ All notable changes to UvNVR are documented here. The format follows
 
 ## [0.18.1] - 2026-11-19
 
+### Added
+
+- **Saved camera credentials for one-click add.** **Settings → Camera
+  defaults** stores a default camera username and password (encrypted with the
+  instance key). **Scan ONVIF** pre-selects **Use saved camera credentials**
+  and sends `useDefaultCredentials`, so one-click and bulk add work without
+  retyping credentials. The password is never returned by the API or written
+  to the audit log; `GET /api/v1/channels/onboarding` exposes only the
+  username and whether a password is stored.
+- **Configurable channel capacity, 128 by default.** New channels are rejected
+  with HTTP 409 `channel_limit` after the limit (1–1024, set on the same
+  Settings card). The Channels page shows the count/limit and disables add and
+  CSV import at the cap.
+
 ### Fixed
 
 - **Installer port changes now take effect on upgrades.** An existing

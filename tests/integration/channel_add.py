@@ -160,6 +160,63 @@ def main() -> int:
         )
         assert status == 502 and error["error"] == "onvif_probe_failed", (status, error)
 
+        # Saved default credentials are used by the probe/add flow and stored
+        # encrypted on the channel; the password never enters the audit log.
+        status, error = call(
+            "POST",
+            "/api/v1/channels/onvif/probe",
+            {
+                "xaddr": "http://127.0.0.1:1/onvif/device_service",
+                "useDefaultCredentials": True,
+            },
+        )
+        assert status == 400 and error["error"] == "camera_defaults_missing", (status, error)
+
+        status, error = call(
+            "PUT",
+            "/api/v1/settings",
+            {
+                "camera": {
+                    "defaultUsername": "camera-admin",
+                    "password": "TopSecret!",
+                    "maxChannels": 4,
+                }
+            },
+        )
+        assert status == 200, (status, error)
+        assert error["camera"]["defaultUsername"] == "camera-admin", error
+        assert error["camera"]["hasDefaultPassword"] is True, error
+        assert error["camera"]["maxChannels"] == 4, error
+
+        status, info = call("GET", "/api/v1/channels/onboarding")
+        assert status == 200 and info["maxChannels"] == 4, (status, info)
+        assert info["channelCount"] == 3, info
+
+        status, created = call(
+            "POST",
+            "/api/v1/channels",
+            {
+                "protocol": "rtsp",
+                "mainUrl": "rtsp://10.0.0.40/live",
+                "useDefaultCredentials": True,
+            },
+        )
+        assert status == 201, (status, created)
+        status, rows = call("GET", "/api/v1/channels")
+        saved = [row for row in rows if row["id"] == created["id"]][0]
+        assert saved["username"] == "camera-admin" and saved["hasPassword"], saved
+
+        status, error = call(
+            "POST",
+            "/api/v1/channels",
+            {"protocol": "rtsp", "mainUrl": "rtsp://10.0.0.41/live"},
+        )
+        assert status == 409 and error["error"] == "channel_limit", (status, error)
+
+        status, audit = call("GET", "/api/v1/audit")
+        assert status == 200, (status, audit)
+        assert "TopSecret!" not in json.dumps(audit), "the settings audit leaked the password"
+
         print("channel creation integration passed")
         return 0
     finally:

@@ -44,6 +44,11 @@ interface Settings {
     to: string
     hasPassword: boolean
   }
+  camera: {
+    defaultUsername: string
+    hasDefaultPassword: boolean
+    maxChannels: number
+  }
 }
 
 interface Summary {
@@ -153,8 +158,15 @@ const settings = reactive<Settings>({
     to: '',
     hasPassword: false,
   },
+  camera: {
+    defaultUsername: '',
+    hasDefaultPassword: false,
+    maxChannels: 128,
+  },
 })
 const smtpPassword = ref('')
+const cameraPassword = ref('')
+const clearCameraPassword = ref(false)
 const summary = ref<Summary | null>(null)
 const startup = ref<StartupConfig | null>(null)
 const service = ref<ServiceStatus | null>(null)
@@ -205,6 +217,7 @@ async function load() {
     if (settingsResponse.motion?.region) Object.assign(settings.motion.region, settingsResponse.motion.region)
     Object.assign(settings.system, settingsResponse.system)
     Object.assign(settings.smtp, settingsResponse.smtp)
+    Object.assign(settings.camera, settingsResponse.camera)
     summary.value = summaryResponse
     serialEdit.value = summaryResponse.serial
     versionEdit.value = summaryResponse.version
@@ -255,6 +268,12 @@ async function save() {
           to: settings.smtp.to,
           password: smtpPassword.value || undefined,
         },
+        camera: {
+          defaultUsername: settings.camera.defaultUsername,
+          maxChannels: Number(settings.camera.maxChannels),
+          password: cameraPassword.value || undefined,
+          clearPassword: clearCameraPassword.value,
+        },
       }),
     })
     Object.assign(settings.security, updated.security)
@@ -263,7 +282,10 @@ async function save() {
     Object.assign(settings.motion, updated.motion)
     Object.assign(settings.system, updated.system)
     Object.assign(settings.smtp, updated.smtp)
+    Object.assign(settings.camera, updated.camera)
     smtpPassword.value = ''
+    cameraPassword.value = ''
+    clearCameraPassword.value = false
     flash(t('system.saved'))
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -759,6 +781,54 @@ onMounted(load)
             <AppIcon name="bell" :size="15" />
             {{ t('system.emailTest') }}
           </button>
+          <button class="button primary" type="submit" :disabled="saving || !canManage()">
+            <AppIcon name="save" :size="15" />
+            {{ t('system.save') }}
+          </button>
+        </div>
+      </form>
+
+      <form class="panel settings-card" @submit.prevent="save">
+        <div class="section-title">
+          <AppIcon name="camera" :size="20" />
+          <h3>{{ t('system.cameraDefaults') }}</h3>
+        </div>
+        <p class="small-note">{{ t('system.cameraDefaultsHint') }}</p>
+        <div class="form-grid">
+          <label class="field">
+            <span>{{ t('system.defaultCameraUsername') }}</span>
+            <input v-model="settings.camera.defaultUsername" class="input" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>{{ t('system.defaultCameraPassword') }}</span>
+            <input
+              v-model="cameraPassword"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              :disabled="clearCameraPassword"
+              :placeholder="
+                settings.camera.hasDefaultPassword ? t('system.defaultCameraKeepPassword') : ''
+              "
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('system.maxChannels') }}</span>
+            <input
+              v-model.number="settings.camera.maxChannels"
+              class="input"
+              type="number"
+              min="1"
+              max="1024"
+            />
+          </label>
+          <label class="check-row">
+            <input v-model="clearCameraPassword" type="checkbox" />
+            <span>{{ t('system.clearCameraPassword') }}</span>
+          </label>
+        </div>
+        <p class="small-note">{{ t('system.maxChannelsHint') }}</p>
+        <div class="modal-actions">
           <button class="button primary" type="submit" :disabled="saving || !canManage()">
             <AppIcon name="save" :size="15" />
             {{ t('system.save') }}
