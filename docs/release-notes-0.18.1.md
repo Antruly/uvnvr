@@ -37,11 +37,11 @@ capacity limit.
   credentials, leave the stream URLs empty and save: UvNVR queries the camera
   and stores the real main/sub stream URIs. **Auto detect** still fills them
   immediately when you prefer.
-- **Plain RTSP channels need only the stream URL.** For RTSP and generic
-  channels the dialog hides host, port, credentials, event and ONVIF fields.
-  The name is optional (derived from the host or URL), a sub-stream URL enables
-  the sub stream automatically, and the server accepts the channel without any
-  other camera settings.
+- **Plain RTSP channels need only the stream URL.** For RTSP the dialog hides
+  host, port, credentials, event and ONVIF fields; generic URL templates keep
+  their placeholder fields. The name is optional (derived from the host or
+  URL), a sub-stream URL enables the sub stream automatically, and the server
+  accepts the channel without any other camera settings.
 - **Errors are visible in the dialog.** Channel creation failures appear inside
   the add/edit dialog instead of behind the modal, scan/probe/bulk-add feedback
   appears inside the scan dialog, and the save button is disabled while the
@@ -52,10 +52,13 @@ capacity limit.
 - Existing channels keep their stored protocol. To convert a channel that was
   previously misclassified as Hikvision/Dahua, edit it, set **Protocol** to
   **ONVIF** and run **Auto detect** to refresh the profile URIs.
-- The MSI keeps an existing configuration's ports on upgrade; the Inno Setup
-  wizard now treats its ports page as authoritative. Both stop a legacy
-  scheduled-task process before replacing files.
-- No API, database or configuration format changes. `VERSION` is 0.18.1.
+- The MSI applies explicitly passed non-default `HTTPPORT`/`RTSPPORT` values
+  on upgrade and otherwise keeps the existing ports; the Inno Setup wizard
+  treats its ports page as authoritative. Both stop a legacy scheduled-task
+  process before replacing files.
+- No database or configuration-file format changes. The API gains
+  `GET /api/v1/channels/onboarding`, the `camera` settings group and the
+  `useDefaultCredentials` request flag. `VERSION` is 0.18.1.
 
 ## Packages
 
