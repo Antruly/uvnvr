@@ -774,6 +774,10 @@ async function openScan() {
   Object.keys(scanErrors).forEach((key) => delete scanErrors[key])
   scanError.value = ''
   scanNotice.value = ''
+  if (onboarding.value?.defaultUsername && onboarding.value.hasDefaultPassword) {
+    useSavedCredentials.value = true
+    scan.username = onboarding.value.defaultUsername
+  }
   try {
     const info = await api<ChannelOnboarding>('/api/v1/channels/onboarding')
     onboarding.value = info
