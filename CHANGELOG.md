@@ -4,6 +4,35 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.18.1] - 2026-11-19
+
+### Fixed
+
+- **Installer port changes now take effect on upgrades.** An existing
+  `uvnvr.json` is no longer left untouched: the HTTP and RTSP ports entered on
+  the ports page are written into it while every other setting is preserved.
+  The installer also stops the 0.17 boot task and any running console instance
+  before replacing files, so an old process cannot keep the previous ports
+  bound.
+- **ONVIF cameras stay ONVIF when added from discovery.** The manufacturer no
+  longer switches the channel to the Hikvision/Dahua protocol; the stream URIs
+  returned by the camera are used, and the ONVIF service port is taken from the
+  discovery address. One-click and bulk add now work for ONVIF devices from any
+  vendor (previously a Dahua-labelled ONVIF camera was stored as a Dahua channel
+  with a guessed RTSP path).
+- Scan, probe and bulk-add feedback now appears inside the scan dialog; before,
+  those messages were rendered behind the modal.
+- **Manual ONVIF add without stream URLs** reads the profiles from the camera
+  using the host, HTTP port and credentials, then stores the real URIs. The
+  brand is filled from the ONVIF device information.
+- **Plain RTSP channels need only the stream URL.** RTSP/generic channels hide
+  the camera-specific fields, the channel name is optional (derived from the
+  host or URL), and a sub-stream URL enables the sub stream automatically.
+  The backend accepts an RTSP channel without host/port/credentials and no
+  longer returns `invalid_name` when the name is blank.
+- Channel creation errors are shown inside the add/edit dialog instead of
+  behind it, and saving is disabled while the request runs.
+
 ## [0.18.0] - 2026-10-22
 
 ### Added

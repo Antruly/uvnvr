@@ -1,4 +1,4 @@
-# UvNVR User Guide (0.18.0)
+# UvNVR User Guide (0.18.1)
 
 This guide walks through a complete installation: first-run setup, adding cameras,
 previewing them, recording, playback, API/RTSP access, alerts and administration.
@@ -104,7 +104,9 @@ network, add the channel manually with the protocol **ONVIF** and the device hos
 1. Click **Add channel**.
 2. Choose a protocol:
    - **RTSP**: paste the full main stream URL, for example
-     `rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101`.
+     `rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101`. This is the
+     only required value; the name can stay empty and is derived from the URL,
+     and a sub-stream URL enables the sub stream automatically.
    - **Hikvision**: fill host, port and credentials; the
      `Streaming/Channels/101|102` paths are generated.
    - **Dahua**: the `cam/realmonitor?channel=1&subtype=0|1` paths are generated.
@@ -129,10 +131,12 @@ ONVIF first, then Hikvision ISAPI or Dahua CGI over HTTP Digest; choose the bran
 in **Protocol** to try that vendor first. It fills the protocol, stream paths and
 name automatically. Set **HTTP / ONVIF port** if the camera's HTTP service is not
 on 80. From **Scan
-ONVIF**, **Add now** creates the channel in one click. Hikvision and Dahua
-manufacturers are recognized and use their generated main/sub stream templates,
-so no RTSP URL is needed; other ONVIF cameras use the profile URI, and manual
-RTSP remains available. Channel rows show the numeric `#id` and a snapshot
+ONVIF**, **Add now** creates the channel in one click as an **ONVIF** channel and
+uses the profile URIs returned by the camera, whatever its manufacturer. A
+manual **ONVIF** add with only host, HTTP port and credentials reads the
+profiles when you save. Select **Hikvision** or **Dahua** explicitly (or run
+Auto detect with that protocol) to use their generated stream templates
+instead. Channel rows show the numeric `#id` and a snapshot
 thumbnail; the camera button refreshes it and double-clicking the thumbnail
 opens a large view. **Reconnect** retries immediately. **Sync** copies selected channel fields and/or recording plans to other
 channels after showing a diff.

@@ -53,8 +53,22 @@
                   Execute="deferred"
                   Return="ignore"
                   Impersonate="no" />
+    <!-- Stop a running service, the 0.17 boot task and a console instance
+         before files are replaced; otherwise the old uvnvr.exe can stay
+         locked and the old ports stay bound. -->
+    <CustomAction Id="StopLegacy.SetProperty"
+                  Property="StopLegacy"
+                  Value="&quot;[System64Folder]cmd.exe&quot; /c sc stop UvNVR &amp; schtasks /End /TN UvNVR &amp; taskkill /F /IM uvnvr.exe /T &amp; ping -n 4 127.0.0.1 &gt;nul" />
+    <CustomAction Id="StopLegacy"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
 
     <InstallExecuteSequence>
+      <Custom Action="StopLegacy.SetProperty" Before="StopLegacy">NOT Installed OR REINSTALL</Custom>
+      <Custom Action="StopLegacy" Before="InstallFiles">NOT Installed OR REINSTALL</Custom>
       <Custom Action="Configure.SetProperty" Before="Configure">NOT Installed OR REINSTALL</Custom>
       <Custom Action="Configure" After="InstallFiles">NOT Installed OR REINSTALL</Custom>
       <Custom Action="Unconfigure.SetProperty" Before="Unconfigure">Installed AND NOT REINSTALL</Custom>

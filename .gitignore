@@ -35,6 +35,7 @@ secret.key
 # Editor / OS
 .idea/
 .vscode/
+.cache/
 .DS_Store
 Thumbs.db
 desktop.ini

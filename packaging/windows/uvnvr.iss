@@ -1,9 +1,9 @@
 ; UvNVR Windows installer (Inno Setup 6.5+)
 ; Build:
-;   ISCC.exe /DMyAppVersion=0.18.0 /DMyArch=x64 /DSourceDir=<stage> packaging\windows\uvnvr.iss
+;   ISCC.exe /DMyAppVersion=0.18.1 /DMyArch=x64 /DSourceDir=<stage> packaging\windows\uvnvr.iss
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.18.0"
+  #define MyAppVersion "0.18.1"
 #endif
 #ifndef MyArch
   #define MyArch "x64"
@@ -59,10 +59,12 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 [CustomMessages]
 english.PortsTitle=Service ports
 english.PortsDescription=Choose the ports UvNVR listens on.
-english.PortsHint=The web UI uses the HTTP port and RTSP clients use the RTSP port. The values are written to the startup configuration file. An existing file is preserved.
+english.PortsHint=The web UI uses the HTTP port and RTSP clients use the RTSP port. The values are written to the startup configuration file; an existing file keeps its other settings.
 english.HttpPort=HTTP / web port
 english.RtspPort=RTSP port
-english.PortsExisting=An existing configuration file will be preserved. Edit it to change ports after installation.
+english.PortsExisting=An existing configuration file will be kept, but its HTTP and RTSP ports are updated to the values on this page. Other settings are preserved.
+english.PortUpdateFailed=The existing configuration file could not be updated automatically. Edit %ProgramData%\UvNVR\uvnvr.json and restart the UvNVR service to change the ports.
+english.ServiceStartFailed=The UvNVR service could not be started. Check %ProgramData%\UvNVR\logs\service.log and the Windows Event Log, then start the service from services.msc.
 english.PortInvalid=Enter a port between 1 and 65535 for both HTTP and RTSP.
 english.PortConflict=The HTTP and RTSP ports must differ.
 english.LaunchWeb=Open the UvNVR web UI
@@ -72,10 +74,12 @@ english.StartupGroup=Startup
 
 chinesesimplified.PortsTitle=服务端口
 chinesesimplified.PortsDescription=选择 UvNVR 监听的端口。
-chinesesimplified.PortsHint=Web 界面使用 HTTP 端口，RTSP 客户端使用 RTSP 端口。端口会写入启动配置文件；已有文件不会被覆盖。
+chinesesimplified.PortsHint=Web 界面使用 HTTP 端口，RTSP 客户端使用 RTSP 端口。端口会写入启动配置文件；已有文件保留其他设置。
 chinesesimplified.HttpPort=HTTP / Web 端口
 chinesesimplified.RtspPort=RTSP 端口
-chinesesimplified.PortsExisting=检测到已有配置文件，安装时不会覆盖。安装后可编辑该文件修改端口。
+chinesesimplified.PortsExisting=检测到已有配置文件：保留其他设置，但 HTTP 与 RTSP 端口会更新为本页填写的值。
+chinesesimplified.PortUpdateFailed=已有配置文件无法自动更新。请编辑 %ProgramData%\UvNVR\uvnvr.json，然后重启 UvNVR 服务以修改端口。
+chinesesimplified.ServiceStartFailed=UvNVR 服务启动失败。请查看 %ProgramData%\UvNVR\logs\service.log 与 Windows 事件日志，然后在“服务”中手动启动 UvNVR。
 chinesesimplified.PortInvalid=HTTP 和 RTSP 端口都必须在 1 到 65535 之间。
 chinesesimplified.PortConflict=HTTP 端口与 RTSP 端口不能相同。
 chinesesimplified.LaunchWeb=打开 UvNVR Web 界面
@@ -91,6 +95,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "uvnvr.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "set-ports.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName} Web UI"; Filename: "http://127.0.0.1:{code:GetHttpPort}/"; IconFilename: "{app}\bin\{#MyAppExeName}"
@@ -147,16 +152,22 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  Description: String;
 begin
   HttpPort := '8080';
   RtspPort := '554';
   RegQueryStringValue(HKLM, 'Software\UvNVR', 'HttpPort', HttpPort);
   RegQueryStringValue(HKLM, 'Software\UvNVR', 'RtspPort', RtspPort);
 
+  Description := ExpandConstant('{cm:PortsDescription}');
+  if FileExists(ConfigPath) then
+    Description := Description + #13#10#13#10 + ExpandConstant('{cm:PortsExisting}');
+
   PortsPage := CreateInputQueryPage(
     wpSelectDir,
     ExpandConstant('{cm:PortsTitle}'),
-    ExpandConstant('{cm:PortsDescription}'),
+    Description,
     ExpandConstant('{cm:PortsHint}'));
   PortsPage.Add(ExpandConstant('{cm:HttpPort}'), False);
   PortsPage.Add(ExpandConstant('{cm:RtspPort}'), False);
@@ -196,17 +207,37 @@ begin
   end;
 end;
 
+procedure UpdateConfigPorts(Config: String);
+var
+  Cmd: String;
+  ResultCode: Integer;
+begin
+  // The ports page is authoritative even when an older configuration
+  // exists. The script rewrites only http.port and rtsp.port and keeps a
+  // UTF-8 file without a BOM.
+  Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' +
+         ExpandConstant('{app}\set-ports.ps1') + '" -Path "' + Config +
+         '" -HttpPort ' + HttpPort + ' -RtspPort ' + RtspPort;
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Cmd, '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('config port update returned ' + IntToStr(ResultCode));
+  if ResultCode <> 0 then
+    SuppressibleMsgBox(ExpandConstant('{cm:PortUpdateFailed}'), mbError, MB_OK, IDOK);
+end;
+
 procedure ApplyServiceConfiguration;
 var
   Config, ConfigDir, DataDir, AppDir, Exe, Cmd: String;
+  ConfigExisted: Boolean;
   ResultCode: Integer;
 begin
   ConfigDir := ExpandConstant('{commonappdata}\{#MyAppName}');
   ForceDirectories(ConfigDir);
   Config := ConfigPath;
   AppDir := ExpandConstant('{app}');
+  ConfigExisted := FileExists(Config);
 
-  if not FileExists(Config) then
+  if not ConfigExisted then
   begin
     if CompareText(Copy(AppDir, 1, 2), 'C:') = 0 then
       DataDir := ExpandConstant('{commonappdata}\{#MyAppName}')
@@ -219,7 +250,9 @@ begin
       '  "rtsp": { "port": ' + RtspPort + ' },' + #13#10 +
       '  "dataDir": "' + DataDir + '"' + #13#10 +
       '}' + #13#10, False);
-  end;
+  end
+  else
+    UpdateConfigPorts(Config);
 
   Exe := ExpandConstant('{app}\bin\{#MyAppExeName}');
   if WizardIsTaskSelected('service') then
@@ -244,6 +277,8 @@ begin
     Exec(ExpandConstant('{sys}\sc.exe'), 'start UvNVR', '', SW_HIDE,
          ewWaitUntilTerminated, ResultCode);
     Log('sc start returned ' + IntToStr(ResultCode));
+    if ResultCode <> 0 then
+      SuppressibleMsgBox(ExpandConstant('{cm:ServiceStartFailed}'), mbError, MB_OK, IDOK);
   end
   else
   begin
@@ -285,6 +320,17 @@ begin
          SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Log('service stop wait finished');
   end;
+  // 0.17 used a boot scheduled task. Remove it and any console instance so
+  // the old process cannot keep the previous ports bound after an upgrade.
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/End /TN UvNVR', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN UvNVR /F', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM uvnvr.exe', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Log('legacy process cleanup returned ' + IntToStr(ResultCode));
+  Exec(ExpandConstant('{sys}\cmd.exe'), '/c ping -n 4 127.0.0.1 >nul', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -306,6 +352,12 @@ begin
     if ResultCode = 0 then
       Exec(ExpandConstant('{sys}\cmd.exe'), '/c ping -n 7 127.0.0.1 >nul', '',
            SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\schtasks.exe'),
+         '/End /TN UvNVR', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'),
+         '/F /IM uvnvr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\cmd.exe'), '/c ping -n 4 127.0.0.1 >nul', '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\sc.exe'),
          'delete UvNVR', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\schtasks.exe'),

@@ -25,7 +25,9 @@ if ($Uninstall) {
     }
     Start-Sleep -Milliseconds 500
     & sc.exe delete UvNVR | Out-Null
+    Stop-ScheduledTask -TaskName 'UvNVR' -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName 'UvNVR' -Confirm:$false -ErrorAction SilentlyContinue
+    Stop-Process -Name 'uvnvr' -Force -ErrorAction SilentlyContinue
     Remove-NetFirewallRule -DisplayName 'UvNVR' -ErrorAction SilentlyContinue
     Remove-Item $desktopUrl -Force -ErrorAction SilentlyContinue
     Remove-Item $startUrl -Force -ErrorAction SilentlyContinue
@@ -35,10 +37,31 @@ if ($Uninstall) {
 
 New-Item -ItemType Directory -Force $dataRoot | Out-Null
 if (Test-Path $configPath) {
-    # Preserve an existing configuration on upgrade, including its ports.
+    # On upgrade, apply only properties that were given a non-default value;
+    # otherwise keep the ports already in the file. Every other key is
+    # preserved, including TLS and storage settings.
     try {
         $existing = Get-Content $configPath -Raw | ConvertFrom-Json
-        if ($existing.http.port) { $HttpPort = [int]$existing.http.port }
+        if ($HttpPort -eq 8080 -and $existing.http.port) {
+            $HttpPort = [int]$existing.http.port
+        }
+        if ($RtspPort -eq 554 -and $existing.rtsp.port) {
+            $RtspPort = [int]$existing.rtsp.port
+        }
+        if ($null -eq $existing.http) {
+            $existing | Add-Member -NotePropertyName http -NotePropertyValue ([pscustomobject]@{}) -Force
+        }
+        if ($null -eq $existing.rtsp) {
+            $existing | Add-Member -NotePropertyName rtsp -NotePropertyValue ([pscustomobject]@{}) -Force
+        }
+        $existing.http | Add-Member -NotePropertyName port -NotePropertyValue $HttpPort -Force
+        $existing.rtsp | Add-Member -NotePropertyName port -NotePropertyValue $RtspPort -Force
+        $text = $existing | ConvertTo-Json -Depth 20
+        [System.IO.File]::WriteAllText(
+            $configPath,
+            $text + "`r`n",
+            (New-Object System.Text.UTF8Encoding($false))
+        )
     } catch {
         # A malformed file is left untouched; the operator can fix it.
     }
@@ -65,7 +88,10 @@ New-Item -ItemType Directory -Force $startDir | Out-Null
 
 # The MSI is a machine-wide installation, so it registers the Windows service
 # (recommended for production). The Inno Setup wizard lets the operator opt out.
+Stop-ScheduledTask -TaskName 'UvNVR' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'UvNVR' -Confirm:$false -ErrorAction SilentlyContinue
+Stop-Process -Name 'uvnvr' -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
 $binPath = '"{0}" --service --config "{1}"' -f $exe, $configPath
 $existing = Get-Service -Name 'UvNVR' -ErrorAction SilentlyContinue
 if ($existing) {

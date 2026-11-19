@@ -6,15 +6,15 @@ Release packages install under `/opt/uvnvr` and bundle the application, static L
 
 ### Linux
 
-- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.18.0_amd64.deb`
-- RHEL/Fedora: `sudo rpm -i uvnvr-0.18.0-1.x86_64.rpm`
+- Debian/Ubuntu: `sudo dpkg -i uvnvr_0.18.1_amd64.deb`
+- RHEL/Fedora: `sudo rpm -i uvnvr-0.18.1-1.x86_64.rpm`
 - Portable: extract the tar.gz and run `/opt/uvnvr/bin/uvnvr`.
 
 The systemd unit runs as `uvnvr`, stores data in `/var/lib/uvnvr`, binds HTTP 8080 and RTSP 554 (with `CAP_NET_BIND_SERVICE`). Open `http://<host>:8080` and complete first-run setup.
 
 ### Windows
 
-**The Inno Setup installer** installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR` (or `<install>\data` when installed on another drive), adds a firewall rule and offers a **Startup** task page. With **Register UvNVR as a Windows service** selected (the default, recommended for production) the installer creates the `UvNVR` service with automatic startup, starts it, and the single desktop shortcut opens the web UI. Without it, the desktop shortcut launches the console process with `--open`, which also opens the browser. The uninstaller stops and deletes the service, removes the firewall rule and preserves the data directory. When the executable is installed under Program Files and no `--data-dir` is given, UvNVR defaults to `%ProgramData%\UvNVR`; a portable copy outside Program Files defaults to the `data` directory next to it (for `bin\uvnvr.exe`, that is `<root>\data`). Run a portable copy with `bin\uvnvr.exe --data-dir <dir>` (extracting under Program Files is not writable for normal users). `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
+**The Inno Setup installer** installs under `Program Files\UvNVR`, data under `%ProgramData%\UvNVR` (or `<install>\data` when installed on another drive), adds a firewall rule and offers a **Startup** task page. With **Register UvNVR as a Windows service** selected (the default, recommended for production) the installer creates the `UvNVR` service with automatic startup, starts it, and the single desktop shortcut opens the web UI. Without it, the desktop shortcut launches the console process with `--open`, which also opens the browser. The uninstaller stops and deletes the service, removes the firewall rule and preserves the data directory. On an upgrade, the ports chosen on the ports page replace `http.port` and `rtsp.port` in an existing `%ProgramData%\UvNVR\uvnvr.json` (all other keys are preserved), and the 0.17 boot task or a running console instance is stopped before files are replaced. When the executable is installed under Program Files and no `--data-dir` is given, UvNVR defaults to `%ProgramData%\UvNVR`; a portable copy outside Program Files defaults to the `data` directory next to it (for `bin\uvnvr.exe`, that is `<root>\data`). Run a portable copy with `bin\uvnvr.exe --data-dir <dir>` (extracting under Program Files is not writable for normal users). `ffmpeg.exe` must remain next to the executable or be named by `UVNVR_FFMPEG`.
 
 The service can also be managed after installation from **Settings → System service**:
 register it (administrator rights required), or unregister it. Both actions

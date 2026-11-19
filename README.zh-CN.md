@@ -12,7 +12,7 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![libuvcpp](https://img.shields.io/badge/libuvcpp-1.8.1-2c3e50)](https://github.com/Antruly/libuvcpp)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org/)
-[![Status](https://img.shields.io/badge/status-0.18.0-22c55e)](#状态)
+[![Status](https://img.shields.io/badge/status-0.18.1-22c55e)](#状态)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -22,18 +22,17 @@ ONVIF 发现 · RTSP 接入 · 计划录像 · 无缝回放 · RTSP 输出 · We
 
 ## 状态
 
-**0.18.0 — 实时回放与细节完善。** 支持 ONVIF 发现/探测、通道管理、RTSP
+**0.18.1 — 安装包与摄像头接入修复。** 支持 ONVIF 发现/探测、通道管理、RTSP
 接入与自动重连、多客户端实时预览、计划录像、MPEG-TS 切片与 SQLite 索引、回放、RTSP
 输出、抓拍、预警、邮件通知、用户/角色、审计与中英文 Web 界面。
 
-0.18.0 支持播放正在写入的 `.ts.part` 切片并在切片轮换后继续下一段；回放时间轴可拖动；
-抓拍缩略图显示加载动画；存储卷默认永久保留；审计字段中文化；修复亮色主题下部分选中
-按钮白字白底的问题。新增系统服务注册/卸载（Windows SCM、Linux systemd，安装包与软件内均可
-设置）、重写的关于/帮助页、Swagger 入口、全新图标与单桌面快捷方式。0.17.0 的 Inno Setup
-安装包、ONVIF 批量添加与界面刷新，0.16.0 的
-io_uring 录像 I/O，0.15.0 的海康/大华编码控制，0.14.0 的 ONVIF 编码控制，0.13.0 的
-RTSP 音频继续保留。WebRTC、云平台与高级分析仍不在范围内。里程碑见
-[`docs/development-plan.md`](docs/development-plan.md)。
+0.18.1 修复升级安装时端口修改不生效的问题；ONVIF 扫描添加不再把设备误判为海康/大华，
+一键添加使用摄像头返回的真实流地址；手动添加 ONVIF 通道时可只填地址由系统读取码流；
+纯 RTSP 通道只填视频流地址即可，名称留空会自动生成，错误提示直接显示在弹窗内。
+0.18.0 的录制中实时回放、可拖动时间轴、系统服务注册/卸载、全新图标与关于/帮助页，
+0.17.0 的 Inno Setup 安装包与界面刷新，0.16.0 的 io_uring 录像 I/O，0.15.0 的海康/大华
+编码控制，0.14.0 的 ONVIF 编码控制，0.13.0 的 RTSP 音频继续保留。WebRTC、云平台与
+高级分析仍不在范围内。里程碑见 [`docs/development-plan.md`](docs/development-plan.md)。
 
 ## UvNVR 要做什么
 
@@ -173,7 +172,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
-## 0.18.0 已知限制
+## 0.18.1 已知限制
 
 - ONVIF 探测目前只支持 `http://` 设备服务。
 - 移动侦测是实验性的低分辨率帧差算法，不是 AI 识别。
@@ -277,6 +276,7 @@ tests/             单元/集成/E2E 测试
 | 0.16.0 | ✅ libuv/io_uring 录像 I/O 与 fsync 批量控制 |
 | 0.17.0 | ✅ Inno Setup Windows 安装包、ONVIF 批量添加、界面/图标/亮色主题刷新 |
 | 0.18.0 | ✅ 录制中切片实时回放、可拖动时间轴、系统服务管理、全新图标、关于/帮助页重写 |
+| 0.18.1 | ✅ 升级端口修改、ONVIF 一键添加、纯 RTSP 地址添加、弹窗错误提示 |
 
 ## 贡献与安全
 

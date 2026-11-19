@@ -4665,14 +4665,16 @@ void App::RegisterChannelRoutes() {
               next();
               return;
             }
-            const std::string name = JsonString(body, "name");
+            std::string name = JsonString(body, "name");
             const std::string protocol = JsonString(body, "protocol", "rtsp");
             const std::string host = JsonString(body, "host");
             const int64_t port = JsonInt(body, "port", 554);
+            const int64_t http_port = JsonInt(body, "httpPort", 80);
             const std::string username = JsonString(body, "username");
             const std::string password = JsonString(body, "password");
             const std::string main_url = JsonString(body, "mainUrl");
             const std::string sub_url = JsonString(body, "subUrl");
+            const bool sub_explicit = body.contains("subEnabled");
             const bool sub_enabled = JsonBool(body, "subEnabled", !sub_url.empty());
             const bool enabled = JsonBool(body, "enabled", true);
             const int64_t group_id = JsonInt(body, "groupId", 0);
@@ -4682,12 +4684,38 @@ void App::RegisterChannelRoutes() {
             if (body.contains("eventsEnabled"))
               media["events"] = JsonBool(body, "eventsEnabled", false);
             if (body.contains("httpPort"))
-              media["httpPort"] = JsonInt(body, "httpPort", 80);
+              media["httpPort"] = http_port;
             const json watermark = body.contains("watermark") && body["watermark"].is_object()
                                        ? body["watermark"]
                                        : json::object();
-            if (name.empty() || name.size() > 64) {
-              SendError(resp, 400, "invalid_name", "channel name is required (max 64 characters)");
+            // RTSP clients only need the stream URL. Derive a display name
+            // from the camera address or the URL instead of rejecting the
+            // request when the name was left blank.
+            if (name.empty()) {
+              std::string inferred = host;
+              if (inferred.empty() && !main_url.empty()) {
+                const size_t scheme = main_url.find("://");
+                size_t start = scheme == std::string::npos ? 0 : scheme + 3;
+                const size_t path = main_url.find('/', start);
+                const size_t at =
+                    main_url.rfind('@', path == std::string::npos ? main_url.size() : path);
+                if (at != std::string::npos && at >= start)
+                  start = at + 1;
+                const size_t end = main_url.find_first_of(":/?#", start);
+                inferred = main_url.substr(
+                    start, (end == std::string::npos ? main_url.size() : end) - start);
+              }
+              name = inferred.empty() ? "Camera" : inferred;
+            }
+            if (name.size() > 64) {
+              SendError(resp, 400, "invalid_name", "channel name must be at most 64 characters");
+              next();
+              return;
+            }
+            if (protocol != "rtsp" && protocol != "generic" && protocol != "onvif" &&
+                protocol != "hikvision" && protocol != "dahua") {
+              SendError(resp, 400, "invalid_protocol",
+                        "protocol must be rtsp, generic, onvif, hikvision or dahua");
               next();
               return;
             }
@@ -4696,18 +4724,77 @@ void App::RegisterChannelRoutes() {
               next();
               return;
             }
-            if (main_url.empty() && protocol != "hikvision" && protocol != "dahua") {
-              SendError(resp, 400, "missing_url", "mainUrl is required for this protocol");
+            if (http_port < 1 || http_port > 65535) {
+              SendError(resp, 400, "invalid_http_port",
+                        "httpPort must be between 1 and 65535");
               next();
               return;
+            }
+            if (main_url.empty()) {
+              if (protocol == "onvif") {
+                if (host.empty()) {
+                  SendError(resp, 400, "missing_url",
+                            "host or mainUrl is required for ONVIF channels");
+                  next();
+                  return;
+                }
+              } else if (protocol == "hikvision" || protocol == "dahua") {
+                if (host.empty()) {
+                  SendError(resp, 400, "missing_host",
+                            "host is required for Hikvision and Dahua channels");
+                  next();
+                  return;
+                }
+              } else {
+                SendError(resp, 400, "missing_url",
+                          "mainUrl is required for RTSP and generic channels");
+                next();
+                return;
+              }
             }
             const UserContext actor = UserFromRequest(req);
             const std::string ip = req.peer_ip();
             const std::string ua = req.header("User-Agent", "");
             auto op = std::make_shared<OpResult>();
             RunWork(
-                [this, name, protocol, host, port, username, password, main_url, sub_url,
-                 sub_enabled, enabled, group_id, brand, media, watermark, actor, ip, ua, op] {
+                [this, name, protocol, host, port, http_port, username, password, main_url,
+                 sub_url, sub_explicit, sub_enabled, enabled, group_id, brand, media, watermark,
+                 actor, ip, ua, op] {
+                  std::string resolved_main = main_url;
+                  std::string resolved_sub = sub_url;
+                  std::string resolved_brand = brand;
+                  bool resolved_sub_enabled = sub_enabled;
+                  if (protocol == "onvif" && resolved_main.empty()) {
+                    // The operator supplied host and credentials but no
+                    // stream URL: read the profiles over ONVIF and use the
+                    // camera's own URIs. This is the same path Auto-detect
+                    // uses, so the resulting channel plays without knowing
+                    // the vendor's RTSP layout.
+                    OnvifInfo info;
+                    std::string probe_error;
+                    const std::string xaddr = "http://" + host + ":" +
+                                              std::to_string(http_port) + "/onvif/device_service";
+                    if (!ProbeOnvif(xaddr, username, password, &info, &probe_error) ||
+                        info.profiles.empty() || info.profiles.front().stream_uri.empty()) {
+                      op->ok = false;
+                      op->status = 502;
+                      op->code = "onvif_probe_failed";
+                      op->message =
+                          "cannot resolve the ONVIF stream: " +
+                          (probe_error.empty() ? "the camera returned no usable profiles"
+                                               : probe_error);
+                      return;
+                    }
+                    resolved_main = info.profiles.front().stream_uri;
+                    if (resolved_sub.empty() && info.profiles.size() > 1)
+                      resolved_sub = info.profiles[1].stream_uri;
+                    if (!sub_explicit && !resolved_sub.empty())
+                      resolved_sub_enabled = true;
+                    if (resolved_brand.empty())
+                      resolved_brand = info.manufacturer;
+                  }
+                  if (resolved_sub_enabled && resolved_sub.empty())
+                    resolved_sub_enabled = false;
                   if (group_id > 0) {
                     uvcpp::uvcpp_db_table group_table;
                     uvcpp::uvcpp_db_params group_params;
@@ -4739,11 +4826,11 @@ void App::RegisterChannelRoutes() {
                   params.add(port);
                   params.add(username);
                   params.add(password_enc);
-                  params.add(main_url);
-                  params.add(sub_url);
-                  params.add(sub_enabled ? 1 : 0);
+                  params.add(resolved_main);
+                  params.add(resolved_sub);
+                  params.add(resolved_sub_enabled ? 1 : 0);
                   params.add(enabled ? 1 : 0);
-                  params.add(brand);
+                  params.add(resolved_brand);
                   params.add(media.dump());
                   params.add(watermark.dump());
                   params.add(NowSeconds());

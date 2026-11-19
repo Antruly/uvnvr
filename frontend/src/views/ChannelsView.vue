@@ -109,6 +109,18 @@ const scan = reactive({
   result: null as OnvifProbeResult | null,
 })
 const detecting = ref(false)
+const saving = ref(false)
+// A plain RTSP URL needs nothing else; ONVIF uses host/HTTP port plus the
+// profile URIs, and Hikvision/Dahua generate the RTSP path from the host.
+const isOnvif = computed(() => modal.protocol === 'onvif')
+const isBrandProtocol = computed(
+  () => modal.protocol === 'hikvision' || modal.protocol === 'dahua',
+)
+const isRtsp = computed(() => modal.protocol === 'rtsp')
+const isGeneric = computed(() => modal.protocol === 'generic')
+// Both plain RTSP and URL-template channels need a URL, but only RTSP can
+// hide every camera field; generic templates may still use {host}/{port}.
+const isUrlProtocol = computed(() => isRtsp.value || isGeneric.value)
 const scanSelection = ref<Set<string>>(new Set())
 const scanStatus = reactive<Record<string, string>>({})
 const scanErrors = reactive<Record<string, string>>({})
@@ -306,29 +318,31 @@ interface DetectResult {
   httpPort: number
 }
 
-function detectedProtocol(manufacturer: string) {
-  const value = manufacturer.toLowerCase()
-  if (value.includes('hikvision'))
-    return 'hikvision'
-  if (value.includes('dahua'))
-    return 'dahua'
-  return 'onvif'
+function onvifHttpPort(xaddr: string) {
+  try {
+    return Number(new URL(xaddr).port) || 80
+  } catch {
+    return 80
+  }
 }
 
-function applyProbeResult(host: string, result: OnvifProbeResult) {
-  const protocol = detectedProtocol(result.device.manufacturer)
+function applyProbeResult(host: string, httpPort: number, result: OnvifProbeResult) {
   const profile = result.profiles[0]
   const subProfile = result.profiles[1]
+  // A device answered ONVIF, so keep the ONVIF transport and use the stream
+  // URIs it returned. The manufacturer still goes into `brand` for vendor
+  // time/encoder fallbacks, but it must not switch the channel to the
+  // Hikvision/Dahua RTSP template.
   Object.assign(modal, {
     groupId: 0,
     name: profile?.name || result.device.model || host,
-    protocol,
+    protocol: 'onvif',
     host,
-    port: protocol === 'onvif' ? 80 : 554,
-    httpPort: 80,
-    mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
-    subUrl: protocol === 'onvif' ? (subProfile?.streamUri ?? '') : '',
-    subEnabled: protocol !== 'onvif' || Boolean(subProfile),
+    port: httpPort,
+    httpPort,
+    mainUrl: profile?.streamUri ?? '',
+    subUrl: subProfile?.streamUri ?? '',
+    subEnabled: Boolean(subProfile),
     enabled: true,
     brand: result.device.manufacturer,
     eventsEnabled: true,
@@ -390,20 +404,20 @@ async function addDevice(device: OnvifDevice): Promise<boolean> {
         password: scan.password,
       }),
     })
-    const protocol = detectedProtocol(result.device.manufacturer)
     const profile = result.profiles[0]
     const subProfile = result.profiles[1]
+    const httpPort = onvifHttpPort(device.xaddr)
     const payload: Record<string, unknown> = {
       name: profile?.name || result.device.model || device.ip,
-      protocol,
+      protocol: 'onvif',
       host: device.ip,
-      port: protocol === 'onvif' ? 80 : 554,
-      httpPort: 80,
+      port: httpPort,
+      httpPort,
       username: scan.username,
       password: scan.password,
-      mainUrl: protocol === 'onvif' ? (profile?.streamUri ?? '') : '',
-      subUrl: protocol === 'onvif' ? (subProfile?.streamUri ?? '') : '',
-      subEnabled: protocol !== 'onvif' || Boolean(subProfile),
+      mainUrl: profile?.streamUri ?? '',
+      subUrl: subProfile?.streamUri ?? '',
+      subEnabled: Boolean(subProfile),
       enabled: true,
       brand: result.device.manufacturer,
       eventsEnabled: true,
@@ -570,6 +584,7 @@ async function load() {
 }
 
 function openCreate() {
+  error.value = ''
   Object.assign(modal, {
     open: true,
     mode: 'create',
@@ -594,6 +609,7 @@ function openCreate() {
 }
 
 function openEdit(channel: Channel) {
+  error.value = ''
   Object.assign(modal, {
     open: true,
     mode: 'edit',
@@ -617,23 +633,50 @@ function openEdit(channel: Channel) {
   })
 }
 
+function defaultChannelName() {
+  if (modal.host.trim()) return modal.host.trim()
+  if (modal.mainUrl) {
+    try {
+      const host = new URL(modal.mainUrl).hostname
+      if (host) return host
+    } catch {
+      /* The backend also derives a name when the URL is unusual. */
+    }
+  }
+  return t('channels.defaultName')
+}
+
 async function save() {
   error.value = ''
+  if (isUrlProtocol.value && !modal.mainUrl.trim()) {
+    error.value = t('channels.rtspUrlRequired')
+    return
+  }
+  if (isOnvif.value && !modal.mainUrl.trim() && !modal.host.trim()) {
+    error.value = t('channels.onvifNeedHost')
+    return
+  }
+  if (isBrandProtocol.value && !modal.host.trim()) {
+    error.value = t('channels.hostRequired')
+    return
+  }
+  if (!modal.name.trim()) modal.name = defaultChannelName()
+  saving.value = true
   try {
-    if (!modal.name.trim())
-      modal.name = modal.host.trim() || 'Camera'
     const payload: Record<string, unknown> = {
-      name: modal.name,
+      name: modal.name.trim(),
       protocol: modal.protocol,
-      host: modal.host,
-      port: Number(modal.port) || 554,
+      host: modal.host.trim(),
+      // ONVIF selects profiles over the HTTP service; avoid showing its
+      // HTTP port as if it were the RTSP port.
+      port: isOnvif.value ? Number(modal.httpPort) || 80 : Number(modal.port) || 554,
       httpPort: Number(modal.httpPort) || 80,
       username: modal.username,
-      mainUrl: modal.mainUrl,
-      subUrl: modal.subUrl,
-      subEnabled: modal.subEnabled,
+      mainUrl: modal.mainUrl.trim(),
+      subUrl: modal.subUrl.trim(),
+      subEnabled: isRtsp.value ? Boolean(modal.subUrl.trim()) : modal.subEnabled,
       enabled: modal.enabled,
-      eventsEnabled: modal.eventsEnabled,
+      eventsEnabled: isOnvif.value ? modal.eventsEnabled : false,
       brand: modal.brand,
       groupId: modal.groupId,
       watermark: {
@@ -656,6 +699,8 @@ async function save() {
     await load()
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
+  } finally {
+    saving.value = false
   }
 }
 
@@ -681,6 +726,7 @@ async function reconnect(channel: Channel) {
 }
 
 function openScan() {
+  error.value = ''
   Object.assign(scan, {
     open: true,
     scanning: false,
@@ -713,10 +759,10 @@ async function discover() {
     scanError.value = ''
     scanNotice.value = ''
     if (result.devices.length === 0) {
-      error.value = t('channels.noDevices')
+      scanError.value = t('channels.noDevices')
     }
   } catch (caught) {
-    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+    scanError.value = caught instanceof ApiError ? caught.message : t('common.error')
   } finally {
     scan.scanning = false
   }
@@ -725,7 +771,7 @@ async function discover() {
 async function probe(device: OnvifDevice) {
   scan.probing = device.xaddr
   scan.result = null
-  error.value = ''
+  scanError.value = ''
   try {
     scan.result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
       method: 'POST',
@@ -744,11 +790,11 @@ async function probe(device: OnvifDevice) {
         watermarkText: '',
         watermarkPosition: 'bottom-right',
       })
-      applyProbeResult(device.ip, scan.result)
+      applyProbeResult(device.ip, onvifHttpPort(device.xaddr), scan.result)
       scan.open = false
     }
   } catch (caught) {
-    error.value = caught instanceof ApiError ? caught.message : t('common.error')
+    scanError.value = caught instanceof ApiError ? caught.message : t('common.error')
   } finally {
     scan.probing = ''
   }
@@ -982,7 +1028,7 @@ onMounted(load)
         <div class="modal-columns">
           <label class="field">
             <span>{{ t('channels.name') }}</span>
-            <input v-model="modal.name" class="input" required maxlength="64" />
+            <input v-model="modal.name" class="input" maxlength="64" :placeholder="t('channels.defaultName')" />
           </label>
           <label class="field">
             <span>{{ t('channels.protocol') }}</span>
@@ -1001,7 +1047,7 @@ onMounted(load)
               </option>
             </select>
           </label>
-          <label class="field">
+          <label v-if="isOnvif || isBrandProtocol" class="field">
             <span>{{ t('channels.autoDetect') }}</span>
             <button
               type="button"
@@ -1013,23 +1059,23 @@ onMounted(load)
               {{ detecting ? t('common.loading') : t('channels.autoDetectAction') }}
             </button>
           </label>
-          <label class="field">
+          <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.host') }}</span>
             <input v-model="modal.host" class="input" placeholder="192.168.1.64" />
           </label>
-          <label class="field">
+          <label v-if="isBrandProtocol || isGeneric" class="field">
             <span>{{ t('channels.port') }}</span>
             <input v-model.number="modal.port" class="input" type="number" min="1" max="65535" />
           </label>
-          <label class="field">
-            <span>{{ t('channels.httpPort') }}</span>
+          <label v-if="isOnvif || isBrandProtocol" class="field">
+            <span>{{ isOnvif ? t('channels.onvifPort') : t('channels.httpPort') }}</span>
             <input v-model.number="modal.httpPort" class="input" type="number" min="1" max="65535" />
           </label>
-          <label class="field">
+          <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.username') }}</span>
             <input v-model="modal.username" class="input" autocomplete="off" />
           </label>
-          <label class="field">
+          <label v-if="!isRtsp" class="field">
             <span>{{ t('channels.password') }}</span>
             <input
               v-model="modal.password"
@@ -1041,17 +1087,19 @@ onMounted(load)
           </label>
         </div>
 
-        <label class="field">
+        <p v-if="isRtsp" class="small-note">{{ t('channels.rtspHint') }}</p>
+        <label v-if="!isBrandProtocol" class="field">
           <span>{{ t('channels.mainUrl') }}</span>
           <input v-model="modal.mainUrl" class="input" placeholder="rtsp://user:pass@host:554/..." />
         </label>
-        <label class="field">
+        <label v-if="!isBrandProtocol" class="field">
           <span>{{ t('channels.subUrl') }}</span>
           <input v-model="modal.subUrl" class="input" placeholder="rtsp://..." />
         </label>
+        <p v-if="isOnvif" class="small-note">{{ t('channels.onvifUrlHint') }}</p>
 
         <div class="modal-columns">
-          <label class="check-row">
+          <label v-if="!isRtsp" class="check-row">
             <input v-model="modal.subEnabled" type="checkbox" />
             <span>{{ t('channels.subEnabled') }}</span>
           </label>
@@ -1059,7 +1107,7 @@ onMounted(load)
             <input v-model="modal.enabled" type="checkbox" />
             <span>{{ t('common.enabled') }}</span>
           </label>
-          <label class="check-row">
+          <label v-if="isOnvif" class="check-row">
             <input v-model="modal.eventsEnabled" type="checkbox" />
             <span>{{ t('channels.eventsEnabled') }}</span>
           </label>
@@ -1133,16 +1181,17 @@ onMounted(load)
           <p v-if="encoderError" class="form-error">{{ encoderError }}</p>
         </div>
 
-        <p class="small-note">{{ t('channels.hikvisionHint') }}</p>
-        <p class="small-note">{{ t('channels.eventsHint') }}</p>
+        <p v-if="isBrandProtocol" class="small-note">{{ t('channels.hikvisionHint') }}</p>
+        <p v-if="isOnvif" class="small-note">{{ t('channels.eventsHint') }}</p>
+        <p v-if="error" class="form-error">{{ error }}</p>
 
         <div class="modal-actions">
           <button type="button" class="button" @click="modal.open = false">
             {{ t('common.cancel') }}
           </button>
-          <button type="submit" class="button primary">
+          <button type="submit" class="button primary" :disabled="saving">
             <AppIcon name="save" :size="16" />
-            {{ t('common.save') }}
+            {{ saving ? t('common.loading') : t('common.save') }}
           </button>
         </div>
       </form>
@@ -1157,6 +1206,8 @@ onMounted(load)
           </button>
         </div>
         <p class="small-note">{{ t('channels.scanHint') }}</p>
+        <p v-if="scanNotice" class="notice">{{ scanNotice }}</p>
+        <p v-if="scanError" class="form-error">{{ scanError }}</p>
         <div class="modal-columns">
           <label class="field">
             <span>{{ t('channels.username') }}</span>

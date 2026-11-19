@@ -249,6 +249,15 @@ const messages = {
       mainUrl: 'Main stream URL',
       subUrl: 'Sub stream URL',
       subEnabled: 'Enable sub stream',
+      defaultName: 'Camera',
+      rtspHint:
+        'For a plain RTSP stream, enter the full URL. Credentials can be embedded (rtsp://user:pass@host:554/path); no other camera settings are required.',
+      rtspUrlRequired: 'Enter the RTSP stream URL.',
+      onvifNeedHost: 'Enter the camera address or run Auto detect to read the ONVIF stream.',
+      hostRequired: 'Enter the camera address.',
+      onvifPort: 'ONVIF / HTTP port',
+      onvifUrlHint:
+        'Leave the stream URLs empty to read them from the camera when saving, or run Detect camera first.',
       eventsEnabled: 'Use camera ONVIF events',
       eventsHint:
         'ONVIF cameras can push motion, person, tamper and line-crossing events; they appear in Alerts (60-second cooldown per type).',
@@ -917,6 +926,15 @@ const messages = {
       mainUrl: '主码流地址',
       subUrl: '子码流地址',
       subEnabled: '启用子码流',
+      defaultName: '摄像头',
+      rtspHint:
+        '纯 RTSP 视频流只需填写完整地址；账号密码可以直接写在地址里（rtsp://用户名:密码@主机:554/路径），无需其他摄像头参数。',
+      rtspUrlRequired: '请填写 RTSP 视频流地址。',
+      onvifNeedHost: '请填写摄像头地址，或先点击“识别摄像头”读取 ONVIF 流地址。',
+      hostRequired: '请填写摄像头地址。',
+      onvifPort: 'ONVIF / HTTP 端口',
+      onvifUrlHint:
+        '流地址可以留空，保存时会向摄像头读取；也可以先点击“识别摄像头”自动填写。',
       eventsEnabled: '使用摄像头 ONVIF 事件',
       eventsHint:
         'ONVIF 摄像头可推送移动、人形、遮挡与越线事件，并进入预警中心（同类事件 60 秒冷却）。',
