@@ -1,0 +1,103 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 (MinGW)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(cat VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-libuv
+            mingw-w64-x86_64-zlib
+            unzip
+            zip
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        shell: pwsh
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Fetch dependencies
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/uvcpp.zip" \
+            "https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip"
+          unzip -q "$RUNNER_TEMP/uvcpp.zip" -d "$RUNNER_TEMP/uvcpp"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/ffmpeg.zip" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-8.1.zip"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          unzip -q "$RUNNER_TEMP/ffmpeg.zip" -d "$RUNNER_TEMP/ffmpeg"
+
+      - name: Build backend
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64"
+          cmake --build build --parallel
+
+      - name: Stage portable tree
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ROOT="$(pwd)"
+          OUT="$ROOT/dist-packages/uvnvr-${VERSION}-windows-x64"
+          mkdir -p "$OUT/bin" "$OUT/share/uvnvr/frontend/dist"
+          cp build/uvnvr.exe "$OUT/bin/"
+          FFMPEG_EXE="$(find "$RUNNER_TEMP/ffmpeg" -type f -name ffmpeg.exe | head -1)"
+          if "$FFMPEG_EXE" -buildconf 2>/dev/null | grep -q -- '--enable-gpl'; then
+            echo "refusing to package a GPL FFmpeg build" >&2
+            exit 1
+          fi
+          cp "$FFMPEG_EXE" "$OUT/bin/ffmpeg.exe"
+          cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/dist/"
+          cp packaging/windows/uvnvr.portable.json "$OUT/uvnvr.json"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$OUT/"
+          cp /mingw64/bin/libuvcpp.dll "$OUT/bin/" 2>/dev/null || true
+          for dll in libuv.dll libssl-3-x64.dll libcrypto-3-x64.dll libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll zlib1.dll; do
+            if [ -f "/mingw64/bin/$dll" ]; then cp "/mingw64/bin/$dll" "$OUT/bin/"; fi
+          done
+          if [ -f "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64/bin/libuvcpp.dll" ]; then
+            cp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64/bin/libuvcpp.dll" "$OUT/bin/"
+          fi
+          # Copy every MinGW runtime DLL the executable actually links.
+          ldd build/uvnvr.exe | awk '/=> \/mingw64/ {print $3}' | while read -r dll; do
+            [ -n "$dll" ] && cp -L "$dll" "$OUT/bin/"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-windows-x64
+          path: dist-packages/uvnvr-*-windows-x64/**
+          if-no-files-found: error

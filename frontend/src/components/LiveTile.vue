@@ -92,12 +92,17 @@ async function start() {
       { type: 'mse', isLive: true, url },
       {
         enableWorker: true,
+        // Low latency for live, but correct drift by nudging playbackRate
+        // instead of seeking currentTime: the latency chaser performs a hard
+        // seek whenever the buffer runs ahead, which shows up as periodic
+        // rebuffering/jitter on a long-running wall display.
         enableStashBuffer: false,
-        stashInitialSize: 128,
         lazyLoad: false,
-        liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 2.5,
-        liveBufferLatencyMinRemain: 0.5,
+        liveBufferLatencyChasing: false,
+        liveSync: true,
+        liveSyncMaxLatency: 2,
+        liveSyncTargetLatency: 1,
+        liveSyncPlaybackRate: 1.2,
       },
     )
     let failed = false
@@ -146,7 +151,11 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => [props.channel.id, effectiveStream.value],
+  // Watch a scalar key, not an array: a getter returning a fresh array is
+  // considered changed on every dependency trigger, so the 10 s preview poll
+  // (which replaces the channel object) would tear down and restart the
+  // player even when id/stream did not change.
+  () => `${props.channel.id}:${effectiveStream.value}`,
   () => {
     destroyed = false
     void start()

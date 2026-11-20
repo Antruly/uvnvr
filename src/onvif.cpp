@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <string_view>
+#include <thread>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -578,13 +580,11 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
   int reuse = 1;
   setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
              sizeof(reuse));
-#ifdef SO_RCVTIMEO
-  struct timeval tv;
-  tv.tv_sec = timeout_ms / 1000;
-  tv.tv_usec = (timeout_ms % 1000) * 1000;
-  setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#endif
 
+  // TODO: on a multi-homed host, send one Probe per local IPv4 interface and
+  // set IP_MULTICAST_IF for each. Discovery currently relies on the OS's
+  // default multicast route, which is why cameras on a second NIC/subnet can
+  // be missed.
   sockaddr_in target{};
   target.sin_family = AF_INET;
   target.sin_port = htons(3702);
@@ -602,17 +602,51 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
       "<w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action></e:Header>"
       "<e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body>"
       "</e:Envelope>";
-  if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
-               reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0) {
-    CloseSocket(socket);
-    if (error)
-      *error = "cannot send the ONVIF discovery probe";
-    return false;
-  }
-
   devices->clear();
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(1, timeout_ms));
+  auto next_probe = std::chrono::steady_clock::now();
+  int probes_sent = 0;
   std::array<char, 8192> buffer{};
-  while (true) {
+
+  // Keep collecting for the whole window instead of returning after the first
+  // recvfrom timeout, and retry the Probe twice so a lost multicast datagram
+  // does not hide a device.
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto now = std::chrono::steady_clock::now();
+    if (probes_sent < 3 && now >= next_probe) {
+      if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0) {
+        CloseSocket(socket);
+        if (error)
+          *error = "cannot send the ONVIF discovery probe";
+        return false;
+      }
+      ++probes_sent;
+      next_probe = now + std::chrono::milliseconds(200);
+    }
+
+    const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  deadline - std::chrono::steady_clock::now())
+                                  .count();
+    if (remaining_ms <= 0)
+      break;
+    const int slice_ms = static_cast<int>(std::min<int64_t>(remaining_ms, 50));
+#ifdef SO_RCVTIMEO
+#ifdef _WIN32
+    // Winsock's SO_RCVTIMEO expects a DWORD in milliseconds. Passing a
+    // struct timeval made a 3000 ms window expire after about 3 ms.
+    DWORD recv_timeout = static_cast<DWORD>(slice_ms);
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout),
+               sizeof(recv_timeout));
+#else
+    struct timeval tv {};
+    tv.tv_sec = slice_ms / 1000;
+    tv.tv_usec = (slice_ms % 1000) * 1000;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
+#endif
+
     sockaddr_in from{};
 #ifdef _WIN32
     int from_len = sizeof(from);
@@ -621,8 +655,25 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
 #endif
     const int n = static_cast<int>(::recvfrom(socket, buffer.data(), buffer.size(), 0,
                                               reinterpret_cast<sockaddr*>(&from), &from_len));
-    if (n <= 0)
+    if (n == 0)
+      continue;
+    if (n < 0) {
+#ifdef _WIN32
+      const int code = WSAGetLastError();
+      if (code == WSAETIMEDOUT || code == WSAEWOULDBLOCK || code == WSAEINTR)
+        continue;
+      if (code == WSAECONNRESET) {
+        // ICMP port-unreachable can surface as a reset on a UDP socket. Keep
+        // the socket alive and continue collecting replies from other devices.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        continue;
+      }
+#else
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        continue;
+#endif
       break;
+    }
     const std::string response(buffer.data(), static_cast<size_t>(n));
     std::string xaddrs = ExtractTag(response, "XAddrs");
     if (xaddrs.empty())
@@ -644,7 +695,7 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
           device.ip = device.ip.substr(0, colon);
         const bool duplicate =
             std::any_of(devices->begin(), devices->end(),
-                        [&](const OnvifDevice& entry) { return entry.xaddr == device.xaddr; });
+                        [&](const OnvifDevice& entry) { return entry.ip == device.ip; });
         if (!duplicate && !device.ip.empty())
           devices->push_back(device);
       }

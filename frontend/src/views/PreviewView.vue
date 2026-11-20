@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
@@ -362,6 +362,9 @@ function reloadAll() {
   }, 50)
 }
 
+let channelTimer: number | undefined
+let channelsFingerprint = ''
+
 async function loadChannels() {
   error.value = ''
   try {
@@ -369,7 +372,14 @@ async function loadChannels() {
       api<LiveChannel[]>('/api/v1/preview/channels'),
       api<ChannelGroup[]>('/api/v1/channel-groups').catch(() => []),
     ])
-    channels.value = channelRows
+    // The poll usually returns byte-identical metadata. Replacing the whole
+    // array hands every tile a fresh channel object even when nothing changed,
+    // so only publish a genuinely new snapshot.
+    const fingerprint = JSON.stringify(channelRows)
+    if (fingerprint !== channelsFingerprint) {
+      channelsFingerprint = fingerprint
+      channels.value = channelRows
+    }
     groups.value = groupRows
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
@@ -387,7 +397,11 @@ watch(
 onMounted(() => {
   void loadLayouts()
   void loadChannels()
-  window.setInterval(loadChannels, 10_000)
+  channelTimer = window.setInterval(loadChannels, 10_000)
+})
+
+onBeforeUnmount(() => {
+  if (channelTimer !== undefined) window.clearInterval(channelTimer)
 })
 </script>
 

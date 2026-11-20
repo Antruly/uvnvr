@@ -410,6 +410,9 @@ struct MediaService::Impl {
 
     mutable std::mutex mutex;
     TSDemux demux;
+    // Raw ffmpeg bytes that did not make up a complete TS packet yet. Only the
+    // ffmpeg ingest thread touches this; it is bounded by 187 bytes.
+    std::vector<uint8_t> align_carry;
     std::unordered_map<uint64_t, std::shared_ptr<Subscriber>> subscribers;
     std::unordered_map<uint64_t, std::shared_ptr<RawSubscriber>> raw_subscribers;
     uint64_t next_subscriber_id = 1;
@@ -475,7 +478,7 @@ struct MediaService::Impl {
       }
     }
 
-    void Ingest(const uint8_t* data, size_t len) {
+    void PublishAligned(const uint8_t* data, size_t len) {
       std::vector<size_t> keyframes;
       uint64_t chunk_start = 0;
       std::vector<std::shared_ptr<Subscriber>> subscriber_list;
@@ -522,6 +525,36 @@ struct MediaService::Impl {
       }
       (void)chunk_start;
       (void)initial;
+    }
+
+    void Ingest(const uint8_t* data, size_t len) {
+      if (len == 0)
+        return;
+      // ffmpeg's pipe reads may end in the middle of a TS packet. Only publish
+      // complete 188-byte packets and carry the tail into the next read, so
+      // every WebSocket write (and every keyframe-boundary skip below) is an
+      // exact number of packets. This keeps the client's 188-byte grid stable.
+      if (align_carry.empty()) {
+        const size_t aligned = (len / 188) * 188;
+        if (aligned == 0) {
+          align_carry.assign(data, data + len);
+          return;
+        }
+        if (aligned != len)
+          align_carry.assign(data + aligned, data + len);
+        PublishAligned(data, aligned);
+        return;
+      }
+
+      align_carry.insert(align_carry.end(), data, data + len);
+      const size_t aligned = (align_carry.size() / 188) * 188;
+      if (aligned == 0)
+        return;
+      std::vector<uint8_t> packets(align_carry.begin(),
+                                   align_carry.begin() + static_cast<std::ptrdiff_t>(aligned));
+      align_carry.erase(align_carry.begin(),
+                        align_carry.begin() + static_cast<std::ptrdiff_t>(aligned));
+      PublishAligned(packets.data(), packets.size());
     }
 
     bool AddSubscriber(uvcpp::uvcpp_ws_connection* connection, std::string* error) {
@@ -666,6 +699,9 @@ struct MediaService::Impl {
 void MediaService::Impl::Stream::Run() {
   static const int kDelays[] = {1000, 2000, 5000, 10000, 30000};
   while (!stopping.load()) {
+    // A new ffmpeg process starts a fresh TS stream; never prepend a partial
+    // packet left over from the previous connection.
+    align_carry.clear();
     std::string error;
     int out_fd = -1;
     int err_fd = -1;

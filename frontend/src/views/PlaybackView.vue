@@ -59,22 +59,34 @@ const windowMs = ref(24 * 60 * 60 * 1000)
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
 let reverseTimer: number | undefined
 let recordingsTimer: number | undefined
+let loadSeq = 0
 
 const dayStart = computed(() => new Date(`${day.value}T00:00:00`).getTime())
 const dayEnd = computed(() => dayStart.value + 24 * 60 * 60 * 1000)
 
 const zoomLevels = [5, 10, 30, 60, 180, 360, 720, 1440].map((minutes) => minutes * 60 * 1000)
 
-const windowStart = computed(() => {
+const frozenWindow = ref<{ start: number; end: number } | null>(null)
+
+const naturalWindowStart = computed(() => {
   const span = Math.min(windowMs.value, dayEnd.value - dayStart.value)
   if (span >= dayEnd.value - dayStart.value) return dayStart.value
   const center = positionMs.value > 0 ? positionMs.value : dayStart.value + span / 2
   return Math.max(dayStart.value, Math.min(dayEnd.value - span, center - span / 2))
 })
 
-const windowEnd = computed(() =>
-  Math.min(dayEnd.value, windowStart.value + Math.min(windowMs.value, dayEnd.value - dayStart.value)),
+const naturalWindowEnd = computed(() =>
+  Math.min(
+    dayEnd.value,
+    naturalWindowStart.value + Math.min(windowMs.value, dayEnd.value - dayStart.value),
+  ),
 )
+
+// While dragging, pin the visible window. Otherwise setting positionMs moves
+// the auto-centered window under the pointer on every move, which changes the
+// pixel→time mapping mid-drag and makes the cursor drift / land wrong.
+const windowStart = computed(() => frozenWindow.value?.start ?? naturalWindowStart.value)
+const windowEnd = computed(() => frozenWindow.value?.end ?? naturalWindowEnd.value)
 
 const skipStepMs = computed(() =>
   Math.max(1000, Math.round((windowEnd.value - windowStart.value) / 24)),
@@ -193,7 +205,9 @@ function onEnded() {
 }
 
 function onPosition(value: number) {
-  positionMs.value = value
+  // While the pointer is on the timeline the drag owns the cursor; the
+  // player's 500 ms clock tick must not pull it back to the play position.
+  if (!timelineDragging.value) positionMs.value = value
 }
 
 function toggleReverse() {
@@ -205,7 +219,7 @@ function toggleReverse() {
     }
     if (reverseTimer !== undefined) window.clearInterval(reverseTimer)
     reverseTimer = window.setInterval(() => {
-      if (!reverse.value || !selected.value) return
+      if (!reverse.value || !selected.value || timelineDragging.value) return
       const current = playerRef.value?.positionMs() ?? positionMs.value
       const step = Math.max(1000, Math.round(skipStepMs.value * speed.value * 1.5))
       const target = current - step
@@ -241,6 +255,7 @@ function startTimelineDrag(event: PointerEvent) {
   const track = event.currentTarget as HTMLElement
   track.setPointerCapture(event.pointerId)
   timelineDragging.value = true
+  frozenWindow.value = { start: windowStart.value, end: windowEnd.value }
   const result = timelineHit(event)
   if (result) {
     selected.value = result.hit
@@ -258,16 +273,48 @@ function moveTimelineDrag(event: PointerEvent) {
 
 function endTimelineDrag(event: PointerEvent) {
   if (!timelineDragging.value) return
-  timelineDragging.value = false
   const result = timelineHit(event)
+  timelineDragging.value = false
+  frozenWindow.value = null
   if (!result) return
   selected.value = result.hit
   onSeek(result.target)
 }
 
+function matchRecording(rows: Recording[], previous: Recording) {
+  if (previous.active) {
+    const active = rows.find((row) => row.active)
+    if (active) return active
+  }
+  return (
+    rows.find((row) => row.id === previous.id) ??
+    rows.find((row) => row.startMs === previous.startMs) ??
+    null
+  )
+}
+
 async function loadRecordings(preserve = false) {
   if (channelId.value <= 0) return
-  loading.value = true
+  // A background refresh must never fight a pointer drag on the timeline, and
+  // there is no reason to poll while the tab is hidden.
+  if (preserve && (timelineDragging.value || document.hidden)) return
+  const seq = ++loadSeq
+  const previous = selected.value
+  const previousStart = playStartMs.value
+  const previousPosition = positionMs.value
+  // Refreshing an existing selection is a background operation: keep the
+  // player and timeline mounted instead of swapping them for the spinner.
+  const background = preserve && previous !== null
+  if (!background) {
+    loading.value = true
+    if (!preserve) {
+      // Changing channel/stream/day starts a new query; drop the old segment.
+      selected.value = null
+      playStartMs.value = 0
+      positionMs.value = 0
+      frozenWindow.value = null
+    }
+  }
   error.value = ''
   try {
     const params = new URLSearchParams({
@@ -276,21 +323,25 @@ async function loadRecordings(preserve = false) {
       from: String(dayStart.value),
       to: String(dayEnd.value),
     })
-    const previous = selected.value
-    recordings.value = await api<Recording[]>(`/api/v1/recordings?${params.toString()}`)
-    const previousMatch =
-      preserve && previous
-        ? (previous.active
-            ? recordings.value.find((row) => row.active)
-            : recordings.value.find((row) => row.id === previous.id)) ??
-          recordings.value.find((row) => row.startMs === previous.startMs)
-        : undefined
-    const chosen = previousMatch ?? recordings.value[0]
+    const rows = await api<Recording[]>(`/api/v1/recordings?${params.toString()}`)
+    if (seq !== loadSeq) return
+    recordings.value = rows
+    if (background && previous) {
+      // The user may have started dragging while the request was in flight.
+      if (timelineDragging.value) return
+      // Keep the stream (playStartMs) and the clock untouched. When the row
+      // is briefly missing (rollover/retention) keep playing the previous
+      // segment; never fall back to recordings[0] and yank the cursor away.
+      selected.value = matchRecording(rows, previous) ?? previous
+      playStartMs.value = previousStart
+      positionMs.value = playerRef.value?.positionMs() ?? previousPosition
+      return
+    }
+    const chosen = rows[0]
     if (chosen) {
-      const keepPosition = preserve && previousMatch ? positionMs.value : chosen.startMs
       selected.value = chosen
       playStartMs.value = chosen.startMs
-      positionMs.value = keepPosition
+      positionMs.value = chosen.startMs
       rangeStart.value = toLocalInput(chosen.startMs)
       rangeEnd.value = toLocalInput(chosen.endMs)
     } else {
@@ -299,9 +350,9 @@ async function loadRecordings(preserve = false) {
       positionMs.value = 0
     }
   } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : t('common.error')
+    if (seq === loadSeq) error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
-    loading.value = false
+    if (seq === loadSeq && !background) loading.value = false
   }
 }
 
@@ -311,7 +362,7 @@ async function removeRecording(recording: Recording) {
   try {
     await api(`/api/v1/recordings/${recording.id}`, { method: 'DELETE' })
     if (selected.value?.id === recording.id) selected.value = null
-    await loadRecordings()
+    await loadRecordings(true)
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   }
@@ -394,6 +445,7 @@ watch([channelId, stream], () => void loadRecordings())
 watch(day, () => void loadRecordings())
 
 onBeforeUnmount(() => {
+  loadSeq++
   if (reverseTimer !== undefined) window.clearInterval(reverseTimer)
   if (recordingsTimer !== undefined) window.clearInterval(recordingsTimer)
 })
@@ -407,7 +459,9 @@ onMounted(async () => {
       channelId.value = match?.id ?? channels.value[0].id
       await loadRecordings()
       recordingsTimer = window.setInterval(() => {
-        if (!loading.value) void loadRecordings(true)
+        if (!loading.value && !timelineDragging.value && !document.hidden) {
+          void loadRecordings(true)
+        }
       }, 5000)
     }
   } catch (caught) {
@@ -424,7 +478,7 @@ onMounted(async () => {
       <p>{{ t('playback.subtitle') }}</p>
     </div>
     <div class="head-actions">
-      <button class="button" @click="loadRecordings()">
+      <button class="button" @click="loadRecordings(true)">
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
       </button>
