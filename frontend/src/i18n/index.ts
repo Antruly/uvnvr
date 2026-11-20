@@ -511,6 +511,9 @@ const messages = {
       auditRetention: 'Audit retention (days)',
       timezone: 'Time zone',
       language: 'Default interface language',
+      liveAudio: 'Live preview audio',
+      liveAudioHint:
+        'Off by default. When off, live preview is video-only; recordings keep their audio.',
       save: 'Save settings',
       saved: 'Settings saved.',
       tokens: 'API tokens',
@@ -1201,6 +1204,8 @@ const messages = {
       auditRetention: '审计保留天数',
       timezone: '时区',
       language: '默认界面语言',
+      liveAudio: '实时预览音频',
+      liveAudioHint: '默认关闭。关闭时实时预览不发送音频，录像仍保留音频。',
       save: '保存设置',
       saved: '设置已保存。',
       tokens: 'API Token',

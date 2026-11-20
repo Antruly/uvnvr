@@ -49,6 +49,9 @@ interface Settings {
     hasDefaultPassword: boolean
     maxChannels: number
   }
+  live: {
+    audioEnabled: boolean
+  }
 }
 
 interface Summary {
@@ -163,6 +166,9 @@ const settings = reactive<Settings>({
     hasDefaultPassword: false,
     maxChannels: 128,
   },
+  live: {
+    audioEnabled: false,
+  },
 })
 const smtpPassword = ref('')
 const cameraPassword = ref('')
@@ -218,6 +224,7 @@ async function load() {
     Object.assign(settings.system, settingsResponse.system)
     Object.assign(settings.smtp, settingsResponse.smtp)
     Object.assign(settings.camera, settingsResponse.camera)
+    Object.assign(settings.live, settingsResponse.live)
     summary.value = summaryResponse
     serialEdit.value = summaryResponse.serial
     versionEdit.value = summaryResponse.version
@@ -274,6 +281,9 @@ async function save() {
           password: cameraPassword.value || undefined,
           clearPassword: clearCameraPassword.value,
         },
+        live: {
+          audioEnabled: settings.live.audioEnabled,
+        },
       }),
     })
     Object.assign(settings.security, updated.security)
@@ -283,6 +293,7 @@ async function save() {
     Object.assign(settings.system, updated.system)
     Object.assign(settings.smtp, updated.smtp)
     Object.assign(settings.camera, updated.camera)
+    Object.assign(settings.live, updated.live)
     smtpPassword.value = ''
     cameraPassword.value = ''
     clearCameraPassword.value = false
@@ -587,6 +598,11 @@ onMounted(load)
             <input v-model="settings.system.gpuEnabled" type="checkbox" />
             <span>{{ t('system.gpuEnabled') }}</span>
           </label>
+          <label class="check-row">
+            <input v-model="settings.live.audioEnabled" type="checkbox" />
+            <span>{{ t('system.liveAudio') }}</span>
+          </label>
+          <p class="small-note">{{ t('system.liveAudioHint') }}</p>
           <label class="check-row">
             <input v-model="settings.system.ntpEnabled" type="checkbox" />
             <span>{{ t('system.ntpEnabled') }}</span>

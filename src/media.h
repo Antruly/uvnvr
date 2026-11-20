@@ -43,6 +43,9 @@ public:
 
   void SetFfmpegPath(const std::string& path);
   void SetGpuEnabled(bool enabled);
+  // Live WebSocket subscribers receive audio only when this is enabled.
+  // Recording and RTSP consumers always receive the original TS unchanged.
+  void SetLiveAudioEnabled(bool enabled);
   std::string FfmpegPath() const;
   bool Available() const;
 

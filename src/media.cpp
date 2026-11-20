@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -282,6 +283,9 @@ struct MediaService::Impl {
     std::vector<uint8_t> pmt;
     std::vector<uint8_t> pending;
     int pmt_pid = -1;
+    // Audio elementary PIDs advertised by the most recent PMT. Used to strip
+    // audio from live WebSocket subscribers without touching recordings.
+    std::set<int> audio_pids;
 
     void Trim() {
       while (buffered > kCapacity && chunks.size() > 1) {
@@ -293,6 +297,53 @@ struct MediaService::Impl {
       if (keyframe_offset != UINT64_MAX && keyframe_offset < first_offset) {
         keyframe_offset = UINT64_MAX;
       }
+    }
+
+    void ParsePmtAudioPids(const uint8_t* p, size_t payload) {
+      const size_t pointer = p[payload];
+      const size_t section = payload + 1 + pointer;
+      if (section + 12 > 188 || p[section] != 0x02)
+        return;
+      const int section_length = ((p[section + 1] & 0x0f) << 8) | p[section + 2];
+      if (section_length < 9)
+        return;
+      const size_t end = section + 3 + static_cast<size_t>(section_length) - 4;
+      if (end > 188)
+        return; // Multi-packet PMT: keep the previous PID set.
+      const size_t program_info = ((p[section + 10] & 0x0f) << 8) | p[section + 11];
+      size_t i = section + 12 + program_info;
+      std::set<int> pids;
+      while (i + 5 <= end) {
+        const uint8_t type = p[i];
+        const int pid = ((p[i + 1] & 0x1f) << 8) | p[i + 2];
+        const size_t info = ((p[i + 3] & 0x0f) << 8) | p[i + 4];
+        switch (type) {
+        case 0x03: // MPEG-1 audio
+        case 0x04: // MPEG-2 audio
+        case 0x0f: // AAC ADTS
+        case 0x11: // LATM AAC
+        case 0x81: // AC-3
+        case 0x87: // E-AC-3
+          pids.insert(pid);
+          break;
+        default:
+          break;
+        }
+        i += 5 + info;
+      }
+      audio_pids = std::move(pids);
+    }
+
+    static std::vector<uint8_t> RemoveAudioPackets(const uint8_t* data, size_t len,
+                                                   const std::set<int>& pids) {
+      std::vector<uint8_t> out;
+      out.reserve(len);
+      for (size_t off = 0; off + 188 <= len; off += 188) {
+        const int pid = ((data[off + 1] & 0x1f) << 8) | data[off + 2];
+        if (pids.find(pid) == pids.end())
+          out.insert(out.end(), data + off, data + off + 188);
+      }
+      return out;
     }
 
     void ParseTs(const uint8_t* data, size_t len) {
@@ -328,6 +379,7 @@ struct MediaService::Impl {
           }
         } else if (pid == pmt_pid && pusi) {
           pmt.assign(p, p + 188);
+          ParsePmtAudioPids(p, payload);
         }
         offset += 188;
       }
@@ -484,9 +536,14 @@ struct MediaService::Impl {
       std::vector<std::shared_ptr<Subscriber>> subscriber_list;
       std::vector<std::shared_ptr<RawSubscriber>> raw_list;
       std::vector<uint8_t> initial;
+      std::set<int> audio_pids;
+      bool strip_live_audio = false;
       {
         std::lock_guard<std::mutex> lock(mutex);
         demux.Ingest(data, len, &keyframes, &chunk_start);
+        strip_live_audio = !owner->live_audio_enabled.load() && !demux.audio_pids.empty();
+        if (strip_live_audio)
+          audio_pids = demux.audio_pids;
         subscriber_list.reserve(subscribers.size());
         for (const auto& [id, sub] : subscribers) {
           (void)id;
@@ -502,6 +559,23 @@ struct MediaService::Impl {
         if (sub->sink)
           sub->sink(data, len);
       }
+      const auto post_live = [&](const std::shared_ptr<Subscriber>& sub, size_t start) {
+        if (!strip_live_audio) {
+          PostChunk(sub, data + start, len - start);
+          return;
+        }
+        // Live preview is video-only by default. Recording and RTSP consumers
+        // already received the original buffer above and keep their audio.
+        std::vector<uint8_t> packets;
+        packets.reserve(len - start);
+        for (size_t offset = start; offset + 188 <= len; offset += 188) {
+          const int pid = ((data[offset + 1] & 0x1f) << 8) | data[offset + 2];
+          if (audio_pids.find(pid) == audio_pids.end())
+            packets.insert(packets.end(), data + offset, data + offset + 188);
+        }
+        if (!packets.empty())
+          PostChunk(sub, packets.data(), packets.size());
+      };
       for (const auto& sub : subscriber_list) {
         if (!sub->alive.load())
           continue;
@@ -510,7 +584,7 @@ struct MediaService::Impl {
           sub->skipping = true;
           if (!keyframes.empty()) {
             sub->skipping = false;
-            PostChunk(sub, data + keyframes.front(), len - keyframes.front());
+            post_live(sub, keyframes.front());
           }
           continue;
         }
@@ -518,9 +592,9 @@ struct MediaService::Impl {
           if (keyframes.empty())
             continue;
           sub->skipping = false;
-          PostChunk(sub, data + keyframes.front(), len - keyframes.front());
+          post_live(sub, keyframes.front());
         } else {
-          PostChunk(sub, data, len);
+          post_live(sub, 0);
         }
       }
       (void)chunk_start;
@@ -571,6 +645,9 @@ struct MediaService::Impl {
         sub->id = next_subscriber_id++;
         subscribers[sub->id] = sub;
         initial = demux.Snapshot();
+        if (!owner->live_audio_enabled.load() && !demux.audio_pids.empty() && !initial.empty()) {
+          initial = TSDemux::RemoveAudioPackets(initial.data(), initial.size(), demux.audio_pids);
+        }
       }
       const uint64_t id = sub->id;
       std::weak_ptr<Stream> weak = shared_from_this();
@@ -652,6 +729,7 @@ struct MediaService::Impl {
   uvcpp::uvcpp_web_app* web;
   std::string ffmpeg_path;
   std::atomic<bool> gpu_enabled{false};
+  std::atomic<bool> live_audio_enabled{false};
   bool started = false;
   mutable std::mutex mutex;
   std::unordered_map<int64_t, std::shared_ptr<Channel>> channels;
@@ -995,6 +1073,10 @@ void MediaService::SetFfmpegPath(const std::string& path) {
 
 void MediaService::SetGpuEnabled(bool enabled) {
   impl_->gpu_enabled = enabled;
+}
+
+void MediaService::SetLiveAudioEnabled(bool enabled) {
+  impl_->live_audio_enabled = enabled;
 }
 
 std::string MediaService::FfmpegPath() const {

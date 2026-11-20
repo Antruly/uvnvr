@@ -455,9 +455,19 @@ Ports and the data directory are applied at startup. See
 ## Runtime settings
 
 `GET /api/v1/settings` returns the editable groups (`security`, `audit`,
-`event`, `motion`, `system`, `smtp`, `camera`); `PUT` accepts any subset of
-them. The `camera` group holds the default camera account used by one-click
-adds and the channel capacity:
+`event`, `motion`, `system`, `smtp`, `camera`, `live`); `PUT` accepts any
+subset of them. The `live` group controls audio on the live WebSocket stream:
+
+```json
+{ "live": { "audioEnabled": false } }
+```
+
+It defaults to `false`: live preview is video-only, while recordings and the
+RTSP output always keep the original audio. The filter only removes audio TS
+packets from WebSocket subscribers, so it adds no transcoding CPU cost and
+does not alter recording files. Changes apply as the next chunks are sent;
+reopen an existing preview for a clean switch. The `camera` group holds the
+default camera account used by one-click adds and the channel capacity:
 
 ```json
 {

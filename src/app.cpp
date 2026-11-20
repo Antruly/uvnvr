@@ -964,6 +964,7 @@ bool App::Migrate(std::string* error) {
       {"smtp.to", ""},
       {"smtp.ssl", "1"},
       {"live.cache_mb", "8"},
+      {"live.audio_enabled", "0"},
       {"recording.segment_minutes", "5"},
       {"recording.segment_size_mb", "256"},
       {"recording.segment_mode", "time"},
@@ -1982,6 +1983,7 @@ int App::Run() {
     media_->SetFfmpegPath(ffmpeg);
   }
   media_->SetGpuEnabled(GetSettingInt("system.gpu_enabled", 1) != 0);
+  media_->SetLiveAudioEnabled(GetSettingInt("live.audio_enabled", 0) != 0);
   if (!media_->Available()) {
     RaiseAlert(0, "service_error", "error",
                "FFmpeg is not available; live preview, recording and snapshots cannot start.", "");
@@ -2523,6 +2525,23 @@ void App::RegisterCoreRoutes() {
                            }
                          }
                        }
+                       if (body.contains("live") && body["live"].is_object()) {
+                         const auto& live = body["live"];
+                         if (live.contains("audioEnabled")) {
+                           if (!live["audioEnabled"].is_boolean()) {
+                             *error = "audioEnabled must be a boolean";
+                             return;
+                           }
+                           const bool enabled = live["audioEnabled"].get<bool>();
+                           std::string db_error;
+                           if (!SetSetting("live.audio_enabled", enabled ? "1" : "0", &db_error)) {
+                             *error = db_error;
+                             return;
+                           }
+                           if (media_)
+                             media_->SetLiveAudioEnabled(enabled);
+                         }
+                       }
                        if (body.contains("smtp") && body["smtp"].is_object()) {
                          const auto& smtp = body["smtp"];
                          auto set_string = [&](const char* key, const std::string& value) -> bool {
@@ -2850,7 +2869,8 @@ json App::SettingsJson() {
       {"camera", json{{"defaultUsername", GetSetting("camera.default_username", "")},
                       {"hasDefaultPassword",
                        !GetSetting("camera.default_password_enc", "").empty()},
-                      {"maxChannels", GetSettingInt("channel.max_channels", 128)}}}};
+                      {"maxChannels", GetSettingInt("channel.max_channels", 128)}}},
+      {"live", json{{"audioEnabled", GetSettingInt("live.audio_enabled", 0) != 0}}}};
 }
 
 namespace {
