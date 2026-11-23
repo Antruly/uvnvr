@@ -60,6 +60,10 @@ find_library(UVNVR_LLHTTP_LIBRARY NAMES llhttp
 if(UVNVR_LLHTTP_LIBRARY)
   if(MSVC)
     target_link_libraries(uvnvr_sdk PRIVATE "${UVNVR_LLHTTP_LIBRARY}")
+  elseif(APPLE)
+    # Darwin's ld rejects --no-as-needed/--as-needed; the dependency is kept
+    # through the normal link.
+    target_link_libraries(uvnvr_sdk PRIVATE "${UVNVR_LLHTTP_LIBRARY}")
   else()
     # libuvcpp references llhttp but does not carry it as DT_NEEDED in the
     # release archive. Force the dependency into libuvnvr_sdk.so so applications
