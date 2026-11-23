@@ -251,7 +251,7 @@ const messages = {
       subEnabled: 'Enable sub stream',
       defaultName: 'Camera',
       rtspHint:
-        'For a plain RTSP stream, enter the full URL. Credentials can be embedded (rtsp://user:pass@host:554/path); no other camera settings are required.',
+        'For a plain RTSP stream, enter the full URL. Credentials can be embedded before the host, separated by an at-sign (user, password, then host:554 and the path); no other camera settings are required.',
       rtspUrlRequired: 'Enter the RTSP stream URL.',
       onvifNeedHost: 'Enter the camera address or run Auto detect to read the ONVIF stream.',
       hostRequired: 'Enter the camera address.',
@@ -950,7 +950,7 @@ const messages = {
       subEnabled: '启用子码流',
       defaultName: '摄像头',
       rtspHint:
-        '纯 RTSP 视频流只需填写完整地址；账号密码可以直接写在地址里（rtsp://用户名:密码@主机:554/路径），无需其他摄像头参数。',
+        '纯 RTSP 视频流只需填写完整地址；账号密码可以直接写在地址里（依次为账号、密码、at 符号、主机:554 和路径），无需其他摄像头参数。',
       rtspUrlRequired: '请填写 RTSP 视频流地址。',
       onvifNeedHost: '请填写摄像头地址，或先点击“识别摄像头”读取 ONVIF 流地址。',
       hostRequired: '请填写摄像头地址。',
