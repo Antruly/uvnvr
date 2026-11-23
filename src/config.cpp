@@ -100,6 +100,9 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
   // when both are present.
   if (!ReadInt(document, "port", &config->port, error) ||
       !ReadInt(document, "rtspPort", &config->rtsp_port, error) ||
+      !ReadInt(document, "privatePort", &config->private_port, error) ||
+      !ReadBool(document, "privateTcpEnabled", &config->private_tcp_enabled, error) ||
+      !ReadBool(document, "privateQuicEnabled", &config->private_quic_enabled, error) ||
       !ReadString(document, "dataDir", &config->data_dir, error) ||
       !ReadString(document, "host", &config->host, error) ||
       !ReadString(document, "ffmpegPath", &config->ffmpeg_path, error) ||
@@ -134,6 +137,19 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       return false;
     }
     if (!ReadInt(*rtsp, "port", &config->rtsp_port, error))
+      return false;
+  }
+
+  // Private protocol (TCP + UDP/QUIC on the same port).
+  if (const auto private_section = document.find("private");
+      private_section != document.end()) {
+    if (!private_section->is_object()) {
+      *error = "private must be an object";
+      return false;
+    }
+    if (!ReadInt(*private_section, "port", &config->private_port, error) ||
+        !ReadBool(*private_section, "tcp", &config->private_tcp_enabled, error) ||
+        !ReadBool(*private_section, "quic", &config->private_quic_enabled, error))
       return false;
   }
 
@@ -202,8 +218,17 @@ bool ValidateConfig(const Config& config, std::string* error) {
     return fail("http.port must be between 1 and 65535");
   if (config.rtsp_port < 1 || config.rtsp_port > 65535)
     return fail("rtsp.port must be between 1 and 65535");
+  if (config.private_port < 1 || config.private_port > 65535)
+    return fail("private.port must be between 1 and 65535");
   if (config.port == config.rtsp_port)
     return fail("http.port and rtsp.port must differ");
+  // TCP listeners cannot share a port. UDP/QUIC could, but keeping the three
+  // ports distinct makes the configuration unambiguous and avoids a silent
+  // "QUIC works, TCP does not" split brain.
+  if (config.private_port == config.port || config.private_port == config.rtsp_port)
+    return fail("private.port must differ from http.port and rtsp.port");
+  if (!config.private_tcp_enabled && !config.private_quic_enabled)
+    return fail("at least one private transport must be enabled");
   if (config.data_dir.empty())
     return fail("dataDir must not be empty");
   if (config.tls_cert.empty() != config.tls_key.empty())
@@ -228,6 +253,9 @@ json ConfigToJson(const Config& config) {
                         {"key", config.tls_key},
                         {"selfSigned", config.tls_self_signed}}}};
   document["rtsp"] = {{"port", config.rtsp_port}};
+  document["private"] = {{"port", config.private_port},
+                         {"tcp", config.private_tcp_enabled},
+                         {"quic", config.private_quic_enabled}};
   document["dataDir"] = config.data_dir;
   document["maintenance"] = config.maintenance;
   document["ffmpeg"] = {{"path", config.ffmpeg_path}};

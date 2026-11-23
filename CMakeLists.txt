@@ -9,6 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(UVNVR_BUILD_TESTS "Build UvNVR unit tests" OFF)
 option(UVNVR_EMBED_WEB "Embed the built frontend into the binary" OFF)
+option(UVNVR_BUILD_SDK "Build the private-protocol C SDK" ON)
+option(UVNVR_ENABLE_QUIC "Enable the QUIC listener for the private protocol" ON)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -117,6 +119,8 @@ add_executable(uvnvr
   src/ntp.cpp
   src/platform.cpp
   src/service.cpp
+  src/proto/proto_protocol.cpp
+  src/proto/proto_server.cpp
 )
 
 if(WIN32)
@@ -133,8 +137,15 @@ endif()
 
 target_include_directories(uvnvr PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_BINARY_DIR}/generated"
 )
+
+if(UVNVR_ENABLE_QUIC)
+  target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_QUIC=1)
+else()
+  target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_QUIC=0)
+endif()
 
 # The manifest names the executable, and uvp resolves it as build/<name>.
 set_target_properties(uvnvr PROPERTIES
@@ -194,6 +205,10 @@ endif()
 
 install(TARGETS uvnvr RUNTIME DESTINATION bin)
 install(DIRECTORY frontend/dist/ DESTINATION share/uvnvr/frontend/dist OPTIONAL)
+
+if(UVNVR_BUILD_SDK)
+  add_subdirectory(sdk)
+endif()
 
 if(UVNVR_BUILD_TESTS)
   enable_testing()

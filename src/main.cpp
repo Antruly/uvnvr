@@ -89,6 +89,7 @@ void PrintUsage(const char* argv0) {
             << "  --port <port>      HTTP/HTTPS listen port (default: 8080)\n"
             << "  --host <address>   HTTP bind address (default: 0.0.0.0)\n"
             << "  --rtsp-port <port> RTSP listen port (default: 554; falls back to 8554)\n"
+            << "  --private-port <n> Private protocol TCP+QUIC port (default: 1515)\n"
             << "  --data-dir <path>  Data directory (default: " << DefaultDataDir() << ")\n"
             << "  --tls-cert <path>  PEM certificate; requires --tls-key\n"
             << "  --tls-key <path>   PEM private key; requires --tls-cert\n"
@@ -110,6 +111,9 @@ void PrintUsage(const char* argv0) {
             << "  UVNVR_PORT         HTTP/HTTPS port\n"
             << "  UVNVR_HOST         HTTP bind address\n"
             << "  UVNVR_RTSP_PORT    RTSP port\n"
+            << "  UVNVR_PRIVATE_PORT Private protocol TCP+QUIC port (default: 1515)\n"
+            << "  UVNVR_PRIVATE_TCP  0 disables the TCP listener\n"
+            << "  UVNVR_PRIVATE_QUIC 0 disables the QUIC listener\n"
             << "  UVNVR_DATA_DIR     Data directory\n"
             << "  UVNVR_FFMPEG       FFmpeg executable\n"
             << "  UVNVR_CACHE_MB     Playback LRU cache size in MiB (default: 128)\n"
@@ -132,6 +136,7 @@ bool ParsePort(std::string_view text, int* port) {
 struct Overrides {
   std::optional<int> port;
   std::optional<int> rtsp_port;
+  std::optional<int> private_port;
   std::optional<std::string> host;
   std::optional<std::string> data_dir;
   std::optional<std::string> tls_cert;
@@ -168,6 +173,27 @@ void ApplyEnvironment(uvnvr::Config* config) {
     else
       std::cerr << "ignoring invalid UVNVR_RTSP_PORT: " << rtsp << "\n";
   }
+  if (const char* private_port = std::getenv("UVNVR_PRIVATE_PORT")) {
+    int value = 0;
+    if (ParsePort(private_port, &value))
+      config->private_port = value;
+    else
+      std::cerr << "ignoring invalid UVNVR_PRIVATE_PORT: " << private_port << "\n";
+  }
+  const auto read_bool_env = [](const char* name, bool* target) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+      return;
+    const std::string_view text(value);
+    if (text == "0" || text == "false" || text == "no")
+      *target = false;
+    else if (text == "1" || text == "true" || text == "yes")
+      *target = true;
+    else
+      std::cerr << "ignoring invalid " << name << ": " << value << "\n";
+  };
+  read_bool_env("UVNVR_PRIVATE_TCP", &config->private_tcp_enabled);
+  read_bool_env("UVNVR_PRIVATE_QUIC", &config->private_quic_enabled);
   if (const char* host = std::getenv("UVNVR_HOST"); host != nullptr && host[0] != '\0')
     config->host = host;
   if (const char* data_dir = std::getenv("UVNVR_DATA_DIR");
@@ -202,6 +228,8 @@ void ApplyOverrides(const Overrides& overrides, uvnvr::Config* config) {
     config->port = *overrides.port;
   if (overrides.rtsp_port)
     config->rtsp_port = *overrides.rtsp_port;
+  if (overrides.private_port)
+    config->private_port = *overrides.private_port;
   if (overrides.host)
     config->host = *overrides.host;
   if (overrides.data_dir)
@@ -262,6 +290,15 @@ Options ParseOptions(int argc, char** argv) {
         options.help = true;
       } else {
         overrides.rtsp_port = port;
+      }
+    } else if (arg == "--private-port") {
+      int port = 0;
+      if (!TakeValue(argc, argv, &i, "--private-port", &value) || !ParsePort(value, &port)) {
+        if (!value.empty())
+          std::cerr << "invalid private port: " << value << "\n";
+        options.help = true;
+      } else {
+        overrides.private_port = port;
       }
     } else if (arg == "--data-dir") {
       if (!TakeValue(argc, argv, &i, "--data-dir", &value))

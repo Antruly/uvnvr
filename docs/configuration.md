@@ -56,6 +56,11 @@ All keys are optional.
   "rtsp": {
     "port": 554
   },
+  "private": {
+    "port": 1515,
+    "tcp": true,
+    "quic": true
+  },
   "dataDir": "/var/lib/uvnvr",
   "maintenance": false,
   "ffmpeg": {
@@ -78,6 +83,9 @@ All keys are optional.
 | `http.tls.cert` / `http.tls.key` | empty | Both must be set to enable HTTPS. |
 | `http.tls.selfSigned` | `false` | Generates a localhost certificate when no cert/key is set. |
 | `rtsp.port` | `554` | Falls back to 8554/8555 when the port cannot be bound. |
+| `private.port` | `1515` | Private protocol, TCP and UDP/QUIC on the same port number. Must differ from `http.port` and `rtsp.port`. See [private-protocol.md](private-protocol.md). |
+| `private.tcp` | `true` | Serve the private protocol over TCP. |
+| `private.quic` | `true` | Serve the private protocol over QUIC (TLS 1.3). Requires a libuvcpp build with QUIC. |
 | `dataDir` | `./data` | Database, secret key, alerts and default recordings root. Windows installs under Program Files default to `%ProgramData%\UvNVR`; installs on another drive default to `<install>\data`. |
 | `maintenance` | `false` | Enables administrator-only destructive operations (recording deletion, audit purge, serial/display-version changes, volume formatting). Prefer `--maintenance` for a temporary operations session. |
 | `ffmpeg.path` | auto-detected | FFmpeg executable; `UVNVR_FFMPEG` overrides it. |
@@ -86,9 +94,10 @@ All keys are optional.
 | `storage.readaheadMb` | `4` | Bytes of the next segment preloaded while the current one plays; `0` disables read-ahead. |
 
 Flat aliases are accepted for hand-written files: `port`, `rtspPort`,
-`dataDir`, `host`, `ffmpegPath`, `logLevel`, `maintenance`, `tlsCert`,
-`tlsKey` and `tlsSelfSigned`. The nested form wins when both are present.
-Unknown keys are ignored.
+`privatePort`, `privateTcpEnabled`, `privateQuicEnabled`, `dataDir`, `host`,
+`ffmpegPath`, `logLevel`, `maintenance`, `tlsCert`, `tlsKey` and
+`tlsSelfSigned`. The nested form wins when both are present. Unknown keys are
+ignored.
 
 ## Environment variables
 
@@ -98,6 +107,9 @@ Unknown keys are ignored.
 | `UVNVR_PORT` | `http.port` |
 | `UVNVR_HOST` | `http.host` |
 | `UVNVR_RTSP_PORT` | `rtsp.port` |
+| `UVNVR_PRIVATE_PORT` | `private.port` |
+| `UVNVR_PRIVATE_TCP` | `private.tcp` (`0`/`false` disables) |
+| `UVNVR_PRIVATE_QUIC` | `private.quic` (`0`/`false` disables) |
 | `UVNVR_DATA_DIR` | `dataDir` |
 | `UVNVR_FFMPEG` | `ffmpeg.path` |
 | `UVNVR_LOG_LEVEL` | `logging.level` |
@@ -129,7 +141,9 @@ Changing the data directory does not move an existing database. Copy
 
 The service refuses to start (and `--print-config` exits non-zero) when:
 
-- a port is outside 1–65535, or HTTP and RTSP use the same port;
+- a port is outside 1–65535, HTTP and RTSP use the same port, or
+  `private.port` equals either of them;
+- both `private.tcp` and `private.quic` are disabled;
 - only one of `tls.cert` / `tls.key` is set;
 - `logging.level` is not one of the accepted values;
 - the JSON is invalid or a value has the wrong type.

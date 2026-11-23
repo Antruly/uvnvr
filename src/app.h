@@ -5,6 +5,7 @@
 #include "ntp.h"
 #include "onvif_events.h"
 #include "playback.h"
+#include "proto/proto_server.h"
 #include "recording.h"
 #include "rtsp.h"
 
@@ -92,6 +93,11 @@ struct LoginResult {
   int64_t expires_at = 0;
 };
 
+// Download state shared between the dispatcher and its chunk pump. Defined in
+// app.cpp; forward-declared here so the pump can be a real member function
+// instead of a self-referencing lambda whose lifetime is hard to reason about.
+struct ProtoDownloadState;
+
 class App {
 public:
   explicit App(Config config);
@@ -155,6 +161,20 @@ private:
   void RegisterCoreRoutes();
   void RegisterProtectedRoutes();
   void RegisterStatic();
+
+  // Private protocol (docs/private-protocol.md). The dispatcher reuses the
+  // same services and database rows as the REST handlers.
+  void StartPrivateProtocol();
+  void StartPrivateProtocolOnLoop();
+  void StopPrivateProtocol();
+  proto::AuthResult ProtoAuthenticate(const std::string& username,
+                                      const std::string& password,
+                                      const std::string& peer);
+  void HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
+                          std::function<void(proto::ProtoReply)> complete);
+  void ProtoRemoveLive(uint64_t key);
+  void ProtoPumpDownload(std::shared_ptr<ProtoDownloadState> state);
+  UserContext ProtoUser(const proto::ProtoRequest& request) const;
 
   std::string Serial();
   std::string GetSetting(const std::string& key, const std::string& fallback);
@@ -236,6 +256,14 @@ private:
   std::unique_ptr<RecordingService> recording_;
   std::unique_ptr<PlaybackService> playback_;
   std::unique_ptr<RtspServer> rtsp_;
+  std::unique_ptr<proto::ProtoServer> proto_;
+  struct ProtoLiveSubscription {
+    int64_t channel_id = 0;
+    std::string stream;
+    uint64_t media_subscription = 0;
+  };
+  std::mutex proto_live_mutex_;
+  std::unordered_map<uint64_t, ProtoLiveSubscription> proto_live_;
   std::thread monitor_thread_;
   std::atomic<bool> monitor_stop_{false};
   std::map<int64_t, std::string> last_channel_state_;

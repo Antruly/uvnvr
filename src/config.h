@@ -14,6 +14,9 @@ struct Config {
   int port = 8080;
   std::string host = "0.0.0.0";
   int rtsp_port = 554;
+  int private_port = 1515;
+  bool private_tcp_enabled = true;
+  bool private_quic_enabled = true;
   bool tls_self_signed = false;
   std::string tls_cert;
   std::string tls_key;

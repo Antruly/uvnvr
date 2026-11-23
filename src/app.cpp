@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <db/uvcpp_db.h>
 #include <filesystem>
 #include <fstream>
@@ -2103,6 +2104,7 @@ int App::Run() {
   } else {
     std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
   }
+  StartPrivateProtocol();
   StartMonitors();
 
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
@@ -2123,6 +2125,7 @@ int App::Run() {
       std::fprintf(stderr, "could not open a browser; visit %s\n", url.c_str());
   }
   web_.join();
+  StopPrivateProtocol();
   if (recording_)
     recording_->Stop();
   media_.reset();
@@ -8519,6 +8522,606 @@ void App::RegisterSystemRoutes() {
                 });
           },
           "system.manage"));
+}
+
+// ---------------------------------------------------------------------------
+// Private protocol (docs/private-protocol.md)
+//
+// The dispatcher below deliberately calls the same services and SQL as the
+// REST handlers above. It does not reimplement recording, playback or media
+// fan-out; it only translates wire payloads into those calls.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+uint64_t ProtoLiveKey(uint64_t connection_id, uint32_t stream_id) {
+  return (connection_id << 32) | static_cast<uint64_t>(stream_id);
+}
+
+int64_t ProtoNowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+void PutLe32(uint8_t* out, uint32_t value) {
+  for (int i = 0; i < 4; ++i)
+    out[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xff);
+}
+
+void PutLe64(uint8_t* out, uint64_t value) {
+  PutLe32(out, static_cast<uint32_t>(value & 0xffffffffu));
+  PutLe32(out + 4, static_cast<uint32_t>(value >> 32));
+}
+
+proto::ProtoReply ProtoFailure(int status, std::string code, std::string message) {
+  proto::ProtoReply reply;
+  reply.status = status;
+  reply.code = std::move(code);
+  reply.message = std::move(message);
+  return reply;
+}
+
+struct ProtoDownloadInfo {
+  bool ok = false;
+  int status = 404;
+  std::string code = "not_found";
+  std::string message = "recording not found";
+  std::string path;
+  std::string codec;
+  uint64_t size = 0;
+};
+
+} // namespace
+
+// Shared with App::ProtoPumpDownload. Deliberately at namespace scope (not in
+// the anonymous namespace above) so app.h can forward-declare it.
+struct ProtoDownloadState {
+  std::shared_ptr<proto::ProtoConnection> connection;
+  proto::Header header;
+  uint32_t download_id = 0;
+  std::string path;
+  uint64_t size = 0;
+  uint64_t offset = 0;
+  uint64_t chunks = 0;
+};
+
+namespace {
+
+void ProtoSendDownloadDone(const std::shared_ptr<proto::ProtoConnection>& connection,
+                           const proto::Header& header, uint32_t download_id, uint64_t offset,
+                           uint64_t chunks) {
+  if (!connection || !connection->alive())
+    return;
+  connection->SendJson(proto::kOpDownloadDone,
+                       static_cast<uint16_t>(proto::kFlagResponse | proto::kFlagFin),
+                       header.session_id, header.request_id,
+                       json{{"downloadId", download_id},
+                            {"sizeBytes", offset},
+                            {"chunks", chunks}});
+}
+
+} // namespace
+
+void App::StartPrivateProtocol() {
+  if (proto_ != nullptr)
+    return;
+  // web_.start() runs the libuv loop on a background thread. libuv handles
+  // (listen/accept) must be created on the thread that owns the loop; creating
+  // them here would bind the socket but never register the accept callback.
+  web_.post([this] { StartPrivateProtocolOnLoop(); });
+}
+
+void App::StartPrivateProtocolOnLoop() {
+  if (proto_ != nullptr)
+    return;
+  proto::ProtoServer::Options options;
+  options.port = static_cast<uint16_t>(config_.private_port);
+  options.tcp = config_.private_tcp_enabled;
+  options.quic = config_.private_quic_enabled;
+  options.bind_ip = config_.host.empty() ? "0.0.0.0" : config_.host;
+  options.tls_cert = config_.tls_cert;
+  options.tls_key = config_.tls_key;
+
+  proto_ = std::make_unique<proto::ProtoServer>(
+      web_.loop(),
+      [this](const std::string& username, const std::string& password, const std::string& peer) {
+        return ProtoAuthenticate(username, password, peer);
+      },
+      [this](std::shared_ptr<proto::ProtoRequest> request,
+             std::function<void(proto::ProtoReply)> complete) {
+        HandleProtoRequest(std::move(request), std::move(complete));
+      });
+
+  std::string error;
+  if (proto_->Start(options, &error) != 0) {
+    std::fprintf(stderr, "Private protocol unavailable: %s\n", error.c_str());
+    proto_.reset();
+    return;
+  }
+  std::printf("Private protocol: port=%d tcp=%s quic=%s\n", config_.private_port,
+              proto_->tcp_enabled() ? "on" : "off", proto_->quic_enabled() ? "on" : "off");
+  if (!error.empty())
+    std::fprintf(stderr, "Private protocol: %s\n", error.c_str());
+  std::fflush(stdout);
+}
+
+void App::StopPrivateProtocol() {
+  proto_.reset();
+}
+
+proto::AuthResult App::ProtoAuthenticate(const std::string& username,
+                                         const std::string& password,
+                                         const std::string& peer) {
+  // Reuse the REST login path so scrypt verification, disabled-account checks,
+  // lockout accounting and the audit trail stay identical.
+  const LoginResult login = Login(username, password, peer, "uvnvr-sdk/1.0");
+  proto::AuthResult result;
+  result.status = login.status;
+  result.code = login.code;
+  result.message = login.message;
+  if (!login.ok)
+    return result;
+
+  result.ok = true;
+  result.user_id = login.user.id;
+  result.username = login.user.username;
+  result.role = login.user.role_name;
+  result.permissions = login.user.permissions;
+
+  // The protocol has its own random communication ID; the web session row
+  // Login() just created is not needed and would otherwise count against the
+  // account's browser sessions.
+  if (!login.session_token.empty())
+    DeleteSession(Sha256Hex(login.session_token));
+  return result;
+}
+
+UserContext App::ProtoUser(const proto::ProtoRequest& request) const {
+  UserContext user;
+  user.id = request.session.user_id;
+  user.username = request.session.username;
+  user.role_name = request.session.role;
+  user.permissions = request.session.permissions;
+  return user;
+}
+
+void App::ProtoRemoveLive(uint64_t key) {
+  ProtoLiveSubscription subscription;
+  {
+    std::lock_guard<std::mutex> lock(proto_live_mutex_);
+    auto it = proto_live_.find(key);
+    if (it == proto_live_.end())
+      return;
+    subscription = std::move(it->second);
+    proto_live_.erase(it);
+  }
+  if (media_ != nullptr && subscription.media_subscription != 0)
+    media_->RemoveRawSubscriber(subscription.channel_id, subscription.stream,
+                                subscription.media_subscription);
+}
+
+void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
+                             std::function<void(proto::ProtoReply)> complete) {
+  if (!request || !complete)
+    return;
+  const json body = json::parse(request->payload, nullptr, false);
+  const json fields = body.is_discarded() || !body.is_object() ? json::object() : body;
+  const UserContext user = ProtoUser(*request);
+
+  switch (request->header.opcode) {
+  case proto::kOpChannelList: {
+    if (!HasPermission(user, "channel.view")) {
+      complete(ProtoFailure(403, "forbidden", "channel.view permission is required"));
+      return;
+    }
+    auto items = std::make_shared<json>(json::array());
+    RunWork(
+        [this, items] {
+          std::string error;
+          const auto channels = LoadChannels(&error);
+          for (const auto& channel : channels) {
+            json item = ChannelJson(channel);
+            StreamStatus main_status;
+            StreamStatus sub_status;
+            if (media_) {
+              main_status = media_->Status(channel.id, "main");
+              sub_status = media_->Status(channel.id, "sub");
+            }
+            item["mainState"] = main_status.state;
+            item["mainError"] = main_status.error;
+            item["mainHasKeyframe"] = main_status.has_keyframe;
+            item["subState"] = sub_status.state;
+            item["subError"] = sub_status.error;
+            item["subHasKeyframe"] = sub_status.has_keyframe;
+            items->push_back(std::move(item));
+          }
+        },
+        [items, complete] {
+          proto::ProtoReply reply;
+          reply.status = 200;
+          reply.data = *items;
+          complete(reply);
+        });
+    return;
+  }
+
+  case proto::kOpRecordingDays: {
+    if (!HasPermission(user, "playback.view")) {
+      complete(ProtoFailure(403, "forbidden", "playback.view permission is required"));
+      return;
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const std::string from_text = JsonString(fields, "from");
+    const std::string to_text = JsonString(fields, "to");
+    LocalDay from_day{};
+    LocalDay to_day{};
+    if (channel_id <= 0 || !ParseIsoDay(from_text, &from_day) ||
+        !ParseIsoDay(to_text, &to_day) || to_day < from_day) {
+      complete(ProtoFailure(400, "invalid_range",
+                            "channelId, from and to (YYYY-MM-DD) are required"));
+      return;
+    }
+    if ((to_day - from_day).count() > 366) {
+      complete(ProtoFailure(400, "invalid_range", "the requested range is too large"));
+      return;
+    }
+    auto days = std::make_shared<json>(json::array());
+    RunWork(
+        [this, channel_id, from_day, to_day, days] {
+          const std::string zone_name = GetSetting("system.timezone", "UTC");
+          const std::chrono::time_zone* zone = ResolveConfiguredZone(zone_name);
+          const int64_t from_ms = LocalDayStartMs(from_day, zone);
+          const int64_t to_ms = LocalDayStartMs(to_day + std::chrono::days{1}, zone);
+          std::set<LocalDay> found;
+          auto collect = [&](int64_t start_ms, int64_t end_ms) {
+            if (end_ms <= start_ms)
+              end_ms = start_ms + 1;
+            const LocalDay first = std::max(LocalDayOf(start_ms, zone), from_day);
+            const LocalDay last = std::min(LocalDayOf(end_ms - 1, zone), to_day);
+            for (LocalDay day = first; day <= last; day += std::chrono::days{1})
+              found.insert(day);
+          };
+          uvcpp::uvcpp_db_table table;
+          uvcpp::uvcpp_db_params params;
+          params.add(channel_id);
+          params.add(from_ms);
+          params.add(to_ms);
+          std::string error;
+          if (Query("SELECT start_ms, end_ms FROM recordings "
+                    "WHERE channel_id = ? AND end_ms > ? AND start_ms < ?",
+                    params, &table, &error)) {
+            for (size_t i = 0; i < table.rows().size(); ++i)
+              collect(TableInt(table, i, "start_ms"), TableInt(table, i, "end_ms"));
+          }
+          if (recording_) {
+            const int64_t now_ms = ProtoNowMs();
+            for (const auto& segment : recording_->ActiveSegments()) {
+              if (segment.channel_id != channel_id)
+                continue;
+              if (now_ms <= from_ms || segment.start_ms >= to_ms)
+                continue;
+              collect(segment.start_ms, now_ms);
+            }
+          }
+          for (const LocalDay& day : found)
+            days->push_back(FormatLocalDay(day));
+        },
+        [days, complete] {
+          proto::ProtoReply reply;
+          reply.status = 200;
+          reply.data = json{{"days", *days}};
+          complete(reply);
+        });
+    return;
+  }
+
+  case proto::kOpRecordingList: {
+    if (!HasPermission(user, "playback.view")) {
+      complete(ProtoFailure(403, "forbidden", "playback.view permission is required"));
+      return;
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const std::string stream = JsonString(fields, "stream");
+    const int64_t from_ms = JsonInt(fields, "fromMs", 0);
+    const int64_t to_ms = JsonInt(fields, "toMs", 0);
+    auto items = std::make_shared<json>(json::array());
+    RunWork(
+        [this, channel_id, stream, from_ms, to_ms, items] {
+          std::string where = " WHERE 1=1";
+          uvcpp::uvcpp_db_params params;
+          if (channel_id > 0) {
+            where += " AND channel_id = ?";
+            params.add(channel_id);
+          }
+          if (!stream.empty()) {
+            where += " AND stream = ?";
+            params.add(stream);
+          }
+          if (to_ms > 0) {
+            where += " AND start_ms < ?";
+            params.add(to_ms);
+          }
+          if (from_ms > 0) {
+            where += " AND end_ms > ?";
+            params.add(from_ms);
+          }
+          uvcpp::uvcpp_db_table table;
+          std::string error;
+          if (!Query("SELECT id, channel_id, stream, path, start_ms, end_ms, duration_ms, "
+                     "size_bytes, codec, record_type FROM recordings" +
+                         where + " ORDER BY start_ms ASC LIMIT 2000",
+                     params, &table, &error)) {
+            return;
+          }
+          for (size_t i = 0; i < table.rows().size(); ++i) {
+            items->push_back(json{
+                {"id", TableInt(table, i, "id")},
+                {"channelId", TableInt(table, i, "channel_id")},
+                {"stream", TableText(table, i, "stream")},
+                {"path", TableText(table, i, "path")},
+                {"startMs", TableInt(table, i, "start_ms")},
+                {"endMs", TableInt(table, i, "end_ms")},
+                {"durationMs", TableInt(table, i, "duration_ms")},
+                {"sizeBytes", TableInt(table, i, "size_bytes")},
+                {"codec", TableText(table, i, "codec")},
+                {"recordType", TableText(table, i, "record_type")},
+                {"active", false},
+            });
+          }
+          if (recording_) {
+            const int64_t now_ms = ProtoNowMs();
+            for (const auto& segment : recording_->ActiveSegments()) {
+              if (channel_id > 0 && segment.channel_id != channel_id)
+                continue;
+              if (!stream.empty() && segment.stream != stream)
+                continue;
+              if (to_ms > 0 && segment.start_ms >= to_ms)
+                continue;
+              if (from_ms > 0 && now_ms <= from_ms)
+                continue;
+              const int64_t id =
+                  -(segment.channel_id * 2 + (segment.stream == "sub" ? 1 : 0) + 1);
+              items->push_back(json{
+                  {"id", id},
+                  {"channelId", segment.channel_id},
+                  {"stream", segment.stream},
+                  {"path", segment.part_path},
+                  {"startMs", segment.start_ms},
+                  {"endMs", now_ms},
+                  {"durationMs", std::max<int64_t>(0, now_ms - segment.start_ms)},
+                  {"sizeBytes", segment.bytes},
+                  {"codec", segment.codec},
+                  {"recordType", segment.record_type},
+                  {"active", true},
+              });
+            }
+          }
+        },
+        [items, complete] {
+          proto::ProtoReply reply;
+          reply.status = 200;
+          reply.data = json{{"recordings", *items}};
+          complete(reply);
+        });
+    return;
+  }
+
+  case proto::kOpLiveOpen: {
+    if (!HasPermission(user, "preview.view")) {
+      complete(ProtoFailure(403, "forbidden", "preview.view permission is required"));
+      return;
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const std::string stream = JsonString(fields, "stream", "main");
+    const int64_t requested_id = JsonInt(fields, "streamId", 0);
+    if (channel_id <= 0 || (stream != "main" && stream != "sub") || requested_id <= 0 ||
+        requested_id > 0x7fffffff) {
+      complete(ProtoFailure(400, "invalid_stream",
+                            "channelId, stream (main/sub) and streamId are required"));
+      return;
+    }
+    if (media_ == nullptr) {
+      complete(ProtoFailure(503, "stream_unavailable", "the media service is not running"));
+      return;
+    }
+    ChannelRow channel;
+    std::string error;
+    if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+      complete(ProtoFailure(404, "not_found", "channel not found or disabled"));
+      return;
+    }
+    if (stream == "sub" && !channel.sub_enabled) {
+      complete(ProtoFailure(400, "sub_disabled", "the sub stream is disabled for this channel"));
+      return;
+    }
+    const uint32_t stream_id = static_cast<uint32_t>(requested_id);
+    std::weak_ptr<proto::ProtoConnection> weak = request->connection;
+    // The raw media fan-out runs on the ffmpeg reader thread. libuv handles
+    // (TCP writes in particular) are loop-thread-only, so hand every frame to
+    // the web loop with a copy instead of calling SendStreamFrame in place.
+    const uint64_t media_subscription = media_->AddRawSubscriber(
+        channel_id, stream,
+        [this, weak, stream_id](const uint8_t* data, size_t len) {
+          if (data == nullptr || len == 0)
+            return;
+          std::vector<uint8_t> frame(data, data + len);
+          const uint64_t pts = static_cast<uint64_t>(ProtoNowMs());
+          web_.post([weak, stream_id, frame = std::move(frame), pts] {
+            if (auto connection = weak.lock(); connection && connection->alive())
+              connection->SendStreamFrame(proto::kOpLiveFrame, stream_id, frame.data(),
+                                          frame.size(), 0, 0, pts);
+          });
+        },
+        &error);
+    if (media_subscription == 0) {
+      complete(ProtoFailure(503, "stream_unavailable",
+                            error.empty() ? "the stream could not be opened" : error));
+      return;
+    }
+    const uint64_t key = ProtoLiveKey(request->connection_id, stream_id);
+    {
+      std::lock_guard<std::mutex> lock(proto_live_mutex_);
+      proto_live_[key] = ProtoLiveSubscription{channel_id, stream, media_subscription};
+    }
+    request->connection->AddCleanup([this, key] { ProtoRemoveLive(key); });
+    proto::ProtoReply reply;
+    reply.opcode = proto::kOpLiveAck;
+    reply.data = json{{"channelId", channel_id}, {"stream", stream}, {"streamId", stream_id}};
+    complete(reply);
+    return;
+  }
+
+  case proto::kOpLiveClose: {
+    const int64_t requested_id = JsonInt(fields, "streamId", 0);
+    if (requested_id <= 0 || requested_id > 0x7fffffff) {
+      complete(ProtoFailure(400, "invalid_stream", "streamId is required"));
+      return;
+    }
+    const uint32_t stream_id = static_cast<uint32_t>(requested_id);
+    ProtoRemoveLive(ProtoLiveKey(request->connection_id, stream_id));
+    proto::ProtoReply reply;
+    reply.data = json{{"streamId", stream_id}, {"ok", true}};
+    complete(reply);
+    return;
+  }
+
+  case proto::kOpDownloadOpen: {
+    if (!HasPermission(user, "playback.download")) {
+      complete(ProtoFailure(403, "forbidden", "playback.download permission is required"));
+      return;
+    }
+    const int64_t recording_id = JsonInt(fields, "recordingId", 0);
+    const int64_t requested_id = JsonInt(fields, "downloadId", 0);
+    if (recording_id <= 0 || requested_id <= 0 || requested_id > 0xffffffffll) {
+      complete(ProtoFailure(400, "invalid_id", "recordingId and downloadId are required"));
+      return;
+    }
+    const uint32_t download_id = static_cast<uint32_t>(requested_id);
+    auto connection = request->connection;
+    const proto::Header header = request->header;
+    auto info = std::make_shared<ProtoDownloadInfo>();
+    RunWork(
+        [this, recording_id, info] {
+          uvcpp::uvcpp_db_table table;
+          uvcpp::uvcpp_db_params params;
+          params.add(recording_id);
+          std::string error;
+          if (!Query("SELECT path, codec, size_bytes FROM recordings WHERE id = ?", params,
+                     &table, &error) ||
+              table.empty()) {
+            info->status = 404;
+            info->message = "recording not found";
+            return;
+          }
+          info->path = TableText(table, 0, "path");
+          info->codec = TableText(table, 0, "codec");
+          std::error_code size_error;
+          const uintmax_t size = std::filesystem::file_size(info->path, size_error);
+          if (size_error || size == 0) {
+            info->status = 404;
+            info->message = "recording file is missing or empty";
+            return;
+          }
+          info->size = static_cast<uint64_t>(size);
+          info->ok = true;
+        },
+        [this, info, connection, header, recording_id, download_id] {
+          if (!connection || !connection->alive())
+            return;
+          if (!info->ok) {
+            connection->SendError(proto::kOpDownloadOpen, header.session_id, header.request_id,
+                                  info->status, info->code, info->message);
+            return;
+          }
+          connection->SendJson(proto::kOpDownloadBegin, proto::kFlagResponse, header.session_id,
+                               header.request_id,
+                               json{{"recordingId", recording_id},
+                                    {"downloadId", download_id},
+                                    {"sizeBytes", info->size},
+                                    {"codec", info->codec}});
+
+          auto state = std::make_shared<ProtoDownloadState>();
+          state->connection = connection;
+          state->header = header;
+          state->download_id = download_id;
+          state->path = info->path;
+          state->size = info->size;
+          ProtoPumpDownload(std::move(state));
+        });
+    return;
+  }
+
+  default:
+    complete(ProtoFailure(501, "unsupported_opcode",
+                          "this opcode is not implemented by the dispatcher"));
+    return;
+  }
+}
+
+// Sends exactly one 256 KiB chunk per invocation and re-arms itself from the
+// worker completion. Holding only a weak_ptr to a self-owned std::function
+// here would let the chain die after the first chunk; the member-function form
+// keeps `state` (and therefore the pending connection reference) alive for the
+// whole transfer without a reference cycle.
+void App::ProtoPumpDownload(std::shared_ptr<ProtoDownloadState> state) {
+  if (!state)
+    return;
+  auto target = state->connection;
+  if (!target || !target->alive())
+    return;
+  if (state->offset >= state->size) {
+    ProtoSendDownloadDone(target, state->header, state->download_id, state->offset,
+                          state->chunks);
+    return;
+  }
+  const uint64_t offset = state->offset;
+  const std::string path = state->path;
+  auto buffer = std::make_shared<std::vector<uint8_t>>(256u * 1024u);
+  RunWork(
+      [path, offset, buffer] {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+          buffer->clear();
+          return;
+        }
+        input.seekg(static_cast<std::streamoff>(offset));
+        input.read(reinterpret_cast<char*>(buffer->data()),
+                   static_cast<std::streamsize>(buffer->size()));
+        const std::streamsize got = input.gcount();
+        buffer->resize(got > 0 ? static_cast<size_t>(got) : 0);
+      },
+      [this, state, offset, buffer] {
+        auto target = state->connection;
+        if (!target || !target->alive())
+          return;
+        if (buffer->empty()) {
+          target->SendError(proto::kOpDownloadOpen, state->header.session_id,
+                            state->header.request_id, 500, "download_failed",
+                            "the recording file could not be read");
+          return;
+        }
+        std::vector<uint8_t> chunk(16 + buffer->size());
+        PutLe32(chunk.data(), state->download_id);
+        PutLe32(chunk.data() + 4, 0);
+        PutLe64(chunk.data() + 8, offset);
+        std::memcpy(chunk.data() + 16, buffer->data(), buffer->size());
+        if (!target->SendFrame(proto::kOpDownloadChunk, proto::kFlagStream, 0, 0,
+                               chunk.data(), chunk.size())) {
+          target->SendError(proto::kOpDownloadOpen, state->header.session_id,
+                            state->header.request_id, 500, "download_failed",
+                            "the client is not consuming the stream fast enough");
+          return;
+        }
+        state->offset = offset + buffer->size();
+        ++state->chunks;
+        if (state->offset >= state->size) {
+          ProtoSendDownloadDone(target, state->header, state->download_id, state->offset,
+                                state->chunks);
+          return;
+        }
+        ProtoPumpDownload(std::move(state));
+      });
 }
 
 } // namespace uvnvr
