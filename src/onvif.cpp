@@ -893,6 +893,10 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
   return true;
 }
 
+std::string ResolveMediaService(const std::string& device, const std::string& security,
+                                const std::string& username, const std::string& password,
+                                std::string* error);
+
 bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std::string& password,
                 OnvifInfo* info, std::string* error) {
   if (!EnsureWinsock(error))
@@ -911,9 +915,15 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   info->firmware = ExtractTag(device_xml, "FirmwareVersion");
   info->serial = ExtractTag(device_xml, "SerialNumber");
 
+  // Some devices expose the media service on its own path, and answering
+  // GetProfiles on the device endpoint returns a SOAP fault. Resolve the
+  // media XAddr first and fall back to the device service.
+  std::string media_error;
+  const std::string media_service =
+      ResolveMediaService(service, security, username, password, &media_error);
   const std::string profiles_xml = SoapCall(
-      service, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>", username,
-      password, error);
+      media_service, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>",
+      username, password, error);
   if (profiles_xml.empty())
     return false;
 
@@ -942,8 +952,8 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
         "<Transport xmlns=\"http://www.onvif.org/ver10/schema\"><Protocol>RTSP</Protocol>"
         "</Transport></StreamSetup><ProfileToken>" +
         XmlEscape(token) + "</ProfileToken></GetStreamUri>";
-    const std::string stream_xml = SoapCall(service, security, stream_body, username, password,
-                                            error);
+    const std::string stream_xml = SoapCall(media_service, security, stream_body, username,
+                                            password, error);
     if (stream_xml.empty())
       continue;
     profile.stream_uri = ExtractTag(stream_xml, "Uri");
