@@ -15,10 +15,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <db/uvcpp_db.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -61,21 +63,25 @@ int64_t NowSeconds() {
 
 using LocalDay = std::chrono::local_days;
 
-// The configured time zone decides which calendar day a recording belongs to.
-// libstdc++ ships the IANA database, so resolve the setting directly instead of
-// truncating UTC milliseconds (which is wrong for every offset but UTC).
-const std::chrono::time_zone* ResolveConfiguredZone(const std::string& name) {
-  try {
-    if (!name.empty())
-      return std::chrono::locate_zone(name);
-  } catch (...) {
-  }
-  try {
-    return std::chrono::locate_zone("UTC");
-  } catch (...) {
-    return nullptr;
-  }
-}
+// Calendar grouping needs the IANA time zone database. libstdc++ and MSVC ship
+// it behind C++20 chrono time zones, but libc++ (macOS) does not, so detect the
+// feature at compile time and fall back to the process POSIX time zone.
+// UVNVR_FORCE_POSIX_TZ=1 selects the fallback on a platform that does have the
+// database, which keeps both code paths testable on Linux.
+#if defined(UVNVR_FORCE_POSIX_TZ) && UVNVR_FORCE_POSIX_TZ
+#define UVNVR_HAVE_TZDB 0
+#elif defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+#define UVNVR_HAVE_TZDB 1
+#else
+#define UVNVR_HAVE_TZDB 0
+#endif
+
+#if UVNVR_HAVE_TZDB
+using DayZone = const std::chrono::time_zone*;
+#else
+// Nothing to carry: the process time zone has already been set globally.
+struct DayZone {};
+#endif
 
 bool ParseIsoDay(const std::string& text, LocalDay* out) {
   if (text.size() != 10 || text[4] != '-' || text[7] != '-')
@@ -112,7 +118,25 @@ std::string FormatLocalDay(LocalDay day) {
   return buffer;
 }
 
-LocalDay LocalDayOf(int64_t timestamp_ms, const std::chrono::time_zone* zone) {
+#if UVNVR_HAVE_TZDB
+
+// The configured time zone decides which calendar day a recording belongs to.
+// Resolve the setting directly instead of truncating UTC milliseconds (which is
+// wrong for every offset but UTC).
+DayZone ResolveConfiguredZone(const std::string& name) {
+  try {
+    if (!name.empty())
+      return std::chrono::locate_zone(name);
+  } catch (...) {
+  }
+  try {
+    return std::chrono::locate_zone("UTC");
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+LocalDay LocalDayOf(int64_t timestamp_ms, DayZone zone) {
   if (zone == nullptr) {
     const int64_t days = timestamp_ms >= 0
                              ? timestamp_ms / 86400000
@@ -126,12 +150,85 @@ LocalDay LocalDayOf(int64_t timestamp_ms, const std::chrono::time_zone* zone) {
   return std::chrono::floor<std::chrono::days>(local);
 }
 
-int64_t LocalDayStartMs(LocalDay day, const std::chrono::time_zone* zone) {
+int64_t LocalDayStartMs(LocalDay day, DayZone zone) {
   if (zone == nullptr)
     return std::chrono::duration_cast<std::chrono::milliseconds>(day.time_since_epoch()).count();
   const auto tp = std::chrono::zoned_time(zone, day).get_sys_time();
   return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
 }
+
+#else
+
+// Fallback for standard libraries without the IANA database (libc++/macOS).
+// POSIX local time is process-global, so the configured zone is pushed into TZ
+// once and re-applied only if the setting actually changes. The mutex also
+// serialises the localtime/mktime calls with the (rare) setenv/tzset update, so
+// concurrent workers cannot observe a half-applied TZ.
+std::mutex& DayZoneMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+bool g_day_zone_configured = false;
+std::string g_day_zone_name;
+
+DayZone ResolveConfiguredZone(const std::string& name) {
+  const std::string effective = name.empty() ? "UTC" : name;
+  std::lock_guard<std::mutex> lock(DayZoneMutex());
+  if (!g_day_zone_configured || g_day_zone_name != effective) {
+#ifdef _WIN32
+    _putenv_s("TZ", effective.c_str());
+    _tzset();
+#else
+    setenv("TZ", effective.c_str(), 1);
+    tzset();
+#endif
+    g_day_zone_name = effective;
+    g_day_zone_configured = true;
+  }
+  return DayZone{};
+}
+
+LocalDay LocalDayOf(int64_t timestamp_ms, DayZone) {
+  // Floor division, so pre-epoch milliseconds land on the correct second.
+  const int64_t seconds =
+      timestamp_ms >= 0 ? timestamp_ms / 1000 : -((-timestamp_ms + 999) / 1000);
+  std::time_t value = static_cast<std::time_t>(seconds);
+  std::tm local{};
+  std::lock_guard<std::mutex> lock(DayZoneMutex());
+#ifdef _WIN32
+  if (localtime_s(&local, &value) != 0)
+    return LocalDay{};
+#else
+  if (localtime_r(&value, &local) == nullptr)
+    return LocalDay{};
+#endif
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{local.tm_year + 1900},
+      std::chrono::month{static_cast<unsigned>(local.tm_mon + 1)},
+      std::chrono::day{static_cast<unsigned>(local.tm_mday)}};
+  return LocalDay{ymd};
+}
+
+int64_t LocalDayStartMs(LocalDay day, DayZone) {
+  const std::chrono::year_month_day ymd{day};
+  std::tm local{};
+  local.tm_year = static_cast<int>(ymd.year()) - 1900;
+  local.tm_mon = static_cast<int>(static_cast<unsigned>(ymd.month())) - 1;
+  local.tm_mday = static_cast<int>(static_cast<unsigned>(ymd.day()));
+  local.tm_hour = 0;
+  local.tm_min = 0;
+  local.tm_sec = 0;
+  // Let mktime decide DST instead of guessing from the day of year.
+  local.tm_isdst = -1;
+  std::lock_guard<std::mutex> lock(DayZoneMutex());
+  const std::time_t value = std::mktime(&local);
+  if (value == static_cast<std::time_t>(-1))
+    return 0;
+  return static_cast<int64_t>(value) * 1000;
+}
+
+#endif
 
 std::string HexEncode(const unsigned char* data, size_t size) {
   static constexpr char kHex[] = "0123456789abcdef";
@@ -7616,7 +7713,7 @@ void App::RegisterRecordingRoutes() {
             RunWork(
                 [this, channel_id, from_day, to_day, days] {
                   const std::string zone_name = GetSetting("system.timezone", "UTC");
-                  const std::chrono::time_zone* zone = ResolveConfiguredZone(zone_name);
+                  const DayZone zone = ResolveConfiguredZone(zone_name);
                   const int64_t from_ms = LocalDayStartMs(from_day, zone);
                   const int64_t to_ms =
                       LocalDayStartMs(to_day + std::chrono::days{1}, zone);
@@ -8770,7 +8867,7 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     RunWork(
         [this, channel_id, from_day, to_day, days] {
           const std::string zone_name = GetSetting("system.timezone", "UTC");
-          const std::chrono::time_zone* zone = ResolveConfiguredZone(zone_name);
+          const DayZone zone = ResolveConfiguredZone(zone_name);
           const int64_t from_ms = LocalDayStartMs(from_day, zone);
           const int64_t to_ms = LocalDayStartMs(to_day + std::chrono::days{1}, zone);
           std::set<LocalDay> found;
