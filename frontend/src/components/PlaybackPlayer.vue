@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import mpegts from 'mpegts.js'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
@@ -24,7 +24,14 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const playerRoot = ref<HTMLElement | null>(null)
 const video = ref<HTMLVideoElement | null>(null)
+const isFullscreen = ref(false)
+const controlsVisible = ref(true)
+const fullscreenNotice = ref('')
+const hiddenControls = computed(() => isFullscreen.value && !controlsVisible.value)
+let idleTimer: number | undefined
+let noticeTimer: number | undefined
 const state = ref<'idle' | 'loading' | 'playing' | 'error'>('idle')
 const message = ref('')
 const activeSpeed = ref(props.speed || 1)
@@ -185,6 +192,81 @@ function setSpeed(value: number) {
   emit('speed-change', value)
 }
 
+// --- Fullscreen -----------------------------------------------------------
+
+function armIdleTimer() {
+  if (idleTimer !== undefined) window.clearTimeout(idleTimer)
+  idleTimer = window.setTimeout(() => {
+    idleTimer = undefined
+    // Only hide the chrome while the player owns the full screen; leaving
+    // fullscreen must never strand the controls in a hidden state.
+    if (document.fullscreenElement === playerRoot.value) controlsVisible.value = false
+  }, 3000)
+}
+
+function revealControls() {
+  controlsVisible.value = true
+  if (document.fullscreenElement === playerRoot.value) armIdleTimer()
+}
+
+function showFullscreenNotice() {
+  fullscreenNotice.value = t('playback.fullscreenUnavailable')
+  if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
+  noticeTimer = window.setTimeout(() => {
+    fullscreenNotice.value = ''
+    noticeTimer = undefined
+  }, 5000)
+}
+
+async function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    try {
+      await document.exitFullscreen()
+    } catch {
+      /* The browser may already be leaving fullscreen. */
+    }
+    return
+  }
+  const target = playerRoot.value
+  if (!target || typeof target.requestFullscreen !== 'function') {
+    showFullscreenNotice()
+    return
+  }
+  try {
+    await target.requestFullscreen()
+  } catch {
+    // Permissions policy, iframes without allowfullscreen and user-gesture
+    // violations all reject here; surface them instead of failing silently.
+    showFullscreenNotice()
+  }
+}
+
+function syncFullscreenState() {
+  const active = document.fullscreenElement === playerRoot.value
+  isFullscreen.value = active
+  controlsVisible.value = true
+  if (active) {
+    armIdleTimer()
+  } else if (idleTimer !== undefined) {
+    window.clearTimeout(idleTimer)
+    idleTimer = undefined
+  }
+}
+
+function onFullscreenShortcut(event: KeyboardEvent) {
+  if (event.key !== 'f' && event.key !== 'F') return
+  if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return
+  const target = event.target as HTMLElement | null
+  const tag = target?.tagName
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || target?.isContentEditable) return
+  // KeepAlive keeps a deactivated view alive; never hijack F on another page.
+  if (!playerRoot.value?.isConnected) return
+  const rect = playerRoot.value.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return
+  event.preventDefault()
+  void toggleFullscreen()
+}
+
 watch(
   () => props.startMs,
   (value) => {
@@ -205,26 +287,53 @@ watch(
   },
 )
 
-defineExpose({ reload: start, togglePlay, positionMs, skip, setSpeed })
+defineExpose({ reload: start, togglePlay, positionMs, skip, setSpeed, toggleFullscreen })
 
 onMounted(() => {
   ticker = window.setInterval(() => {
     position.value = positionMs()
     emit('position', position.value)
   }, 500)
+  document.addEventListener('fullscreenchange', syncFullscreenState)
+  window.addEventListener('keydown', onFullscreenShortcut)
   void start()
 })
 onBeforeUnmount(() => {
   destroyed = true
   if (ticker !== undefined) window.clearInterval(ticker)
+  if (idleTimer !== undefined) window.clearTimeout(idleTimer)
+  if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
+  document.removeEventListener('fullscreenchange', syncFullscreenState)
+  window.removeEventListener('keydown', onFullscreenShortcut)
+  if (document.fullscreenElement === playerRoot.value) {
+    void document.exitFullscreen().catch(() => undefined)
+  }
   destroy()
 })
 </script>
 
 <template>
-  <div class="playback-player">
+  <div
+    ref="playerRoot"
+    class="playback-player"
+    :class="{ 'controls-hidden': hiddenControls, 'is-fullscreen': isFullscreen }"
+    @pointermove="revealControls"
+    @pointerdown="revealControls"
+  >
     <video ref="video" class="playback-video" playsinline></video>
     <div class="playback-title">{{ title }}</div>
+    <button
+      class="icon-button small playback-fullscreen"
+      type="button"
+      :title="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
+      :aria-label="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
+      @click="toggleFullscreen"
+    >
+      <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="16" />
+    </button>
+    <div v-if="fullscreenNotice" class="playback-fs-toast" role="status">
+      {{ fullscreenNotice }}
+    </div>
     <div v-if="state === 'loading'" class="live-overlay">
       <span class="spinner"></span>
       <span>{{ t('common.loading') }}</span>
