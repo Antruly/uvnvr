@@ -19,7 +19,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <handle/uvcpp_async.h>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_timer.h>
 #include <net/uvcpp_tcp_client.h>
@@ -161,7 +160,11 @@ private:
   // Loop-thread plumbing.
   void Post(std::function<void()> task);
   void DrainTasks();
+  int StartTaskPump();
+  void OnTaskPump();
   void ShutdownOnLoop();
+  int WaitForConnect(const std::shared_ptr<Pending>& waiter, int timeout_ms,
+                     std::string* error);
 
   // Connections.
   void BeginConnect(const std::string& host, uint16_t port, int timeout_ms,
@@ -214,11 +217,17 @@ private:
 
   // Member order matters: loop first, then handles bound to it, then thread.
   uvcpp::uvcpp_loop loop_;
-  uvcpp::uvcpp_async async_;
+  uvcpp::uvcpp_timer task_timer_;
   uvcpp::uvcpp_timer connect_timer_;
   uvcpp::uvcpp_timer heartbeat_timer_;
   uvcpp::uvcpp_timer renew_timer_;
   std::thread thread_;
+  // Loop-thread only. This SDK never calls uv_async_send(): the transports and
+  // the loop belong to libuvcpp's statically linked libuv, and resolving that
+  // symbol from a second libuv (the one the platform package provides) is not
+  // valid across libuv versions. The pump timer is created through libuvcpp,
+  // so every libuv call stays inside the same instance.
+  uint32_t task_pump_interval_ms_ = 0;
 
   std::mutex task_mutex_;
   std::deque<std::function<void()>> tasks_;
@@ -246,6 +255,7 @@ private:
   std::shared_ptr<Pending> connect_waiter_;
   uint32_t hello_request_id_ = 0;
   bool hello_pending_ = false;
+  uint32_t connect_timeout_ms_ = 5000;
   std::chrono::steady_clock::time_point connect_started_;
 
   std::unique_ptr<uvcpp::uvcpp_tcp_client> tcp_;

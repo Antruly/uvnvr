@@ -44,10 +44,14 @@ target_compile_definitions(uvnvr_sdk PRIVATE
   UVNVR_SDK_VERSION="0.1.0"
 )
 
+# Do NOT link a second libuv here. libuvcpp's release archives embed their own
+# libuv, and the SDK must not make direct libuv calls: a symbol resolved from
+# the platform's libuv would operate on handles and a loop created by the
+# libuv version embedded in libuvcpp. Those structs changed between libuv
+# releases (uv_async_t's private fields among them), and a mismatch leaves the
+# SDK's task pump unable to wake the loop. The SDK uses only libuvcpp's
+# exported API; see Client::StartTaskPump().
 target_link_libraries(uvnvr_sdk PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::SSL OpenSSL::Crypto)
-if(TARGET PkgConfig::LIBUV)
-  target_link_libraries(uvnvr_sdk PRIVATE PkgConfig::LIBUV)
-endif()
 
 # libuvcpp's shared object carries a DT_NEEDED on libllhttp; ld needs to resolve
 # it at link time even though the SDK never calls it directly.

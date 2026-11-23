@@ -47,12 +47,35 @@ json ParseJson(const std::string& text) {
 
 } // namespace
 
+namespace {
+// Cross-thread tasks are drained from a libuv timer owned by this SDK. The
+// interval stays short while a connect or a request is in flight and relaxes
+// when the client is idle; I/O readiness still wakes the loop normally.
+constexpr uint32_t kTaskPumpActiveMs = 2;
+constexpr uint32_t kTaskPumpIdleMs = 20;
+}  // namespace
+
 Client::Client(const Options& options) : options_(options) {
-  async_.init([this](uvcpp::uvcpp_async*) { DrainTasks(); }, &loop_);
+  task_timer_.init(&loop_);
   connect_timer_.init(&loop_);
   heartbeat_timer_.init(&loop_);
   renew_timer_.init(&loop_);
-  thread_ = std::thread([this] { loop_.run(UV_RUN_DEFAULT); });
+  thread_ = std::thread([this] {
+    if (StartTaskPump() != 0) {
+      // uv_timer_start should not fail after uv_timer_init succeeded, but if
+      // it ever does the loop still has to service Post() instead of silently
+      // starving every caller.
+      while (running_) {
+        DrainTasks();
+        loop_.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return;
+    }
+    // Tasks posted before the thread started should not wait for the idle tick.
+    DrainTasks();
+    loop_.run(UV_RUN_DEFAULT);
+  });
 }
 
 Client::~Client() {
@@ -73,13 +96,32 @@ Client::~Client() {
 }
 
 void Client::Post(std::function<void()> task) {
-  {
+  std::lock_guard<std::mutex> lock(task_mutex_);
+  if (!running_)
+    return;
+  tasks_.push_back(std::move(task));
+}
+
+int Client::StartTaskPump() {
+  task_pump_interval_ms_ = kTaskPumpIdleMs;
+  return task_timer_.start([this](uvcpp::uvcpp_timer*) { OnTaskPump(); },
+                           kTaskPumpIdleMs, kTaskPumpIdleMs);
+}
+
+void Client::OnTaskPump() {
+  DrainTasks();
+  // Only a connect or queued work needs a fast tick. Responses and live
+  // frames arrive through normal I/O readiness; they do not need the pump.
+  bool busy = connecting_;
+  if (!busy) {
     std::lock_guard<std::mutex> lock(task_mutex_);
-    if (!running_)
-      return;
-    tasks_.push_back(std::move(task));
+    busy = !tasks_.empty();
   }
-  async_.send();
+  const uint32_t interval = busy ? kTaskPumpActiveMs : kTaskPumpIdleMs;
+  if (interval != task_pump_interval_ms_) {
+    task_pump_interval_ms_ = interval;
+    task_timer_.start([this](uvcpp::uvcpp_timer*) { OnTaskPump(); }, interval, interval);
+  }
 }
 
 void Client::DrainTasks() {
@@ -95,6 +137,7 @@ void Client::DrainTasks() {
 }
 
 void Client::ShutdownOnLoop() {
+  task_timer_.stop();
   StopConnectTimer();
   heartbeat_timer_.stop();
   renew_timer_.stop();
@@ -109,8 +152,9 @@ void Client::ShutdownOnLoop() {
     CompletePending(waiter, UVNVR_ERR_CLOSED, "the SDK is shutting down", "", json::object());
   }
   live_.clear();
-  if (running_)
-    loop_.stop();
+  // Refuse any Post() that races with teardown, then leave the loop.
+  running_ = false;
+  loop_.stop();
 }
 
 void Client::CompletePending(const std::shared_ptr<Pending>& pending, int code,
@@ -198,15 +242,36 @@ int Client::Connect(const std::string& host, uint16_t port, int timeout_ms,
   Post([this, host, port, timeout_ms, waiter] {
     BeginConnect(host, port, timeout_ms, waiter);
   });
+  return WaitForConnect(waiter, timeout_ms, error);
+}
+
+int Client::WaitForConnect(const std::shared_ptr<Pending>& waiter, int timeout_ms,
+                           std::string* error) {
   std::unique_lock<std::mutex> lock(waiter->mutex);
-  if (!waiter->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms + 2000),
+  // The caller's budget is the connect_timeout_ms it asked for. The loop-side
+  // deadline is clamped to the same budget (see BeginTcpFallback), so this is
+  // only the last line of defence against a wedged loop.
+  if (!waiter->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                            [&] { return waiter->done; })) {
-    Post([this, waiter] {
-      CompletePending(waiter, UVNVR_ERR_TIMEOUT, "connection attempt timed out", "",
-                      json::object());
-    });
     if (error)
       *error = "connection attempt timed out";
+    // Do not hold the waiter lock while the loop-side cleanup tries to take it.
+    lock.unlock();
+    Post([this, waiter] {
+      {
+        std::lock_guard<std::mutex> guard(waiter->mutex);
+        if (waiter->done)
+          return;
+      }
+      // Stop the state machine if this waiter still owns the connect, so a
+      // late handshake cannot leave a half-open transport behind. If another
+      // connect has already taken over, just release this waiter.
+      if (connect_waiter_ && connect_waiter_.get() == waiter.get())
+        FailConnect(current_epoch_, UVNVR_ERR_TIMEOUT, "connection attempt timed out");
+      else
+        CompletePending(waiter, UVNVR_ERR_TIMEOUT, "connection attempt timed out", "",
+                        json::object());
+    });
     return UVNVR_ERR_TIMEOUT;
   }
   if (waiter->code != UVNVR_OK) {
@@ -219,10 +284,17 @@ int Client::Connect(const std::string& host, uint16_t port, int timeout_ms,
 
 void Client::BeginConnect(const std::string& host, uint16_t port, int timeout_ms,
                           std::shared_ptr<Pending> waiter) {
+  {
+    std::lock_guard<std::mutex> lock(waiter->mutex);
+    // The caller may already have given up while this task sat in the queue.
+    if (waiter->done)
+      return;
+  }
   CloseTransport();
   connected_ = false;
   transport_ = UVNVR_TRANSPORT_UNKNOWN;
   connecting_ = true;
+  connect_timeout_ms_ = static_cast<uint32_t>(std::max(timeout_ms, 1));
   connect_waiter_ = std::move(waiter);
   connect_started_ = std::chrono::steady_clock::now();
   {
@@ -378,6 +450,16 @@ void Client::BeginTcpFallback(uint64_t epoch) {
   quic_attempt_active_ = false;
   connected_ = false;
   transport_ = UVNVR_TRANSPORT_UNKNOWN;
+  // The QUIC probe spends part of the caller's budget; TCP gets the rest.
+  // Never give the fallback a fresh full timeout, or connect could take
+  // longer than connect_timeout_ms.
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - connect_started_)
+                              .count();
+  int remaining_ms = static_cast<int>(connect_timeout_ms_) - static_cast<int>(elapsed_ms);
+  if (remaining_ms < 1)
+    remaining_ms = 1;
+  const uint32_t fallback_budget = static_cast<uint32_t>(remaining_ms);
 #if defined(UVNVR_SDK_HAVE_QUIC)
   struct QuicCleanup {
     std::unique_ptr<uvcpp::uvcpp_quic_client> quic;
@@ -390,7 +472,7 @@ void Client::BeginTcpFallback(uint64_t epoch) {
   quic_pending_.clear();
   // Do not destroy the QUIC endpoint from inside its own callback; hand it to
   // the next loop turn, then start TCP.
-  Post([this, next, cleanup] {
+  Post([this, next, cleanup, fallback_budget] {
     if (cleanup->quic)
       cleanup->quic->close();
     cleanup->quic.reset();
@@ -398,11 +480,11 @@ void Client::BeginTcpFallback(uint64_t epoch) {
     if (!connecting_ || next != current_epoch_)
       return;
     StartTcp(next);
-    StartConnectTimer(options_.connect_timeout_ms, next, false);
+    StartConnectTimer(fallback_budget, next, false);
   });
 #else
   StartTcp(next);
-  StartConnectTimer(options_.connect_timeout_ms, next, false);
+  StartConnectTimer(fallback_budget, next, false);
 #endif
 }
 
@@ -838,20 +920,7 @@ int Client::EnsureReady(std::string* error) {
   Post([this, host, port, waiter] {
     BeginConnect(host, port, static_cast<int>(options_.connect_timeout_ms), waiter);
   });
-  std::unique_lock<std::mutex> lock(waiter->mutex);
-  if (!waiter->cv.wait_for(lock,
-                           std::chrono::milliseconds(options_.connect_timeout_ms + 2000),
-                           [&] { return waiter->done; })) {
-    if (error)
-      *error = "reconnect timed out";
-    return UVNVR_ERR_TIMEOUT;
-  }
-  if (waiter->code != UVNVR_OK) {
-    if (error)
-      *error = waiter->message;
-    return waiter->code;
-  }
-  return UVNVR_OK;
+  return WaitForConnect(waiter, static_cast<int>(options_.connect_timeout_ms), error);
 }
 
 int Client::Login(const std::string& username, const std::string& password,
