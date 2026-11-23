@@ -299,6 +299,7 @@ void ProtoConnection::PumpTcpWrites() {
 }
 
 void ProtoConnection::FlushQuicQueue() {
+#if defined(UVNVR_HAVE_QUIC)
   if (!alive_ || quic_connection_ == nullptr || quic_control_stream_ < 0)
     return;
   auto queue = std::move(quic_pending_);
@@ -311,6 +312,9 @@ void ProtoConnection::FlushQuicQueue() {
       return;
     }
   }
+#else
+  quic_pending_.clear();
+#endif
 }
 
 bool ProtoConnection::SendFrame(uint16_t opcode, uint16_t flags, uint64_t session_id,
@@ -330,6 +334,7 @@ bool ProtoConnection::SendFrame(uint16_t opcode, uint16_t flags, uint64_t sessio
                  frame.size(), is_quic_ ? 1 : 0);
 
   if (is_quic_) {
+#if defined(UVNVR_HAVE_QUIC)
     if (quic_connection_ == nullptr)
       return false;
     if (quic_control_stream_ < 0) {
@@ -343,6 +348,10 @@ bool ProtoConnection::SendFrame(uint16_t opcode, uint16_t flags, uint64_t sessio
       return false;
     }
     return true;
+#else
+    // This build has no QUIC listener, so a QUIC connection cannot exist.
+    return false;
+#endif
   }
 
   if (tcp_ == nullptr)
@@ -393,8 +402,10 @@ void ProtoConnection::Close() {
   closing_ = true;
   MarkClosed();
   if (is_quic_) {
+#if defined(UVNVR_HAVE_QUIC)
     if (quic_connection_ != nullptr)
       quic_connection_->close();
+#endif
   } else if (tcp_ != nullptr) {
     tcp_->close();
   }
