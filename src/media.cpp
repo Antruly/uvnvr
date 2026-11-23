@@ -24,6 +24,7 @@
 #else
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #ifdef __linux__
@@ -136,7 +137,9 @@ bool CapturePosix(const std::string& executable, const std::vector<std::string>&
     for (const auto& arg : args)
       argv.push_back(const_cast<char*>(arg.c_str()));
     argv.push_back(nullptr);
-    execv(executable.c_str(), argv.data());
+    // A bare executable name ("ffmpeg") relies on PATH; the live ingest
+    // process resolves it the same way.
+    execvp(executable.c_str(), argv.data());
     _exit(127);
   }
   close(fds[1]);
@@ -249,6 +252,229 @@ bool CaptureWindows(const std::string& executable, const std::vector<std::string
 }
 #endif
 
+// Runs ffmpeg with a caller-supplied byte stream on stdin. Used to decode a
+// snapshot from the live stream's cached MPEG-TS instead of opening a second
+// RTSP connection. The writer runs on its own thread because ffmpeg stops
+// reading stdin as soon as it has one frame but keeps writing stdout; doing
+// both from one thread can deadlock on the two pipe buffers.
+#ifndef _WIN32
+bool CapturePipePosix(const std::string& executable, const std::vector<std::string>& args,
+                      const std::vector<uint8_t>& input, std::string* output,
+                      std::string* error) {
+  int in_pipe[2];
+  int out_pipe[2];
+  if (pipe(in_pipe) != 0) {
+    if (error)
+      *error = std::string("pipe failed: ") + std::strerror(errno);
+    return false;
+  }
+  if (pipe(out_pipe) != 0) {
+    close(in_pipe[0]);
+    close(in_pipe[1]);
+    if (error)
+      *error = std::string("pipe failed: ") + std::strerror(errno);
+    return false;
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    close(in_pipe[0]);
+    close(in_pipe[1]);
+    close(out_pipe[0]);
+    close(out_pipe[1]);
+    if (error)
+      *error = "fork failed";
+    return false;
+  }
+  if (pid == 0) {
+    dup2(in_pipe[0], STDIN_FILENO);
+    dup2(out_pipe[1], STDOUT_FILENO);
+    const int null_fd = open("/dev/null", O_WRONLY);
+    if (null_fd >= 0)
+      dup2(null_fd, STDERR_FILENO);
+    close(in_pipe[0]);
+    close(in_pipe[1]);
+    close(out_pipe[0]);
+    close(out_pipe[1]);
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(executable.c_str()));
+    for (const auto& arg : args)
+      argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+    // A bare executable name ("ffmpeg") relies on PATH; the live ingest
+    // process resolves it the same way.
+    execvp(executable.c_str(), argv.data());
+    _exit(127);
+  }
+  close(in_pipe[0]);
+  close(out_pipe[1]);
+  std::thread writer([&] {
+    // ffmpeg may exit after the first frame while we are still feeding the
+    // cache. Block SIGPIPE in this thread so a closed stdin returns EPIPE
+    // instead of taking the service down.
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &blocked, nullptr);
+    size_t offset = 0;
+    while (offset < input.size()) {
+      const ssize_t written = write(in_pipe[1], input.data() + offset, input.size() - offset);
+      if (written <= 0)
+        break;
+      offset += static_cast<size_t>(written);
+    }
+    close(in_pipe[1]);
+  });
+
+  output->clear();
+  char buffer[16384];
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool timed_out = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    struct pollfd pfd {
+      out_pipe[0], POLLIN, 0
+    };
+    const int ready = poll(&pfd, 1, 200);
+    if (ready < 0)
+      break;
+    if (ready == 0)
+      continue;
+    const ssize_t n = read(out_pipe[0], buffer, sizeof(buffer));
+    if (n <= 0)
+      break;
+    output->append(buffer, static_cast<size_t>(n));
+    if (output->size() > 16 * 1024 * 1024)
+      break;
+  }
+  if (std::chrono::steady_clock::now() >= deadline) {
+    timed_out = true;
+    kill(pid, SIGKILL);
+  }
+  close(out_pipe[0]);
+  int status = 0;
+  bool exited_cleanly = false;
+  // If the child is still alive (for example the read loop stopped on the
+  // size cap), stop it before joining the writer: a child that no longer
+  // reads stdin would leave the writer blocked on a full pipe.
+  if (waitpid(pid, &status, WNOHANG) == 0) {
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+  } else {
+    exited_cleanly = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  }
+  writer.join();
+  if (output->empty() || !exited_cleanly) {
+    if (error)
+      *error = timed_out ? "ffmpeg snapshot timed out"
+                         : (output->empty() ? "ffmpeg snapshot returned no data"
+                                            : "ffmpeg snapshot failed to decode");
+    return false;
+  }
+  return true;
+}
+#else
+bool CapturePipeWindows(const std::string& executable, const std::vector<std::string>& args,
+                        const std::vector<uint8_t>& input, std::string* output,
+                        std::string* error) {
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.bInheritHandle = TRUE;
+  HANDLE in_read = nullptr;
+  HANDLE in_write = nullptr;
+  HANDLE out_read = nullptr;
+  HANDLE out_write = nullptr;
+  if (!CreatePipe(&in_read, &in_write, &attributes, 0) ||
+      !CreatePipe(&out_read, &out_write, &attributes, 0)) {
+    if (error)
+      *error = "cannot create capture pipes";
+    return false;
+  }
+  SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
+  HANDLE null_out =
+      CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &attributes, OPEN_EXISTING, 0, nullptr);
+  const bool has_null = null_out != nullptr && null_out != INVALID_HANDLE_VALUE;
+
+  std::string command = QuoteWindowsArg(executable);
+  for (const auto& arg : args)
+    command += " " + QuoteWindowsArg(arg);
+  STARTUPINFOA startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = in_read;
+  startup.hStdOutput = out_write;
+  startup.hStdError = has_null ? null_out : GetStdHandle(STD_ERROR_HANDLE);
+  PROCESS_INFORMATION process{};
+  std::vector<char> mutable_command(command.begin(), command.end());
+  mutable_command.push_back('\0');
+  const BOOL started = CreateProcessA(nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
+                                      CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+  CloseHandle(in_read);
+  CloseHandle(out_write);
+  if (has_null)
+    CloseHandle(null_out);
+  if (!started) {
+    CloseHandle(in_write);
+    CloseHandle(out_read);
+    if (error)
+      *error = "cannot start ffmpeg (CreateProcess failed)";
+    return false;
+  }
+
+  std::thread writer([&] {
+    size_t offset = 0;
+    while (offset < input.size()) {
+      DWORD written = 0;
+      const DWORD chunk = static_cast<DWORD>(std::min<size_t>(input.size() - offset, 65536));
+      if (!WriteFile(in_write, input.data() + offset, chunk, &written, nullptr) || written == 0)
+        break;
+      offset += written;
+    }
+    CloseHandle(in_write);
+  });
+
+  output->clear();
+  const DWORD deadline = GetTickCount() + 10000;
+  char buffer[16384];
+  while (GetTickCount() < deadline) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(out_read, nullptr, 0, nullptr, &available, nullptr))
+      break;
+    if (available == 0) {
+      if (WaitForSingleObject(process.hProcess, 100) == WAIT_OBJECT_0) {
+        DWORD read = 0;
+        while (ReadFile(out_read, buffer, sizeof(buffer), &read, nullptr) && read > 0)
+          output->append(buffer, read);
+        break;
+      }
+      continue;
+    }
+    DWORD read = 0;
+    if (!ReadFile(out_read, buffer, sizeof(buffer), &read, nullptr) || read == 0)
+      break;
+    output->append(buffer, read);
+    if (output->size() > 16 * 1024 * 1024)
+      break;
+  }
+  if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT)
+    TerminateProcess(process.hProcess, 1);
+  WaitForSingleObject(process.hProcess, 2000);
+  DWORD exit_code = 1;
+  GetExitCodeProcess(process.hProcess, &exit_code);
+  CloseHandle(out_read);
+  // The child is gone or exiting, so the writer can no longer block.
+  writer.join();
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  if (output->empty() || exit_code != 0) {
+    if (error)
+      *error = output->empty() ? "ffmpeg snapshot returned no data"
+                               : "ffmpeg snapshot failed to decode";
+    return false;
+  }
+  return true;
+}
+#endif
+
 } // namespace
 
 struct MediaService::Impl {
@@ -260,11 +486,62 @@ struct MediaService::Impl {
   };
 
   struct Subscriber {
+    // A subscriber may fall up to one second behind live before we start
+    // dropping its feed, and its queued bytes never exceed two megabytes.
+    // Two megabytes is one second at 16 Mbit/s, so the time limit is what
+    // normally trips; the byte limit only bounds very high bitrate streams.
+    static constexpr int64_t kMaxBacklogMs = 1000;
+    static constexpr size_t kMaxBacklogBytes = 2 * 1024 * 1024;
+
     uint64_t id = 0;
     std::atomic<uvcpp::uvcpp_ws_connection*> connection{nullptr};
     std::atomic<bool> alive{true};
-    std::atomic<bool> pending{false};
-    std::atomic<bool> skipping{false};
+    // Set while the subscriber is over budget: live chunks are dropped until
+    // the next keyframe so the client can resync. Written by the ffmpeg
+    // thread (PublishAligned) and by AddSubscriber on the loop thread.
+    std::atomic<bool> waiting_keyframe{false};
+
+    // Bytes handed to the WebSocket layer but not yet reported as sent. The
+    // ffmpeg thread reserves room before posting a chunk and the loop thread
+    // releases it from the send completion callback. Entries stay in enqueue
+    // order because uvcpp settles frames in order, so the front entry is
+    // exactly the oldest byte still queued and its age is the client's
+    // current latency.
+    struct Backlog {
+      int64_t at_ms = 0;
+      size_t bytes = 0;
+    };
+    std::mutex backlog_mutex;
+    std::deque<Backlog> backlog;
+    size_t backlog_bytes = 0;
+
+    bool Reserve(size_t bytes) {
+      std::lock_guard<std::mutex> lock(backlog_mutex);
+      if (backlog_bytes + bytes > kMaxBacklogBytes)
+        return false;
+      const int64_t now = NowMs();
+      if (!backlog.empty() && now - backlog.front().at_ms >= kMaxBacklogMs)
+        return false;
+      backlog.push_back(Backlog{now, bytes});
+      backlog_bytes += bytes;
+      return true;
+    }
+
+    void Release(size_t bytes) {
+      std::lock_guard<std::mutex> lock(backlog_mutex);
+      while (bytes > 0 && !backlog.empty()) {
+        Backlog& front = backlog.front();
+        if (bytes >= front.bytes) {
+          bytes -= front.bytes;
+          backlog_bytes -= front.bytes;
+          backlog.pop_front();
+        } else {
+          front.bytes -= bytes;
+          backlog_bytes -= bytes;
+          bytes = 0;
+        }
+      }
+    }
   };
 
   struct RawSubscriber {
@@ -279,10 +556,27 @@ struct MediaService::Impl {
     uint64_t total_offset = 0;
     size_t buffered = 0;
     uint64_t keyframe_offset = UINT64_MAX;
+    // Most recent video PES start. Used to anchor a keyframe at the packet
+    // that carries its AUD/SPS/PPS and first slice.
+    uint64_t last_video_pes_start = UINT64_MAX;
     std::vector<uint8_t> pat;
     std::vector<uint8_t> pmt;
     std::vector<uint8_t> pending;
     int pmt_pid = -1;
+    // Stream type of the video elementary stream from the PMT (0x1b H.264,
+    // 0x24 H.265) and its PID. Parameter-set caching below is H.264-only.
+    int video_type = -1;
+    int video_pid = -1;
+    // Most recent H.264 SPS (NAL 7) and PPS (NAL 8) TS packets, as they
+    // appeared on the wire: 188-byte aligned and taken from the video PID.
+    // Snapshot() prepends them so a standalone keyframe can be decoded even
+    // when the encoder emits parameter sets only once, at the stream start.
+    std::vector<uint8_t> sps_packet;
+    std::vector<uint8_t> pps_packet;
+    uint64_t sps_offset = UINT64_MAX;
+    uint64_t pps_offset = UINT64_MAX;
+    int sps_pid = -1;
+    int pps_pid = -1;
     // Audio elementary PIDs advertised by the most recent PMT. Used to strip
     // audio from live WebSocket subscribers without touching recordings.
     std::set<int> audio_pids;
@@ -299,7 +593,7 @@ struct MediaService::Impl {
       }
     }
 
-    void ParsePmtAudioPids(const uint8_t* p, size_t payload) {
+    void ParsePmt(const uint8_t* p, size_t payload) {
       const size_t pointer = p[payload];
       const size_t section = payload + 1 + pointer;
       if (section + 12 > 188 || p[section] != 0x02)
@@ -313,6 +607,8 @@ struct MediaService::Impl {
       const size_t program_info = ((p[section + 10] & 0x0f) << 8) | p[section + 11];
       size_t i = section + 12 + program_info;
       std::set<int> pids;
+      int video = -1;
+      int video_program_pid = -1;
       while (i + 5 <= end) {
         const uint8_t type = p[i];
         const int pid = ((p[i + 1] & 0x1f) << 8) | p[i + 2];
@@ -326,12 +622,23 @@ struct MediaService::Impl {
         case 0x87: // E-AC-3
           pids.insert(pid);
           break;
+        case 0x1b: // H.264
+        case 0x24: // H.265
+          if (video < 0) {
+            video = type;
+            video_program_pid = pid;
+          }
+          break;
         default:
           break;
         }
         i += 5 + info;
       }
       audio_pids = std::move(pids);
+      if (video >= 0) {
+        video_type = video;
+        video_pid = video_program_pid;
+      }
     }
 
     static std::vector<uint8_t> RemoveAudioPackets(const uint8_t* data, size_t len,
@@ -379,7 +686,7 @@ struct MediaService::Impl {
           }
         } else if (pid == pmt_pid && pusi) {
           pmt.assign(p, p + 188);
-          ParsePmtAudioPids(p, payload);
+          ParsePmt(p, payload);
         }
         offset += 188;
       }
@@ -391,22 +698,110 @@ struct MediaService::Impl {
 
     std::vector<size_t> ScanKeyframes(uint64_t chunk_start, const uint8_t* data, size_t len) {
       std::vector<size_t> offsets;
-      for (size_t i = 0; i + 4 <= len; ++i) {
-        if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1)
+      uint64_t pes_start = last_video_pes_start;
+      uint64_t last_start = UINT64_MAX;
+      for (size_t off = 0; off + 188 <= len; off += 188) {
+        const uint8_t* p = data + off;
+        if (p[0] != 0x47)
           continue;
-        const uint8_t nal = data[i + 3];
-        const int h264_type = nal & 0x1f;
-        const int h265_type = (nal >> 1) & 0x3f;
-        if (h264_type != 5 && h265_type != 19 && h265_type != 20)
+        const int pid = ((p[1] & 0x1f) << 8) | p[2];
+        if (video_pid < 0 || pid != video_pid)
           continue;
-        const uint64_t absolute = chunk_start + i - 3;
-        const uint64_t aligned = (absolute / 188) * 188;
-        if (aligned >= chunk_start && aligned - chunk_start < len) {
-          offsets.push_back(static_cast<size_t>(aligned - chunk_start));
+        if ((p[1] & 0x40) != 0) {
+          pes_start = chunk_start + off;
+          last_video_pes_start = pes_start;
         }
-        keyframe_offset = aligned;
+        const int adaptation = (p[3] >> 4) & 0x03;
+        size_t payload = 4;
+        if (adaptation & 0x02) {
+          if (payload >= 188)
+            continue;
+          payload += static_cast<size_t>(p[4]) + 1;
+        }
+        if ((adaptation & 0x01) == 0 || payload + 4 > 188)
+          continue;
+        bool keyframe = false;
+        for (size_t i = payload; i + 4 <= 188; ++i) {
+          if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != 1)
+            continue;
+          const uint8_t nal = p[i + 3];
+          const int h264_type = nal & 0x1f;
+          const int h265_type = (nal >> 1) & 0x3f;
+          if (h264_type == 5 || h265_type == 19 || h265_type == 20) {
+            keyframe = true;
+            break;
+          }
+          i += 2;
+        }
+        if (!keyframe)
+          continue;
+        // Start at the PES packet that carries the beginning of the access
+        // unit (its AUD/SPS/PPS and first slice), not at whichever slice
+        // happened to be seen last. Starting mid-frame loses the parameter
+        // sets and the first macroblocks, which makes a standalone snapshot
+        // undecodable.
+        const uint64_t start =
+            (pes_start != UINT64_MAX && pes_start <= chunk_start + off) ? pes_start
+                                                                       : chunk_start + off;
+        if (start == last_start)
+          continue;
+        keyframe_offset = start;
+        last_start = start;
+        if (start >= chunk_start && start - chunk_start + 188 <= len)
+          offsets.push_back(static_cast<size_t>(start - chunk_start));
       }
       return offsets;
+    }
+
+    // Keeps the TS packets that carry the most recent H.264 SPS/PPS. The
+    // encoder may emit these only once at the start of the stream, while
+    // Snapshot() needs them in front of a keyframe from any later GOP.
+    void ScanParameterSets(uint64_t chunk_start, const uint8_t* data, size_t len) {
+      if (video_type != 0x1b || video_pid < 0)
+        return; // H.264 only; H.265 parameter sets are not cached yet.
+      for (size_t off = 0; off + 188 <= len; off += 188) {
+        const uint8_t* p = data + off;
+        if (p[0] != 0x47)
+          continue;
+        const int pid = ((p[1] & 0x1f) << 8) | p[2];
+        if (pid != video_pid)
+          continue;
+        const int adaptation = (p[3] >> 4) & 0x03;
+        size_t payload = 4;
+        if (adaptation & 0x02) {
+          if (payload >= 188)
+            continue;
+          payload += static_cast<size_t>(p[4]) + 1;
+        }
+        if ((adaptation & 0x01) == 0 || payload + 4 > 188)
+          continue;
+        for (size_t i = payload; i + 4 <= 188; ++i) {
+          if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != 1)
+            continue;
+          const int type = p[i + 3] & 0x1f;
+          if (type != 7 && type != 8) {
+            i += 2;
+            continue;
+          }
+          if (type == 7) {
+            // A new SPS can describe a new resolution/profile; do not pair
+            // it with a PPS from the previous parameter set. The matching
+            // PPS is normally in the same packet or chunk and overwrites the
+            // cleared slot below.
+            sps_packet.assign(p, p + 188);
+            sps_offset = chunk_start + off;
+            sps_pid = pid;
+            pps_packet.clear();
+            pps_offset = UINT64_MAX;
+            pps_pid = -1;
+          } else if (sps_pid >= 0 && pid == sps_pid) {
+            pps_packet.assign(p, p + 188);
+            pps_offset = chunk_start + off;
+            pps_pid = pid;
+          }
+          i += 3;
+        }
+      }
     }
 
     void Ingest(const uint8_t* data, size_t len, std::vector<size_t>* keyframes,
@@ -421,9 +816,14 @@ struct MediaService::Impl {
       buffered += len;
       total_offset += len;
       *keyframes = ScanKeyframes(chunk.start, data, len);
+      ScanParameterSets(chunk.start, data, len);
       Trim();
     }
 
+    // Starts at the most recent keyframe's PES packet. The cached SPS/PPS
+    // packets are prepended when they are not already part of the selected
+    // range, so the result decodes on its own even if the encoder sent
+    // parameter sets only once at the start of the stream.
     std::vector<uint8_t> Snapshot() {
       std::vector<uint8_t> out;
       uint64_t start = keyframe_offset != UINT64_MAX ? keyframe_offset : first_offset;
@@ -433,9 +833,21 @@ struct MediaService::Impl {
       if (total_offset - start > 4 * 1024 * 1024)
         start = total_offset - 4 * 1024 * 1024;
       start = (start / 188) * 188;
-      out.reserve(pat.size() + pmt.size() + static_cast<size_t>(total_offset - start));
+      const bool parameter_sets =
+          video_type == 0x1b && !sps_packet.empty() && !pps_packet.empty() &&
+          sps_pid >= 0 && sps_pid == pps_pid;
+      out.reserve(pat.size() + pmt.size() +
+                  (parameter_sets ? sps_packet.size() + pps_packet.size() : 0) +
+                  static_cast<size_t>(total_offset - start));
       out.insert(out.end(), pat.begin(), pat.end());
       out.insert(out.end(), pmt.begin(), pmt.end());
+      if (parameter_sets) {
+        // Offsets at or after start are already in the copied chunks below.
+        if (sps_offset < start)
+          out.insert(out.end(), sps_packet.begin(), sps_packet.end());
+        if (pps_offset < start && pps_offset != sps_offset)
+          out.insert(out.end(), pps_packet.begin(), pps_packet.end());
+      }
       for (const auto& chunk : chunks) {
         const uint64_t end = chunk.start + chunk.bytes->size();
         if (end <= start)
@@ -462,6 +874,9 @@ struct MediaService::Impl {
 
     mutable std::mutex mutex;
     TSDemux demux;
+    // Time of the most recent demux ingest, used to answer "is this stream
+    // alive enough to serve a snapshot from its cache?" under the same mutex.
+    int64_t last_ingest_ms = 0;
     // Raw ffmpeg bytes that did not make up a complete TS packet yet. Only the
     // ffmpeg ingest thread touches this; it is bounded by 187 bytes.
     std::vector<uint8_t> align_carry;
@@ -496,17 +911,23 @@ struct MediaService::Impl {
       Publish(value);
     }
 
+    // Queues an already-reserved chunk. The caller must have reserved len
+    // bytes with Subscriber::Reserve; every path here releases them exactly
+    // once, either now (dead connection) or from the send completion callback.
     void PostChunk(const std::shared_ptr<Subscriber>& sub, const uint8_t* data, size_t len) {
       auto copy = std::make_shared<std::vector<uint8_t>>(data, data + len);
-      owner->web->post([sub, copy] {
-        if (!sub->alive.load())
+      owner->web->post([sub, copy, len] {
+        if (!sub->alive.load()) {
+          sub->Release(len);
           return;
+        }
         auto* connection = sub->connection.load();
-        if (connection == nullptr)
+        if (connection == nullptr) {
+          sub->Release(len);
           return;
-        sub->pending = true;
+        }
         const int rc = connection->send_binary(reinterpret_cast<const char*>(copy->data()),
-                                               copy->size(), [sub](int) { sub->pending = false; });
+                                               copy->size(), [sub, len](int) { sub->Release(len); });
         if (rc != 0) {
           sub->alive = false;
           connection->close();
@@ -520,10 +941,20 @@ struct MediaService::Impl {
       auto* connection = sub->connection.load();
       if (connection == nullptr)
         return;
-      sub->pending = true;
+      // The cached snapshot is at most 4 MiB. If it alone is over the
+      // subscriber budget, skip it and start from the next live keyframe
+      // instead of letting one client hold an unbounded queue.
+      if (!sub->Reserve(data.size())) {
+        sub->waiting_keyframe = true;
+        return;
+      }
+      // Send synchronously from the upgrade callback so the initial snapshot
+      // stays ahead of live chunks that were posted to the loop meanwhile.
       auto copy = std::make_shared<std::vector<uint8_t>>(data);
-      const int rc = connection->send_binary(reinterpret_cast<const char*>(copy->data()),
-                                             copy->size(), [sub](int) { sub->pending = false; });
+      const size_t bytes = copy->size();
+      const int rc = connection->send_binary(
+          reinterpret_cast<const char*>(copy->data()), copy->size(),
+          [sub, bytes](int) { sub->Release(bytes); });
       if (rc != 0) {
         sub->alive = false;
         connection->close();
@@ -535,12 +966,12 @@ struct MediaService::Impl {
       uint64_t chunk_start = 0;
       std::vector<std::shared_ptr<Subscriber>> subscriber_list;
       std::vector<std::shared_ptr<RawSubscriber>> raw_list;
-      std::vector<uint8_t> initial;
       std::set<int> audio_pids;
       bool strip_live_audio = false;
       {
         std::lock_guard<std::mutex> lock(mutex);
         demux.Ingest(data, len, &keyframes, &chunk_start);
+        last_ingest_ms = NowMs();
         strip_live_audio = !owner->live_audio_enabled.load() && !demux.audio_pids.empty();
         if (strip_live_audio)
           audio_pids = demux.audio_pids;
@@ -559,10 +990,18 @@ struct MediaService::Impl {
         if (sub->sink)
           sub->sink(data, len);
       }
-      const auto post_live = [&](const std::shared_ptr<Subscriber>& sub, size_t start) {
+      // Reserves room and queues the chunk. Returns false when this
+      // subscriber is already one second (or 2 MiB) behind, in which case
+      // nothing is queued and the caller decides whether to resync at the
+      // current keyframe.
+      const auto post_live = [&](const std::shared_ptr<Subscriber>& sub,
+                                 size_t start) -> bool {
         if (!strip_live_audio) {
-          PostChunk(sub, data + start, len - start);
-          return;
+          const size_t bytes = len - start;
+          if (!sub->Reserve(bytes))
+            return false;
+          PostChunk(sub, data + start, bytes);
+          return true;
         }
         // Live preview is video-only by default. Recording and RTSP consumers
         // already received the original buffer above and keep their audio.
@@ -573,32 +1012,37 @@ struct MediaService::Impl {
           if (audio_pids.find(pid) == audio_pids.end())
             packets.insert(packets.end(), data + offset, data + offset + 188);
         }
-        if (!packets.empty())
-          PostChunk(sub, packets.data(), packets.size());
+        if (packets.empty())
+          return true;
+        if (!sub->Reserve(packets.size()))
+          return false;
+        PostChunk(sub, packets.data(), packets.size());
+        return true;
       };
       for (const auto& sub : subscriber_list) {
         if (!sub->alive.load())
           continue;
-        const bool pending = sub->pending.load();
-        if (pending) {
-          sub->skipping = true;
-          if (!keyframes.empty()) {
-            sub->skipping = false;
-            post_live(sub, keyframes.front());
-          }
-          continue;
-        }
-        if (sub->skipping.load()) {
+        if (sub->waiting_keyframe.load()) {
+          // A slow subscriber only gets the next decodable point. If the
+          // backlog has not drained yet, keep waiting: memory stays bounded.
           if (keyframes.empty())
             continue;
-          sub->skipping = false;
-          post_live(sub, keyframes.front());
+          if (post_live(sub, keyframes.front()))
+            sub->waiting_keyframe = false;
+          continue;
+        }
+        if (post_live(sub, 0))
+          continue;
+        // Over budget. If this chunk carries a keyframe, start the client
+        // there so it does not have to wait for the next GOP; otherwise drop
+        // live chunks until one arrives.
+        if (!keyframes.empty() && post_live(sub, keyframes.front())) {
+          sub->waiting_keyframe = false;
         } else {
-          post_live(sub, 0);
+          sub->waiting_keyframe = true;
         }
       }
       (void)chunk_start;
-      (void)initial;
     }
 
     void Ingest(const uint8_t* data, size_t len) {
@@ -606,8 +1050,8 @@ struct MediaService::Impl {
         return;
       // ffmpeg's pipe reads may end in the middle of a TS packet. Only publish
       // complete 188-byte packets and carry the tail into the next read, so
-      // every WebSocket write (and every keyframe-boundary skip below) is an
-      // exact number of packets. This keeps the client's 188-byte grid stable.
+      // every WebSocket write (and every keyframe-aligned resume) is an exact
+      // number of packets. This keeps the client's 188-byte grid stable.
       if (align_carry.empty()) {
         const size_t aligned = (len / 188) * 188;
         if (aligned == 0) {
@@ -1195,6 +1639,83 @@ bool MediaService::CaptureJpeg(const std::string& url, std::string* jpeg, std::s
     jpeg->clear();
   }
   return run(args);
+}
+
+bool MediaService::CaptureJpegFromStream(int64_t channel_id, const std::string& stream,
+                                         std::string* jpeg, std::string* error, int width,
+                                         int height, int quality) {
+  auto runtime = impl_->FindStream(channel_id, stream);
+  if (!runtime) {
+    if (error)
+      *error = "stream is not running";
+    return false;
+  }
+  std::vector<uint8_t> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    // A stream object outlives an ffmpeg restart. Only use the cache while
+    // data is still arriving; otherwise the caller reconnects to the camera.
+    if (runtime->last_ingest_ms == 0 || NowMs() - runtime->last_ingest_ms > 5000) {
+      if (error)
+        *error = "stream has no recent data";
+      return false;
+    }
+    snapshot = runtime->demux.Snapshot();
+  }
+  if (snapshot.empty()) {
+    if (error)
+      *error = "stream cache is empty";
+    return false;
+  }
+
+  const int scale_width = width > 0 ? width : -2;
+  const int scale_height = height > 0 ? height : -2;
+  std::vector<std::string> args = {
+      "-hide_banner", "-loglevel", "error", "-xerror", "-nostdin",
+      "-f",           "mpegts",   "-i",      "pipe:0", "-frames:v", "1"};
+  if (width > 0 || height > 0) {
+    args.push_back("-vf");
+    args.push_back("scale=" + std::to_string(scale_width) + ":" + std::to_string(scale_height));
+  }
+  args.push_back("-q:v");
+  args.push_back(std::to_string(quality));
+  args.push_back("-f");
+  args.push_back("mjpeg");
+  args.push_back("pipe:1");
+  const auto run = [&](const std::vector<uint8_t>& input,
+                       const std::vector<std::string>& attempt) {
+#ifdef _WIN32
+    return CapturePipeWindows(impl_->ffmpeg_path, attempt, input, jpeg, error);
+#else
+    return CapturePipePosix(impl_->ffmpeg_path, attempt, input, jpeg, error);
+#endif
+  };
+  // The newest keyframe can still be in flight when the snapshot is taken.
+  // Retry briefly while the live ingest feeds the demux, and re-read the
+  // cache each time so a frame that finishes arriving becomes decodable.
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    if (impl_->gpu_enabled.load()) {
+      std::vector<std::string> accelerated = args;
+      const auto input = std::find(accelerated.begin(), accelerated.end(), "-i");
+      accelerated.insert(input, {"-hwaccel", "auto"});
+      if (run(snapshot, accelerated))
+        return true;
+      jpeg->clear();
+    }
+    if (run(snapshot, args))
+      return true;
+    jpeg->clear();
+    if (attempt == 3)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->last_ingest_ms == 0 || NowMs() - runtime->last_ingest_ms > 5000)
+      break;
+    snapshot = runtime->demux.Snapshot();
+    if (snapshot.empty())
+      break;
+  }
+  return false;
 }
 
 bool MediaService::CaptureGray(const std::string& url, int width, int height,

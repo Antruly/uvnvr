@@ -67,6 +67,12 @@ public:
 
   bool CaptureJpeg(const std::string& url, std::string* jpeg, std::string* error, int width = 0,
                    int height = 0, int quality = 2);
+  // Decodes one JPEG from the channel stream's cached MPEG-TS: the same
+  // ffmpeg process that feeds live preview and recording. Returns false when
+  // that stream is not running, has no recent data, or cannot be decoded, so
+  // the caller can fall back to CaptureJpeg (a new RTSP connection).
+  bool CaptureJpegFromStream(int64_t channel_id, const std::string& stream, std::string* jpeg,
+                             std::string* error, int width = 0, int height = 0, int quality = 2);
   bool CaptureGray(const std::string& url, int width, int height, std::vector<uint8_t>* frame,
                    std::string* error);
 

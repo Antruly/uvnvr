@@ -5518,18 +5518,36 @@ void App::RegisterChannelRoutes() {
                          *message = "channel not found or disabled";
                          return;
                        }
-                       const std::string url =
-                           BuildChannelUrl(channel, channel.sub_enabled, &error);
-                       if (url.empty()) {
-                         *status = 400;
-                         *message = error;
-                         return;
+                       // Prefer the channel's live ffmpeg output: its demux
+                       // already holds the most recent keyframe, so the
+                       // snapshot does not open a second RTSP session and
+                       // returns in the time it takes ffmpeg to decode one
+                       // frame. Fall back to reconnecting only when the
+                       // channel has no live stream (or no recent data).
+                       const int w = static_cast<int>(width);
+                       const int h = static_cast<int>(height);
+                       const int q = static_cast<int>(quality);
+                       const std::string live_stream = channel.sub_enabled ? "sub" : "main";
+                       bool captured =
+                           media_ && media_->CaptureJpegFromStream(channel_id, live_stream,
+                                                                   payload.get(), &error, w, h, q);
+                       if (!captured && live_stream != "main" && media_) {
+                         error.clear();
+                         captured = media_->CaptureJpegFromStream(channel_id, "main", payload.get(),
+                                                                  &error, w, h, q);
                        }
-                       if (!media_ || !media_->CaptureJpeg(
-                                          url, payload.get(), &error, static_cast<int>(width),
-                                          static_cast<int>(height), static_cast<int>(quality))) {
-                         *status = 502;
-                         *message = error.empty() ? "camera snapshot failed" : error;
+                       if (!captured) {
+                         const std::string url =
+                             BuildChannelUrl(channel, channel.sub_enabled, &error);
+                         if (url.empty()) {
+                           *status = 400;
+                           *message = error;
+                           return;
+                         }
+                         if (!media_ || !media_->CaptureJpeg(url, payload.get(), &error, w, h, q)) {
+                           *status = 502;
+                           *message = error.empty() ? "camera snapshot failed" : error;
+                         }
                        }
                      },
                      [payload, status, message, &resp, next] {
