@@ -35,6 +35,12 @@ let noticeTimer: number | undefined
 const state = ref<'idle' | 'loading' | 'playing' | 'error'>('idle')
 const message = ref('')
 const activeSpeed = ref(props.speed || 1)
+const SPEED_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 4]
+const speedIndex = computed(() => {
+  const index = SPEED_STEPS.indexOf(activeSpeed.value)
+  return index === -1 ? SPEED_STEPS.indexOf(1) : index
+})
+const speedLabel = computed(() => `${activeSpeed.value}×`)
 const position = ref(props.startMs)
 let player: mpegts.Player | null = null
 let destroyed = false
@@ -192,6 +198,12 @@ function setSpeed(value: number) {
   emit('speed-change', value)
 }
 
+function stepSpeed(direction: number) {
+  const next = Math.max(0, Math.min(SPEED_STEPS.length - 1, speedIndex.value + direction))
+  if (next === speedIndex.value) return
+  setSpeed(SPEED_STEPS[next])
+}
+
 // --- Fullscreen -----------------------------------------------------------
 
 function armIdleTimer() {
@@ -315,33 +327,35 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="playerRoot"
-    class="playback-player"
+    class="playback-player-shell"
     :class="{ 'controls-hidden': hiddenControls, 'is-fullscreen': isFullscreen }"
     @pointermove="revealControls"
     @pointerdown="revealControls"
   >
-    <video ref="video" class="playback-video" playsinline></video>
-    <div class="playback-title">{{ title }}</div>
-    <button
-      class="icon-button small playback-fullscreen"
-      type="button"
-      :title="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
-      :aria-label="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
-      @click="toggleFullscreen"
-    >
-      <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="16" />
-    </button>
-    <div v-if="fullscreenNotice" class="playback-fs-toast" role="status">
-      {{ fullscreenNotice }}
-    </div>
-    <div v-if="state === 'loading'" class="live-overlay">
-      <span class="spinner"></span>
-      <span>{{ t('common.loading') }}</span>
-    </div>
-    <div v-else-if="state === 'error'" class="live-overlay error">
-      <AppIcon name="info" :size="24" />
-      <strong>{{ t('playback.streamError') }}</strong>
-      <span>{{ message }}</span>
+    <div class="playback-player">
+      <video ref="video" class="playback-video" playsinline></video>
+      <div class="playback-title">{{ title }}</div>
+      <button
+        class="icon-button small playback-fullscreen"
+        type="button"
+        :title="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
+        :aria-label="isFullscreen ? t('playback.exitFullscreen') : t('playback.fullscreen')"
+        @click="toggleFullscreen"
+      >
+        <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="16" />
+      </button>
+      <div v-if="fullscreenNotice" class="playback-fs-toast" role="status">
+        {{ fullscreenNotice }}
+      </div>
+      <div v-if="state === 'loading'" class="live-overlay">
+        <span class="spinner"></span>
+        <span>{{ t('common.loading') }}</span>
+      </div>
+      <div v-else-if="state === 'error'" class="live-overlay error">
+        <AppIcon name="info" :size="24" />
+        <strong>{{ t('playback.streamError') }}</strong>
+        <span>{{ message }}</span>
+      </div>
     </div>
     <div class="playback-controls">
       <button class="icon-button small" :title="t('playback.rewind30')" @click="skip(-1)">
@@ -354,19 +368,29 @@ onBeforeUnmount(() => {
         <span class="transport-label">{{ formatDuration(stepMs) }}»</span>
       </button>
       <span class="transport-clock">{{ formatClock(position) }}</span>
-      <label class="transport-speed">
-        <span>{{ t('playback.speed') }}</span>
-        <select :value="activeSpeed" @change="setSpeed(Number(($event.target as HTMLSelectElement).value))">
-          <option :value="0.25">0.25×</option>
-          <option :value="0.5">0.5×</option>
-          <option :value="1">1×</option>
-          <option :value="2">2×</option>
-          <option :value="4">4×</option>
-          <option :value="8">8×</option>
-          <option :value="16">16×</option>
-          <option :value="32">32×</option>
-        </select>
-      </label>
+      <div class="transport-speed" role="group" :aria-label="t('playback.speed')">
+        <button
+          class="transport-step"
+          type="button"
+          :title="t('playback.speedDown')"
+          :aria-label="t('playback.speedDown')"
+          :disabled="speedIndex <= 0"
+          @click="stepSpeed(-1)"
+        >
+          −
+        </button>
+        <span class="transport-speed-value" aria-live="polite">{{ speedLabel }}</span>
+        <button
+          class="transport-step"
+          type="button"
+          :title="t('playback.speedUp')"
+          :aria-label="t('playback.speedUp')"
+          :disabled="speedIndex >= SPEED_STEPS.length - 1"
+          @click="stepSpeed(1)"
+        >
+          +
+        </button>
+      </div>
     </div>
   </div>
 </template>

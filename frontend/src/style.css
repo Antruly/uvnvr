@@ -2714,6 +2714,19 @@ select.input {
   flex-wrap: nowrap;
 }
 
+/* Below the widest desktop the labelled actions no longer fit next to the
+   channel summary; icon-only buttons keep the query row on one line (and the
+   channel block vertically centred against it) at 1280px and in between. */
+@media (max-width: 1599px) {
+  .playback-actions .button-label {
+    display: none;
+  }
+
+  .playback-actions .button {
+    padding: 0 11px;
+  }
+}
+
 .playback-popover-wrap {
   position: relative;
   display: flex;
@@ -2743,10 +2756,35 @@ select.input {
 }
 
 .playback-stream {
-  min-width: 104px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 128px;
+}
+
+.playback-stream-prefix {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
 }
 
 .playback-stream .input {
+  height: 40px;
+  min-height: 40px;
+  padding-left: 52px;
+  font-size: 12px;
+}
+
+/* One control height for the whole query row keeps every top/bottom edge on
+   the same line; the stream select no longer carries a label above it. */
+.playback-toolbar-controls .playback-date-trigger,
+.playback-toolbar-controls .playback-popover-wrap > .button,
+.playback-toolbar-controls .playback-actions .button {
+  height: 40px;
   min-height: 40px;
 }
 
@@ -2758,10 +2796,18 @@ select.input {
   min-height: 260px;
 }
 
-.playback-player {
-  --playback-player-h: max(260px, calc(100vh - 330px));
-  position: relative;
+.playback-player-shell {
+  /* Reserve room below the video for the always-visible transport bar. */
+  --playback-player-h: max(240px, calc(100vh - 390px));
+  display: flex;
+  flex-direction: column;
   width: min(100%, calc(var(--playback-player-h) * 16 / 9));
+  max-width: 100%;
+}
+
+.playback-player {
+  position: relative;
+  width: 100%;
   max-height: var(--playback-player-h);
   aspect-ratio: 16 / 9;
   border-radius: 10px;
@@ -2801,51 +2847,68 @@ select.input {
   transition: opacity 180ms ease;
 }
 
-.playback-player.controls-hidden {
+.playback-player-shell.controls-hidden {
   cursor: none;
 }
 
-.playback-player.controls-hidden .playback-title,
-.playback-player.controls-hidden .playback-controls,
-.playback-player.controls-hidden .playback-fullscreen {
+.playback-player-shell.controls-hidden .playback-title,
+.playback-player-shell.controls-hidden .playback-controls,
+.playback-player-shell.controls-hidden .playback-fullscreen {
   opacity: 0;
   pointer-events: none;
 }
 
-/* The fullscreen element is the player itself, never the whole page. */
-.playback-player:fullscreen,
-.playback-player.is-fullscreen {
+/* The fullscreen element is the whole shell, never the page. */
+.playback-player-shell:fullscreen,
+.playback-player-shell.is-fullscreen {
   inset: 0;
+  display: flex;
   width: 100%;
   height: 100%;
+  max-width: none;
   max-height: none;
-  aspect-ratio: auto;
   border-radius: 0;
   background: #000;
   overflow: hidden;
 }
 
-.playback-player:fullscreen .playback-video,
-.playback-player.is-fullscreen .playback-video {
+.playback-player-shell:fullscreen .playback-player,
+.playback-player-shell.is-fullscreen .playback-player {
+  flex: 1 1 auto;
+  width: 100%;
+  max-height: none;
+  aspect-ratio: auto;
+  min-height: 0;
+  border-radius: 0;
+}
+
+.playback-player-shell:fullscreen .playback-video,
+.playback-player-shell.is-fullscreen .playback-video {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-.playback-player:fullscreen .playback-controls,
-.playback-player.is-fullscreen .playback-controls {
+/* Only fullscreen overlays the bar on the picture. */
+.playback-player-shell:fullscreen .playback-controls,
+.playback-player-shell.is-fullscreen .playback-controls {
+  position: absolute;
   left: 18px;
   right: 18px;
   bottom: 18px;
+  z-index: 4;
+  margin-top: 0;
+  border-color: transparent;
+  backdrop-filter: blur(4px);
 }
 
-.playback-player:fullscreen .playback-title,
-.playback-player.is-fullscreen .playback-title {
+.playback-player-shell:fullscreen .playback-title,
+.playback-player-shell.is-fullscreen .playback-title {
   top: 18px;
   left: 18px;
 }
 
-.playback-player::backdrop {
+.playback-player-shell::backdrop {
   background: #000;
 }
 
@@ -2877,17 +2940,15 @@ select.input {
 }
 
 .playback-controls {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  min-height: 42px;
+  margin-top: 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(2, 6, 12, 0.72);
-  backdrop-filter: blur(4px);
   color: #e6eef8;
 }
 
@@ -2907,16 +2968,42 @@ select.input {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
-.transport-speed select {
-  padding: 2px 6px;
-  border-radius: 6px;
+.transport-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
   background: rgba(10, 18, 30, 0.9);
   color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.transport-step:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(20, 34, 52, 0.95);
+}
+
+.transport-step:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.transport-speed-value {
+  min-width: 36px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .timeline-panel {

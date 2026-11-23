@@ -751,13 +751,13 @@ onMounted(async () => {
         </Transition>
       </div>
 
-      <label class="field compact-field playback-stream">
-        <span>{{ t('playback.stream') }}</span>
-        <select v-model="stream" class="input">
+      <div class="playback-stream" :title="t('playback.stream')">
+        <span class="playback-stream-prefix" aria-hidden="true">{{ t('playback.stream') }}</span>
+        <select v-model="stream" class="input" :aria-label="t('playback.stream')">
           <option value="main">MAIN</option>
           <option value="sub">SUB</option>
         </select>
-      </label>
+      </div>
 
       <div ref="rangeWrapRef" class="playback-popover-wrap">
         <button
