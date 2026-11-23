@@ -58,6 +58,80 @@ int64_t NowSeconds() {
       .count();
 }
 
+using LocalDay = std::chrono::local_days;
+
+// The configured time zone decides which calendar day a recording belongs to.
+// libstdc++ ships the IANA database, so resolve the setting directly instead of
+// truncating UTC milliseconds (which is wrong for every offset but UTC).
+const std::chrono::time_zone* ResolveConfiguredZone(const std::string& name) {
+  try {
+    if (!name.empty())
+      return std::chrono::locate_zone(name);
+  } catch (...) {
+  }
+  try {
+    return std::chrono::locate_zone("UTC");
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+bool ParseIsoDay(const std::string& text, LocalDay* out) {
+  if (text.size() != 10 || text[4] != '-' || text[7] != '-')
+    return false;
+  auto parse_number = [](std::string_view value) {
+    int number = 0;
+    for (const char c : value) {
+      if (c < '0' || c > '9')
+        return -1;
+      number = number * 10 + (c - '0');
+    }
+    return number;
+  };
+  const int year = parse_number(std::string_view(text).substr(0, 4));
+  const int month = parse_number(std::string_view(text).substr(5, 2));
+  const int day = parse_number(std::string_view(text).substr(8, 2));
+  if (year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31)
+    return false;
+  const std::chrono::year_month_day ymd{std::chrono::year{year},
+                                        std::chrono::month{static_cast<unsigned>(month)},
+                                        std::chrono::day{static_cast<unsigned>(day)}};
+  if (!ymd.ok())
+    return false;
+  *out = LocalDay{ymd};
+  return true;
+}
+
+std::string FormatLocalDay(LocalDay day) {
+  const std::chrono::year_month_day ymd{day};
+  char buffer[16];
+  std::snprintf(buffer, sizeof(buffer), "%04d-%02u-%02u",
+                static_cast<int>(ymd.year()), static_cast<unsigned>(ymd.month()),
+                static_cast<unsigned>(ymd.day()));
+  return buffer;
+}
+
+LocalDay LocalDayOf(int64_t timestamp_ms, const std::chrono::time_zone* zone) {
+  if (zone == nullptr) {
+    const int64_t days = timestamp_ms >= 0
+                             ? timestamp_ms / 86400000
+                             : (timestamp_ms - 86399999) / 86400000;
+    return LocalDay{std::chrono::days{days}};
+  }
+  using ZonedMillis = std::chrono::zoned_time<std::chrono::milliseconds>;
+  using SysMillis = std::chrono::sys_time<std::chrono::milliseconds>;
+  const auto local =
+      ZonedMillis(zone, SysMillis{std::chrono::milliseconds{timestamp_ms}}).get_local_time();
+  return std::chrono::floor<std::chrono::days>(local);
+}
+
+int64_t LocalDayStartMs(LocalDay day, const std::chrono::time_zone* zone) {
+  if (zone == nullptr)
+    return std::chrono::duration_cast<std::chrono::milliseconds>(day.time_since_epoch()).count();
+  const auto tp = std::chrono::zoned_time(zone, day).get_sys_time();
+  return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
+}
+
 std::string HexEncode(const unsigned char* data, size_t size) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out;
@@ -7506,6 +7580,88 @@ void App::RegisterRecordingRoutes() {
                      });
                },
                "playback.view"));
+
+  // Calendar support: return the local dates that have at least one segment.
+  // The browser draws a month grid and only needs the set of dates, so keep the
+  // payload small instead of shipping every segment for 31 days.
+  web_.get(
+      "/api/v1/recordings/days",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            int64_t channel_id = 0;
+            if (const std::string* value = req.query("channelId"))
+              ParseIntParam(value, &channel_id);
+            const std::string* from_param = req.query("from");
+            const std::string* to_param = req.query("to");
+            LocalDay from_day{};
+            LocalDay to_day{};
+            if (channel_id <= 0 || from_param == nullptr || to_param == nullptr ||
+                !ParseIsoDay(*from_param, &from_day) || !ParseIsoDay(*to_param, &to_day) ||
+                to_day < from_day) {
+              SendError(resp, 400, "invalid_range",
+                        "channelId, from and to (YYYY-MM-DD) are required");
+              next();
+              return;
+            }
+            if ((to_day - from_day).count() > 366) {
+              SendError(resp, 400, "invalid_range", "the requested range is too large");
+              next();
+              return;
+            }
+            auto days = std::make_shared<json>(json::array());
+            RunWork(
+                [this, channel_id, from_day, to_day, days] {
+                  const std::string zone_name = GetSetting("system.timezone", "UTC");
+                  const std::chrono::time_zone* zone = ResolveConfiguredZone(zone_name);
+                  const int64_t from_ms = LocalDayStartMs(from_day, zone);
+                  const int64_t to_ms =
+                      LocalDayStartMs(to_day + std::chrono::days{1}, zone);
+                  std::set<LocalDay> found;
+                  auto collect = [&](int64_t start_ms, int64_t end_ms) {
+                    if (end_ms <= start_ms)
+                      end_ms = start_ms + 1;
+                    const LocalDay first =
+                        std::max(LocalDayOf(start_ms, zone), from_day);
+                    const LocalDay last =
+                        std::min(LocalDayOf(end_ms - 1, zone), to_day);
+                    for (LocalDay day = first; day <= last; day += std::chrono::days{1})
+                      found.insert(day);
+                  };
+                  uvcpp::uvcpp_db_table table;
+                  uvcpp::uvcpp_db_params params;
+                  params.add(channel_id);
+                  params.add(from_ms);
+                  params.add(to_ms);
+                  std::string error;
+                  if (Query("SELECT start_ms, end_ms FROM recordings "
+                            "WHERE channel_id = ? AND end_ms > ? AND start_ms < ?",
+                            params, &table, &error)) {
+                    for (size_t i = 0; i < table.rows().size(); ++i)
+                      collect(TableInt(table, i, "start_ms"), TableInt(table, i, "end_ms"));
+                  }
+                  if (recording_) {
+                    const int64_t now_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+                    for (const auto& segment : recording_->ActiveSegments()) {
+                      if (segment.channel_id != channel_id)
+                        continue;
+                      if (now_ms <= from_ms || segment.start_ms >= to_ms)
+                        continue;
+                      collect(segment.start_ms, now_ms);
+                    }
+                  }
+                  for (const LocalDay& day : found)
+                    days->push_back(FormatLocalDay(day));
+                },
+                [days, &resp, next] {
+                  SendJson(resp, 200, json{{"days", *days}});
+                  next();
+                });
+          },
+          "playback.view"));
 
   web_.get(
       "/api/v1/recordings/:id/download",

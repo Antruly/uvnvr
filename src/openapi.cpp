@@ -128,6 +128,8 @@ const Endpoint kEndpoints[] = {
      "application/json"},
     {"get", "/api/v1/recordings", "Query recording segments", "Playback", "playback.view",
      "application/json"},
+    {"get", "/api/v1/recordings/days", "List local dates that have recordings", "Playback",
+     "playback.view", "application/json"},
     {"delete", "/api/v1/recordings/{id}", "Delete a segment (maintenance)", "Playback",
      "maintenance + admin", "application/json"},
     {"get", "/api/v1/recordings/{id}/download", "Download a segment with Range support", "Playback",

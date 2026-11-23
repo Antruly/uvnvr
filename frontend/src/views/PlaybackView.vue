@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import PlaybackPlayer from '@/components/PlaybackPlayer.vue'
 import { api, getCsrfToken } from '@/api/client'
@@ -14,6 +14,9 @@ interface Channel {
   id: number
   name: string
   subEnabled: boolean
+  enabled?: boolean
+  mainState?: string
+  lastStatus?: string
 }
 
 interface Recording {
@@ -28,8 +31,23 @@ interface Recording {
   active?: boolean
 }
 
-const { t } = useI18n()
+interface DaysResponse {
+  days: string[]
+}
+
+interface CalendarCell {
+  key: string
+  day: string
+  number: number
+  inMonth: boolean
+  hasRecording: boolean
+  isToday: boolean
+  isSelected: boolean
+}
+
+const { t, tm, locale } = useI18n()
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const canDownload = computed(() => auth.hasPermission('playback.download'))
@@ -42,6 +60,13 @@ function localDay(date: Date) {
 }
 
 const day = ref(localDay(new Date()))
+const today = ref(localDay(new Date()))
+const calendarMonth = ref(day.value.slice(0, 7))
+// Cache keyed by "<channelId>:<YYYY-MM>" so switching back to a month or a
+// channel never issues the same days query twice.
+const monthCache = ref<Record<string, string[]>>({})
+const monthPending = new Set<string>()
+const monthLoading = ref(false)
 const recordings = ref<Recording[]>([])
 const selected = ref<Recording | null>(null)
 const playStartMs = ref(0)
@@ -122,6 +147,113 @@ function zoom(direction: number) {
 const channelName = computed(
   () => channels.value.find((channel) => channel.id === channelId.value)?.name ?? '—',
 )
+
+const weekdays = computed(() => tm('playback.weekdays') as unknown as string[])
+const recordedDays = computed(
+  () => new Set(monthCache.value[`${channelId.value}:${calendarMonth.value}`] ?? []),
+)
+
+const calendarTitle = computed(() => {
+  const [year, monthNumber] = calendarMonth.value.split('-').map(Number)
+  return new Intl.DateTimeFormat(locale.value, { year: 'numeric', month: 'long' }).format(
+    new Date(year, monthNumber - 1, 1, 12),
+  )
+})
+
+const calendarCells = computed<CalendarCell[]>(() => {
+  const [year, monthNumber] = calendarMonth.value.split('-').map(Number)
+  const first = new Date(year, monthNumber - 1, 1, 12)
+  // Monday is the first column, matching the weekday labels above the grid.
+  const offset = (first.getDay() + 6) % 7
+  const cells: CalendarCell[] = []
+  for (let index = 0; index < 42; index += 1) {
+    const date = new Date(year, monthNumber - 1, 1 - offset + index, 12)
+    const iso = localDay(date)
+    const inMonth = date.getFullYear() === year && date.getMonth() === monthNumber - 1
+    cells.push({
+      key: iso,
+      day: iso,
+      number: date.getDate(),
+      inMonth,
+      hasRecording: inMonth && recordedDays.value.has(iso),
+      isToday: iso === today.value,
+      isSelected: iso === day.value,
+    })
+  }
+  return cells
+})
+
+function channelOnline(channel: Channel) {
+  if (channel.mainState === 'online') return true
+  const idle = channel.mainState === undefined || channel.mainState === 'disabled'
+  return idle && channel.lastStatus === 'online'
+}
+
+function selectChannel(id: number) {
+  if (id !== channelId.value) channelId.value = id
+}
+
+function monthRange(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const last = new Date(year, monthNumber, 0, 12).getDate()
+  return { from: `${month}-01`, to: `${month}-${String(last).padStart(2, '0')}` }
+}
+
+async function ensureMonth() {
+  const id = channelId.value
+  const month = calendarMonth.value
+  if (id <= 0) return
+  const key = `${id}:${month}`
+  if (key in monthCache.value || monthPending.has(key)) return
+  monthPending.add(key)
+  monthLoading.value = true
+  const { from, to } = monthRange(month)
+  try {
+    const result = await api<DaysResponse>(
+      `/api/v1/recordings/days?channelId=${id}&from=${from}&to=${to}`,
+    )
+    monthCache.value = { ...monthCache.value, [key]: result.days ?? [] }
+  } catch {
+    // The calendar only highlights days; a failed lookup must not replace the
+    // recording list's own, more actionable error message.
+  } finally {
+    monthPending.delete(key)
+    monthLoading.value = monthPending.size > 0
+  }
+}
+
+function invalidateMonthCache() {
+  const prefix = `${channelId.value}:`
+  const next: Record<string, string[]> = {}
+  for (const [key, value] of Object.entries(monthCache.value)) {
+    if (!key.startsWith(prefix)) next[key] = value
+  }
+  monthCache.value = next
+}
+
+function shiftMonth(delta: number) {
+  const [year, monthNumber] = calendarMonth.value.split('-').map(Number)
+  const date = new Date(year, monthNumber - 1 + delta, 1, 12)
+  calendarMonth.value = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+function selectCalendarDay(cell: CalendarCell) {
+  if (!cell.inMonth) calendarMonth.value = cell.day.slice(0, 7)
+  day.value = cell.day
+}
+
+function goToday() {
+  const now = new Date()
+  today.value = localDay(now)
+  day.value = today.value
+  calendarMonth.value = day.value.slice(0, 7)
+}
+
+function refreshAll() {
+  invalidateMonthCache()
+  void loadRecordings(true)
+  void ensureMonth()
+}
 
 const positionPercent = computed(() => {
   const span = windowEnd.value - windowStart.value
@@ -362,16 +494,12 @@ async function removeRecording(recording: Recording) {
   try {
     await api(`/api/v1/recordings/${recording.id}`, { method: 'DELETE' })
     if (selected.value?.id === recording.id) selected.value = null
+    invalidateMonthCache()
     await loadRecordings(true)
+    await ensureMonth()
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   }
-}
-
-function shiftDay(delta: number) {
-  const date = new Date(`${day.value}T12:00:00`)
-  date.setDate(date.getDate() + delta)
-  day.value = localDay(date)
 }
 
 function download() {
@@ -442,7 +570,18 @@ async function exportRange(startMs: number, endMs: number) {
 }
 
 watch([channelId, stream], () => void loadRecordings())
-watch(day, () => void loadRecordings())
+watch(channelId, (id) => {
+  void ensureMonth()
+  if (id > 0 && Number(route.query.channelId) !== id) {
+    void router.replace({ query: { ...route.query, channelId: String(id) } })
+  }
+})
+watch(calendarMonth, () => void ensureMonth())
+watch(day, () => {
+  const month = day.value.slice(0, 7)
+  if (month !== calendarMonth.value) calendarMonth.value = month
+  void loadRecordings()
+})
 
 onBeforeUnmount(() => {
   loadSeq++
@@ -456,8 +595,10 @@ onMounted(async () => {
     if (channels.value.length > 0) {
       const requested = Number(route.query.channelId)
       const match = channels.value.find((channel) => channel.id === requested)
-      channelId.value = match?.id ?? channels.value[0].id
-      await loadRecordings()
+      const firstOnline = channels.value.find((channel) => channelOnline(channel))
+      // Opening playback from the live preview passes channelId; otherwise
+      // start on the first camera that is actually online.
+      channelId.value = match?.id ?? firstOnline?.id ?? channels.value[0].id
       recordingsTimer = window.setInterval(() => {
         if (!loading.value && !timelineDragging.value && !document.hidden) {
           void loadRecordings(true)
@@ -478,7 +619,7 @@ onMounted(async () => {
       <p>{{ t('playback.subtitle') }}</p>
     </div>
     <div class="head-actions">
-      <button class="button" @click="loadRecordings(true)">
+      <button class="button" @click="refreshAll">
         <AppIcon name="refresh" :size="16" />
         {{ t('common.refresh') }}
       </button>
@@ -504,74 +645,145 @@ onMounted(async () => {
   <p v-if="notice" class="notice">{{ notice }}</p>
   <p v-if="error" class="form-error">{{ error }}</p>
 
-  <section class="panel playback-filters">
-    <label class="field compact-field">
-      <span>{{ t('playback.channel') }}</span>
-      <select v-model.number="channelId" class="input">
-        <option v-for="channel in channels" :key="channel.id" :value="channel.id">
-          {{ channel.name }}
-        </option>
-      </select>
-    </label>
-    <label class="field compact-field">
-      <span>{{ t('playback.stream') }}</span>
-      <select v-model="stream" class="input">
-        <option value="main">MAIN</option>
-        <option value="sub">SUB</option>
-      </select>
-    </label>
-    <label class="field compact-field">
-      <span>{{ t('playback.date') }}</span>
-      <div class="date-nav">
-        <button class="icon-button small" @click="shiftDay(-1)">‹</button>
-        <input v-model="day" class="input" type="date" />
-        <button class="icon-button small" @click="shiftDay(1)">›</button>
+  <div class="playback-workspace">
+    <aside class="panel channel-rail playback-channel-rail">
+      <div class="channel-rail-head">
+        <h3>{{ t('playback.channelList') }}</h3>
+        <span class="count-badge">{{ channels.length }}</span>
       </div>
-    </label>
-    <span class="muted playback-count">{{ t('playback.segments', { count: recordings.length }) }}</span>
-    <div class="range-export">
-      <label class="field compact-field">
-        <span>{{ t('playback.rangeStart') }}</span>
-        <input v-model="rangeStart" class="input" type="datetime-local" />
-      </label>
-      <label class="field compact-field">
-        <span>{{ t('playback.rangeEnd') }}</span>
-        <input v-model="rangeEnd" class="input" type="datetime-local" />
-      </label>
-      <button class="button" :disabled="!canDownload || exporting" @click="exportRangeFromForm">
-        <AppIcon name="save" :size="15" />
-        {{ t('playback.exportRange') }}
-      </button>
-    </div>
-  </section>
-
-  <div v-if="loading" class="panel empty-state">
-    <span class="spinner"></span>
-    {{ t('common.loading') }}
-  </div>
-
-  <template v-else>
-    <section class="panel playback-stage">
-      <PlaybackPlayer
-        v-if="selected"
-        ref="playerRef"
-        :channel-id="channelId"
-        :stream="stream"
-        :start-ms="playStartMs"
-        :end-ms="dayEnd"
-        :speed="speed"
-        :step-ms="skipStepMs"
-        :title="`${channelName} · ${formatTime(positionMs)}`"
-        @seek="onSeek"
-        @speed-change="onSpeedChange"
-        @position="onPosition"
-        @ended="onEnded"
-      />
-      <div v-else class="empty-state">
-        <AppIcon name="playback" :size="28" />
-        <span>{{ t('playback.noRecordings') }}</span>
+      <div class="channel-list playback-channel-list">
+        <button
+          v-for="channel in channels"
+          :key="channel.id"
+          class="channel-item"
+          :class="{ active: channel.id === channelId }"
+          @click="selectChannel(channel.id)"
+        >
+          <span class="status-dot" :class="channelOnline(channel) ? 'online' : 'offline'"></span>
+          <span class="channel-item-copy">
+            <strong>{{ channel.name }}</strong>
+            <small>{{ channelOnline(channel) ? t('preview.online') : t('preview.offline') }}</small>
+          </span>
+        </button>
+        <p v-if="channels.length === 0" class="small-note">{{ t('preview.noChannels') }}</p>
       </div>
-    </section>
+    </aside>
+
+    <div class="playback-main">
+      <section class="panel playback-filters">
+        <label class="field compact-field">
+          <span>{{ t('playback.stream') }}</span>
+          <select v-model="stream" class="input">
+            <option value="main">MAIN</option>
+            <option value="sub">SUB</option>
+          </select>
+        </label>
+        <div class="field compact-field">
+          <span>{{ t('playback.date') }}</span>
+          <strong class="playback-date-value">{{ calendarTitle }} · {{ day }}</strong>
+        </div>
+        <span class="muted playback-count">{{ t('playback.segments', { count: recordings.length }) }}</span>
+        <div class="range-export">
+          <label class="field compact-field">
+            <span>{{ t('playback.rangeStart') }}</span>
+            <input v-model="rangeStart" class="input" type="datetime-local" />
+          </label>
+          <label class="field compact-field">
+            <span>{{ t('playback.rangeEnd') }}</span>
+            <input v-model="rangeEnd" class="input" type="datetime-local" />
+          </label>
+          <button class="button" :disabled="!canDownload || exporting" @click="exportRangeFromForm">
+            <AppIcon name="save" :size="15" />
+            {{ t('playback.exportRange') }}
+          </button>
+        </div>
+      </section>
+
+      <div class="playback-layout">
+        <section class="panel playback-calendar">
+          <div class="calendar-head">
+            <div class="calendar-heading">
+              <h3>{{ t('playback.calendar') }}</h3>
+              <span class="calendar-title">{{ calendarTitle }}</span>
+            </div>
+            <div class="calendar-nav">
+              <button
+                class="icon-button small"
+                :title="t('playback.calendarPrevMonth')"
+                @click="shiftMonth(-1)"
+              >
+                ‹
+              </button>
+              <button class="button small calendar-today" @click="goToday">
+                {{ t('playback.calendarToday') }}
+              </button>
+              <button
+                class="icon-button small"
+                :title="t('playback.calendarNextMonth')"
+                @click="shiftMonth(1)"
+              >
+                ›
+              </button>
+            </div>
+          </div>
+          <div class="calendar-grid calendar-weekdays">
+            <span v-for="weekday in weekdays" :key="weekday" class="calendar-weekday">
+              {{ weekday }}
+            </span>
+          </div>
+          <div class="calendar-grid">
+            <button
+              v-for="cell in calendarCells"
+              :key="cell.key"
+              class="calendar-day"
+              :class="{
+                outside: !cell.inMonth,
+                'has-recording': cell.hasRecording,
+                today: cell.isToday,
+                selected: cell.isSelected,
+              }"
+              @click="selectCalendarDay(cell)"
+            >
+              {{ cell.number }}
+            </button>
+          </div>
+          <div class="calendar-foot">
+            <span class="calendar-legend">
+              <span class="calendar-dot"></span>
+              {{ t('playback.calendarLegend') }}
+            </span>
+            <span v-if="monthLoading" class="spinner calendar-loading"></span>
+          </div>
+        </section>
+
+        <section v-if="loading" class="panel empty-state playback-loading">
+          <span class="spinner"></span>
+          {{ t('common.loading') }}
+        </section>
+        <section v-else class="panel playback-stage">
+          <PlaybackPlayer
+            v-if="selected"
+            ref="playerRef"
+            :channel-id="channelId"
+            :stream="stream"
+            :start-ms="playStartMs"
+            :end-ms="dayEnd"
+            :speed="speed"
+            :step-ms="skipStepMs"
+            :title="`${channelName} · ${formatTime(positionMs)}`"
+            @seek="onSeek"
+            @speed-change="onSpeedChange"
+            @position="onPosition"
+            @ended="onEnded"
+          />
+          <div v-else class="empty-state">
+            <AppIcon name="playback" :size="28" />
+            <span>{{ t('playback.noRecordings') }}</span>
+          </div>
+        </section>
+      </div>
+
+      <template v-if="!loading">
 
     <section class="panel timeline-panel">
       <div class="timeline-header">
@@ -660,5 +872,7 @@ onMounted(async () => {
         </tbody>
       </table>
     </section>
-  </template>
+      </template>
+    </div>
+  </div>
 </template>
