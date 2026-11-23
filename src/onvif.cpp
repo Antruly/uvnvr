@@ -14,6 +14,10 @@
 #include <openssl/sha.h>
 #include <string_view>
 #include <vector>
+#ifdef _WIN32
+#else
+#include <fcntl.h>
+#endif
 #include <thread>
 
 #ifdef _WIN32
@@ -159,6 +163,52 @@ struct HttpRawResponse {
   std::string body;
 };
 
+
+// Connect with a bounded wait: a camera that is powered off or filtered must
+// fail quickly instead of hanging on the platform SYN timeout.
+bool ConnectWithTimeout(Socket socket, const struct sockaddr* addr, int addr_len, int seconds) {
+  if (::connect(socket, addr, addr_len) == 0)
+    return true;
+  bool pending = false;
+#ifdef _WIN32
+  pending = (WSAGetLastError() == WSAEWOULDBLOCK);
+  if (!pending)
+    return false;
+  u_long mode = 1;
+  ioctlsocket(socket, FIONBIO, &mode);
+#else
+  pending = (errno == EINPROGRESS);
+  if (!pending)
+    return false;
+  const int flags = fcntl(socket, F_GETFL, 0);
+  fcntl(socket, F_SETFL, flags | O_NONBLOCK);
+#endif
+  fd_set writable;
+  FD_ZERO(&writable);
+  FD_SET(socket, &writable);
+  struct timeval tv;
+  tv.tv_sec = seconds;
+  tv.tv_usec = 0;
+  bool connected = false;
+  if (::select(static_cast<int>(socket) + 1, nullptr, &writable, nullptr, &tv) > 0) {
+    int so_error = 0;
+#ifdef _WIN32
+    int len = sizeof(so_error);
+#else
+    socklen_t len = sizeof(so_error);
+#endif
+    getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
+    connected = (so_error == 0);
+  }
+#ifdef _WIN32
+  mode = 0;
+  ioctlsocket(socket, FIONBIO, &mode);
+#else
+  fcntl(socket, F_SETFL, flags);
+#endif
+  return connected;
+}
+
 bool HttpExchange(const std::string& url, const std::string& body, int timeout_seconds,
                   const std::string& extra_headers, HttpRawResponse* out, std::string* error) {
   if (url.rfind("http://", 0) != 0) {
@@ -210,7 +260,8 @@ bool HttpExchange(const std::string& url, const std::string& body, int timeout_s
     setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout),
                sizeof(timeout));
 #endif
-    if (::connect(socket, entry->ai_addr, static_cast<int>(entry->ai_addrlen)) == 0)
+    if (ConnectWithTimeout(socket, entry->ai_addr, static_cast<int>(entry->ai_addrlen),
+                           timeout_seconds))
       break;
     CloseSocket(socket);
     socket = kInvalidSocket;
@@ -506,6 +557,11 @@ std::string SoapCall(const std::string& xaddr, const std::string& security, cons
   std::string first =
       HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
   if (!first.empty() || security.empty() || username.empty())
+    return first;
+  // A network level failure means the device never answered: retrying without
+  // the security header would only double the wait.
+  if (error != nullptr && (error->find("cannot connect") != std::string::npos ||
+                           error->find("cannot resolve") != std::string::npos))
     return first;
   // Some cameras sit behind HTTP authentication and reject the WS-Security
   // header outright (HTTP 500). The HTTP Authorization is already handled by
