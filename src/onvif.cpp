@@ -151,6 +151,8 @@ std::string RandomHex(size_t bytes) {
   return out;
 }
 
+std::string HeaderValue(const std::string& headers, const std::string& name);
+
 struct HttpRawResponse {
   int status = 0;
   std::string headers;
@@ -262,6 +264,13 @@ bool HttpExchange(const std::string& url, const std::string& body, int timeout_s
     const size_t space = head.find(' ');
     if (space != std::string::npos)
       out->status = std::atoi(head.c_str() + space + 1);
+  }
+  if (std::getenv("UVNVR_ONVIF_TRACE") != nullptr) {
+    std::fprintf(stderr, "[onvif] POST %s auth=%d -> %d %s\n", url.c_str(),
+                 extra_headers.empty() ? 0 : 1, out->status,
+                 HeaderValue(out->headers, "WWW-Authenticate").c_str());
+    if (!extra_headers.empty())
+      std::fprintf(stderr, "[onvif]   header: %s\n", extra_headers.c_str());
   }
   return true;
 }
