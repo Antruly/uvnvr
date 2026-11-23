@@ -2999,6 +2999,28 @@ select.input {
   cursor: not-allowed;
 }
 
+.transport-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 6px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(10, 18, 30, 0.9);
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.transport-reset:hover {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(20, 34, 52, 0.95);
+}
+
 .transport-speed-value {
   min-width: 36px;
   text-align: center;

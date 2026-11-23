@@ -204,6 +204,15 @@ function stepSpeed(direction: number) {
   setSpeed(SPEED_STEPS[next])
 }
 
+// Back to the state the user started from: 1x speed and the beginning of the
+// selected segment.
+function resetPlayback() {
+  setSpeed(1)
+  resetPosition()
+  emit('seek', props.startMs)
+  if (state.value === 'error' || state.value === 'idle') void start()
+}
+
 // --- Fullscreen -----------------------------------------------------------
 
 function armIdleTimer() {
@@ -391,6 +400,15 @@ onBeforeUnmount(() => {
           +
         </button>
       </div>
+      <button
+        class="transport-reset"
+        type="button"
+        :title="t('playback.resetPlayback')"
+        :aria-label="t('playback.resetPlayback')"
+        @click="resetPlayback"
+      >
+        ↺
+      </button>
     </div>
   </div>
 </template>
