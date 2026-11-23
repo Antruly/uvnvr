@@ -13,6 +13,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <string_view>
+#include <vector>
 #include <thread>
 
 #ifdef _WIN32
@@ -121,15 +122,50 @@ std::string XmlEscape(const std::string& value) {
   return out;
 }
 
-std::string HttpPostTimeout(const std::string& url, const std::string& body, int timeout_seconds,
-                            std::string* error) {
+std::string Md5Hex(const std::string& input) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int length = 0;
+  if (EVP_Digest(input.data(), input.size(), digest, &length, EVP_md5(), nullptr) != 1)
+    return {};
+  static const char* kHex = "0123456789abcdef";
+  std::string out;
+  out.reserve(length * 2);
+  for (unsigned int i = 0; i < length; ++i) {
+    out.push_back(kHex[digest[i] >> 4]);
+    out.push_back(kHex[digest[i] & 0x0f]);
+  }
+  return out;
+}
+
+std::string RandomHex(size_t bytes) {
+  std::vector<unsigned char> buffer(bytes);
+  if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1)
+    return "0123456789abcdef";
+  static const char* kHex = "0123456789abcdef";
+  std::string out;
+  out.reserve(bytes * 2);
+  for (unsigned char byte : buffer) {
+    out.push_back(kHex[byte >> 4]);
+    out.push_back(kHex[byte & 0x0f]);
+  }
+  return out;
+}
+
+struct HttpRawResponse {
+  int status = 0;
+  std::string headers;
+  std::string body;
+};
+
+bool HttpExchange(const std::string& url, const std::string& body, int timeout_seconds,
+                  const std::string& extra_headers, HttpRawResponse* out, std::string* error) {
   if (url.rfind("http://", 0) != 0) {
     if (error)
       *error = "only http:// ONVIF endpoints are supported";
-    return {};
+    return false;
   }
   if (!EnsureWinsock(error))
-    return {};
+    return false;
   const size_t host_start = 7;
   const size_t path_start = url.find('/', host_start);
   const std::string authority = url.substr(
@@ -145,7 +181,7 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
   if (host.empty()) {
     if (error)
       *error = "missing ONVIF host";
-    return {};
+    return false;
   }
 
   struct addrinfo hints;
@@ -156,7 +192,7 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
   if (getaddrinfo(host.c_str(), port.c_str(), &hints, &result) != 0 || result == nullptr) {
     if (error)
       *error = "cannot resolve " + host;
-    return {};
+    return false;
   }
   Socket socket = kInvalidSocket;
   for (auto* entry = result; entry != nullptr; entry = entry->ai_next) {
@@ -181,12 +217,12 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
   if (socket == kInvalidSocket) {
     if (error)
       *error = "cannot connect to " + host + ":" + port;
-    return {};
+    return false;
   }
 
   const std::string request = "POST " + path + " HTTP/1.1\r\nHost: " + authority +
                               "\r\nContent-Type: application/soap+xml; charset=utf-8\r\n" +
-                              "Content-Length: " + std::to_string(body.size()) +
+                              extra_headers + "Content-Length: " + std::to_string(body.size()) +
                               "\r\nConnection: close\r\n\r\n" + body;
   size_t sent = 0;
   while (sent < request.size()) {
@@ -196,7 +232,7 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
       CloseSocket(socket);
       if (error)
         *error = "failed to send SOAP request";
-      return {};
+      return false;
     }
     sent += static_cast<size_t>(n);
   }
@@ -215,14 +251,146 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
   const size_t body_start = response.find("\r\n\r\n");
   if (body_start == std::string::npos) {
     if (error)
-      *error = "invalid HTTP response from camera";
-    return {};
+      *error = response.empty() ? "camera closed the connection without a response"
+                                : "invalid HTTP response from camera";
+    return false;
   }
-  return response.substr(body_start + 4);
+  const std::string head = response.substr(0, body_start);
+  out->headers = head;
+  out->body = response.substr(body_start + 4);
+  if (head.compare(0, 5, "HTTP/") == 0) {
+    const size_t space = head.find(' ');
+    if (space != std::string::npos)
+      out->status = std::atoi(head.c_str() + space + 1);
+  }
+  return true;
 }
 
-std::string HttpPost(const std::string& url, const std::string& body, std::string* error) {
-  return HttpPostTimeout(url, body, 5, error);
+std::string LowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return value;
+}
+
+std::string HeaderValue(const std::string& headers, const std::string& name) {
+  const std::string lower = LowerCopy(headers);
+  const std::string key = LowerCopy(name) + ":";
+  size_t pos = lower.find("\n" + key);
+  if (pos == std::string::npos) {
+    if (lower.compare(0, key.size(), key) != 0)
+      return {};
+    pos = 0;
+  } else {
+    pos += 1;
+  }
+  const size_t value_start = pos + key.size();
+  const size_t line_end = headers.find("\r\n", value_start);
+  std::string value = headers.substr(value_start, line_end == std::string::npos
+                                                      ? std::string::npos
+                                                      : line_end - value_start);
+  while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+    value.erase(value.begin());
+  return value;
+}
+
+std::string AuthParam(const std::string& challenge, const std::string& key) {
+  const std::string lower = LowerCopy(challenge);
+  const std::string needle = LowerCopy(key) + "=";
+  size_t pos = lower.find(needle);
+  while (pos != std::string::npos) {
+    const bool boundary = pos == 0 || challenge[pos - 1] == ' ' || challenge[pos - 1] == ',' ||
+                          challenge[pos - 1] == '\t';
+    if (boundary) {
+      size_t value_start = pos + needle.size();
+      if (value_start < challenge.size() && challenge[value_start] == '"') {
+        const size_t close = challenge.find('"', value_start + 1);
+        if (close == std::string::npos)
+          return {};
+        return challenge.substr(value_start + 1, close - value_start - 1);
+      }
+      const size_t comma = challenge.find(',', value_start);
+      std::string value = challenge.substr(value_start, comma == std::string::npos
+                                                           ? std::string::npos
+                                                           : comma - value_start);
+      while (!value.empty() && value.back() == ' ')
+        value.pop_back();
+      return value;
+    }
+    pos = lower.find(needle, pos + 1);
+  }
+  return {};
+}
+
+// Builds the Authorization header for a camera that answered 401. Digest is
+// what most ONVIF cameras require; Basic is kept for the few that only offer
+// it. Returns an empty string when the challenge is not understood.
+std::string BuildAuthorization(const std::string& url, const std::string& headers,
+                               const std::string& username, const std::string& password) {
+  const std::string challenge = HeaderValue(headers, "WWW-Authenticate");
+  if (challenge.empty())
+    return {};
+  const std::string lower = LowerCopy(challenge);
+  if (lower.find("digest") == std::string::npos) {
+    if (lower.find("basic") == std::string::npos)
+      return {};
+    const std::string credentials = username + ":" + password;
+    return "Authorization: Basic " + Base64(reinterpret_cast<const unsigned char*>(
+                                                credentials.data()), credentials.size());
+  }
+  const std::string realm = AuthParam(challenge, "realm");
+  const std::string nonce = AuthParam(challenge, "nonce");
+  if (nonce.empty())
+    return {};
+  const std::string qop = AuthParam(challenge, "qop");
+  const std::string opaque = AuthParam(challenge, "opaque");
+  std::string algorithm = AuthParam(challenge, "algorithm");
+  if (algorithm.empty())
+    algorithm = "MD5";
+  const size_t path_start = url.find('/', 7);
+  const std::string uri = path_start == std::string::npos ? "/" : url.substr(path_start);
+  const std::string ha1 = Md5Hex(username + ":" + realm + ":" + password);
+  const std::string ha2 = Md5Hex("POST:" + uri);
+  const std::string cnonce = RandomHex(8);
+  std::string response;
+  std::string header = "Authorization: Digest ";
+  if (!qop.empty()) {
+    response = Md5Hex(ha1 + ":" + nonce + ":00000001:" + cnonce + ":" + qop + ":" + ha2);
+  } else {
+    response = Md5Hex(ha1 + ":" + nonce + ":" + ha2);
+  }
+  header += "username=\"" + username + "\", realm=\"" + realm + "\", nonce=\"" + nonce +
+            "\", uri=\"" + uri + "\", algorithm=" + algorithm + ", response=\"" + response + "\"";
+  if (!qop.empty())
+    header += ", qop=" + qop + ", nc=00000001, cnonce=\"" + cnonce + "\"";
+  if (!opaque.empty())
+    header += ", opaque=\"" + opaque + "\"";
+  return header;
+}
+
+std::string HttpPostTimeout(const std::string& url, const std::string& body, int timeout_seconds,
+                            const std::string& username, const std::string& password,
+                            std::string* error) {
+  HttpRawResponse response;
+  if (!HttpExchange(url, body, timeout_seconds, "", &response, error))
+    return {};
+  if (response.status == 401 && !username.empty()) {
+    const std::string authorization = BuildAuthorization(url, response.headers, username, password);
+    if (!authorization.empty()) {
+      HttpRawResponse retried;
+      if (!HttpExchange(url, body, timeout_seconds, authorization + "\r\n", &retried, error))
+        return {};
+      response = std::move(retried);
+    }
+  }
+  if (response.status >= 400) {
+    if (error) {
+      *error = "camera returned HTTP " + std::to_string(response.status);
+      if (response.status == 401)
+        *error += " (authentication rejected)";
+    }
+    return {};
+  }
+  return response.body;
 }
 
 std::string ExtractTag(const std::string& xml, const std::string& tag) {
@@ -324,8 +492,9 @@ std::string Envelope(const std::string& security, const std::string& body) {
 }
 
 std::string SoapCall(const std::string& xaddr, const std::string& security, const std::string& body,
+                     const std::string& username, const std::string& password,
                      std::string* error) {
-  return HttpPost(xaddr, Envelope(security, body), error);
+  return HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
 }
 
 std::string DeviceServiceUrl(const std::string& xaddr) {
@@ -717,7 +886,8 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
 
   const std::string device_xml =
       SoapCall(service, security,
-               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", error);
+               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username,
+               password, error);
   if (device_xml.empty())
     return false;
   info->manufacturer = ExtractTag(device_xml, "Manufacturer");
@@ -726,7 +896,8 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   info->serial = ExtractTag(device_xml, "SerialNumber");
 
   const std::string profiles_xml = SoapCall(
-      service, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>", error);
+      service, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>", username,
+      password, error);
   if (profiles_xml.empty())
     return false;
 
@@ -755,7 +926,8 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
         "<Transport xmlns=\"http://www.onvif.org/ver10/schema\"><Protocol>RTSP</Protocol>"
         "</Transport></StreamSetup><ProfileToken>" +
         XmlEscape(token) + "</ProfileToken></GetStreamUri>";
-    const std::string stream_xml = SoapCall(service, security, stream_body, error);
+    const std::string stream_xml = SoapCall(service, security, stream_body, username, password,
+                                            error);
     if (stream_xml.empty())
       continue;
     profile.stream_uri = ExtractTag(stream_xml, "Uri");
@@ -773,10 +945,12 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
 }
 
 std::string ResolveMediaService(const std::string& device, const std::string& security,
+                                const std::string& username, const std::string& password,
                                 std::string* error) {
   const std::string capabilities = SoapCall(
       device, security,
-      "<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>", error);
+      "<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>", username,
+      password, error);
   if (!capabilities.empty()) {
     const std::string media = ExtractTag(capabilities, "Media");
     const std::string xaddr = Trim(ExtractTag(media, "XAddr"));
@@ -794,8 +968,8 @@ bool GetOnvifEncoderConfig(const std::string& host, int port, const std::string&
   const std::string device =
       "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
   const std::string security = SecurityHeader(username, password);
-  const std::string media = ResolveMediaService(device, security, error);
-  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", error);
+  const std::string media = ResolveMediaService(device, security, username, password, error);
+  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", username, password, error);
   if (xml.empty())
     return false;
   XmlBlock block;
@@ -827,8 +1001,8 @@ bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string&
   const std::string device =
       "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
   const std::string security = SecurityHeader(username, password);
-  const std::string media = ResolveMediaService(device, security, error);
-  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", error);
+  const std::string media = ResolveMediaService(device, security, username, password, error);
+  const std::string xml = SoapCall(media, security, "<trt:GetVideoEncoderConfigurations/>", username, password, error);
   if (xml.empty())
     return false;
   XmlBlock block;
@@ -880,7 +1054,7 @@ bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string&
                            XmlEscape(token) + "\">" + inner +
                            "</trt:Configuration><trt:ForcePersistence>true</trt:ForcePersistence>"
                            "</trt:SetVideoEncoderConfiguration>";
-  const std::string response = SoapCall(media, security, body, error);
+  const std::string response = SoapCall(media, security, body, username, password, error);
   return !response.empty();
 }
 
@@ -896,7 +1070,7 @@ bool ResolveOnvifEventUrl(const std::string& host, int port, const std::string& 
       "http://" + host + ":" + std::to_string(port) + "/onvif/device_service";
   std::string soap_error;
   const std::string response =
-      SoapCall(device, SecurityHeader(username, password),
+      SoapCall(device, SecurityHeader(username, password), username, password,
                "<tds:GetCapabilities><tds:Category>Events</tds:Category></tds:GetCapabilities>",
                &soap_error);
   if (!response.empty()) {
@@ -926,7 +1100,7 @@ bool CreateOnvifEventSubscription(const std::string& event_url, const std::strin
   const std::string body = "<tev:CreatePullPointSubscription>"
                            "<tev:InitialTerminationTime>PT120S</tev:InitialTerminationTime>"
                            "</tev:CreatePullPointSubscription>";
-  const std::string response = SoapCall(event_url, SecurityHeader(username, password), body, error);
+  const std::string response = SoapCall(event_url, SecurityHeader(username, password), body, username, password, error);
   if (response.empty())
     return false;
   const std::string reference = ExtractTag(response, "SubscriptionReference");
@@ -955,7 +1129,8 @@ bool PullOnvifEvents(const std::string& address, const std::string& username,
       "<tev:PullMessages><tev:Timeout>PT" + std::to_string(seconds) +
       "S</tev:Timeout><tev:MessageLimit>32</tev:MessageLimit></tev:PullMessages>";
   const std::string response = HttpPostTimeout(
-      address, Envelope(SecurityHeader(username, password), body), seconds + 5, error);
+      address, Envelope(SecurityHeader(username, password), body), seconds + 5, username, password,
+      error);
   if (response.empty())
     return false;
   *events = ParseNotificationEvents(response);
@@ -986,7 +1161,7 @@ bool SetOnvifTime(const std::string& host, int port, const std::string& username
                 tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
   const std::string service =
       "http://" + host + ":" + std::to_string(port > 0 ? port : 80) + "/onvif/device_service";
-  const std::string response = SoapCall(service, SecurityHeader(username, password), body, error);
+  const std::string response = SoapCall(service, SecurityHeader(username, password), body, username, password, error);
   if (response.empty())
     return false;
   if (response.find("Fault") != std::string::npos ||
