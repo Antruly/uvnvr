@@ -98,6 +98,27 @@ jobs:
           ldd build/uvnvr.exe | awk '/=> \/mingw64/ {print $3}' | while read -r dll; do
             [ -n "$dll" ] && cp -L "$dll" "$OUT/bin/"
           done
+          # Private-protocol C SDK: DLL, import library, header and samples.
+          if [ -f build/libuvnvr_sdk.dll ]; then
+            mkdir -p "$OUT/sdk/include" "$OUT/sdk/lib"
+            cp build/libuvnvr_sdk.dll "$OUT/bin/"
+            cp build/libuvnvr_sdk.dll.a "$OUT/sdk/lib/" 2>/dev/null || true
+            cp sdk/include/uvnvr_sdk.h "$OUT/sdk/include/"
+            cp build/uvnvr_sample_basic.exe build/uvnvr_sample_live.exe \
+               build/uvnvr_sample_download.exe "$OUT/sdk/" 2>/dev/null || true
+          else
+            echo "::warning::the private-protocol SDK was not built on Windows"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-sdk-windows-x64
+          path: |
+            build/libuvnvr_sdk.dll
+            build/libuvnvr_sdk.dll.a
+            sdk/include/uvnvr_sdk.h
+            build/uvnvr_sample_*.exe
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v7
         with:
