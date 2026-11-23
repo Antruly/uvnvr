@@ -4,6 +4,45 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-11-23
+
+### Added
+
+- **Private protocol and C SDK on port 1515.** The server now accepts the
+  native protocol over TCP and UDP/QUIC on the same port (QUIC by default,
+  TCP as fallback), documented in `docs/private-protocol.md`. Authentication
+  returns a short-lived session id that subsequent calls carry. The C SDK
+  (`sdk/include/uvnvr_sdk.h`, C++/libuvcpp internals) mirrors the REST v1
+  surface for queries, live preview and recording download, and picks the
+  transport by itself. Windows x64 and Linux packages ship the DLL/so, the
+  import library, the header and three samples.
+- **Recording calendar on the playback page.** A month grid highlights the
+  days that have recordings (`GET /api/v1/recordings/days`, grouped by the
+  configured time zone) and leaves empty days blank. Channels are picked from
+  a status list instead of a dropdown.
+- **Large playback player with fullscreen.** The player fills the main column,
+  the calendar moved into a popover, playback speed runs from 0.25x to 32x with
+  +/- buttons and a reset control outside the video, and `F` toggles
+  fullscreen.
+
+### Changed
+
+- Snapshots requested without a size still return the native resolution; the
+  channel page now asks for 480x270 thumbnails and 1280x720 previews, which
+  takes a 1080p channel from ~1.0 s to ~0.17 s per image.
+
+### Fixed
+
+- ONVIF cameras that publish their media service on a separate address (for
+  example `/onvif/media_service`) can be added again: the probe resolves the
+  media XAddr from `GetCapabilities` instead of asking the device endpoint,
+  retries without the WS-Security header when a camera rejects it after
+  accepting the credentials, and bounds the TCP connect so a powered-off
+  camera fails in seconds instead of hanging the request.
+- Windows SDK clients no longer time out or hang at connect: the library
+  stopped linking a second libuv, whose `uv_async_t` layout differed from the
+  one inside `libuvcpp.dll`, so the event loop never woke up.
+
 ## [0.18.1] - 2026-11-19
 
 ### Added

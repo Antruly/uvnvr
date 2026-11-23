@@ -85,6 +85,16 @@ jobs:
             --version "${{ steps.version.outputs.version }}" \
             --out dist-packages
 
+      - name: Package SDK
+        run: |
+          chmod +x packaging/sdk/build-sdk-package.sh
+          packaging/sdk/build-sdk-package.sh \
+            --build build \
+            --out dist-packages \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "linux-${{ matrix.arch }}" \
+            --uvcpp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-${{ matrix.libuvcpp }}"
+
       - uses: actions/upload-artifact@v7
         with:
           name: uvnvr-linux-${{ matrix.arch }}
@@ -185,6 +195,16 @@ jobs:
           done
           cd dist-packages
           zip -qr "uvnvr-${VERSION}-windows-x64.zip" "uvnvr-${VERSION}-windows-x64"
+
+      - name: Package SDK
+        run: |
+          chmod +x packaging/sdk/build-sdk-package.sh
+          packaging/sdk/build-sdk-package.sh \
+            --build build \
+            --out dist-packages \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform windows-x64 \
+            --uvcpp "$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64"
 
       - name: Install Inno Setup
         shell: pwsh
@@ -355,6 +375,16 @@ jobs:
             --search-path "$RUNNER_TEMP/uvcpp-install/lib" \
             --search-path "$(brew --prefix)/lib"
 
+      - name: Package SDK
+        run: |
+          chmod +x packaging/sdk/build-sdk-package.sh
+          packaging/sdk/build-sdk-package.sh \
+            --build build \
+            --out dist-packages \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "macos-${{ matrix.arch }}" \
+            --uvcpp "$RUNNER_TEMP/uvcpp-install"
+
       - uses: actions/upload-artifact@v7
         with:
           name: uvnvr-macos-${{ matrix.arch }}
@@ -413,6 +443,18 @@ jobs:
         env:
           UVNVR_VERSION: ${{ steps.version.outputs.version }}
         run: powershell -ExecutionPolicy Bypass -File packaging/windows/build-arm64.ps1
+      - name: Package SDK
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $root = "dist-packages\sdk\uvnvr-sdk-$v-windows-arm64"
+          New-Item -ItemType Directory -Force -Path "$root\include","$root\lib","$root\samples","$root\docs" | Out-Null
+          Copy-Item sdk\include\uvnvr_sdk.h "$root\include\"
+          if (Test-Path docs\private-protocol.md) { Copy-Item docs\private-protocol.md "$root\docs\" }
+          Get-ChildItem build -Recurse -Filter 'uvnvr_sdk.dll' | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName "$root\lib\" }
+          Get-ChildItem build -Recurse -Filter 'uvnvr_sdk.lib' | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName "$root\lib\" }
+          Get-ChildItem build -Recurse -Filter 'uvnvr_sample_*.exe' | ForEach-Object { Copy-Item $_.FullName "$root\samples\" }
+          Compress-Archive -Path $root -DestinationPath "dist-packages\uvnvr-sdk-$v-windows-arm64.zip" -Force
       - uses: actions/upload-artifact@v7
         with:
           name: uvnvr-windows-arm64

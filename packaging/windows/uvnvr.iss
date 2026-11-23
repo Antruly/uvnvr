@@ -1,9 +1,9 @@
 ; UvNVR Windows installer (Inno Setup 6.5+)
 ; Build:
-;   ISCC.exe /DMyAppVersion=0.18.1 /DMyArch=x64 /DSourceDir=<stage> packaging\windows\uvnvr.iss
+;   ISCC.exe /DMyAppVersion=0.19.0 /DMyArch=x64 /DSourceDir=<stage> packaging\windows\uvnvr.iss
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.18.1"
+  #define MyAppVersion "0.19.0"
 #endif
 #ifndef MyArch
   #define MyArch "x64"
