@@ -27,6 +27,8 @@ case "$platform" in
   windows-*) use_zip=1 ;;
 esac
 
+mkdir -p "$out_dir"
+out_abs=$(cd "$out_dir" && pwd)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 root="$stage/uvnvr-sdk-$version-$platform"
@@ -71,13 +73,12 @@ probes QUIC first and falls back to TCP; applications only see uvnvr_connect().
 On Windows keep libuvcpp.dll next to the executables (or on PATH).
 EOF
 
-mkdir -p "$out_dir"
 if [ "$use_zip" = "1" ]; then
-  archive="$out_dir/uvnvr-sdk-$version-$platform.zip"
+  archive="$out_abs/uvnvr-sdk-$version-$platform.zip"
   rm -f "$archive"
-  (cd "$stage" && zip -qr "$(cd "$out_dir" && pwd)/$(basename "$archive")" "$(basename "$root")")
+  (cd "$stage" && zip -qr "$archive" "$(basename "$root")")
 else
-  archive="$out_dir/uvnvr-sdk-$version-$platform.tar.gz"
+  archive="$out_abs/uvnvr-sdk-$version-$platform.tar.gz"
   tar -C "$stage" -czf "$archive" "$(basename "$root")"
 fi
 echo "packaged $archive"
