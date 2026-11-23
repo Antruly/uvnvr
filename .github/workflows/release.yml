@@ -392,6 +392,7 @@ jobs:
             dist-packages/*.pkg
             dist-packages/*.dmg
             dist-packages/*.zip
+            dist-packages/*.tar.gz
           if-no-files-found: error
 
   windows-arm64:
@@ -454,6 +455,22 @@ jobs:
           Get-ChildItem build -Recurse -Filter 'uvnvr_sdk.dll' | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName "$root\lib\" }
           Get-ChildItem build -Recurse -Filter 'uvnvr_sdk.lib' | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName "$root\lib\" }
           Get-ChildItem build -Recurse -Filter 'uvnvr_sample_*.exe' | ForEach-Object { Copy-Item $_.FullName "$root\samples\" }
+          $uvcpp = "$env:RUNNER_TEMP\uvcpp\libuvcpp-1.8.1-msvc-arm64"
+          foreach ($candidate in @("$uvcpp\bin\libuvcpp.dll", "$uvcpp\libuvcpp.dll")) {
+            if (Test-Path $candidate) { Copy-Item $candidate "$root\lib\"; break }
+          }
+          $readme = @(
+            "UvNVR private-protocol SDK $v (windows-arm64)",
+            "",
+            "include/uvnvr_sdk.h   - the only public header, plain C",
+            "lib/                  - uvnvr_sdk.dll, import library and libuvcpp.dll",
+            "samples/              - sample_basic / sample_live / sample_download",
+            "docs/                 - protocol reference",
+            "",
+            "Endpoint: <nvr>:1515. This MSVC build ships TCP only; the client",
+            "probes QUIC and falls back to TCP automatically."
+          )
+          Set-Content -Path "$root\README.txt" -Value $readme -Encoding ASCII
           Compress-Archive -Path $root -DestinationPath "dist-packages\uvnvr-sdk-$v-windows-arm64.zip" -Force
       - uses: actions/upload-artifact@v7
         with:
