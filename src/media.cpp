@@ -3,6 +3,7 @@
 #include "platform.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -563,6 +564,16 @@ struct MediaService::Impl {
     std::vector<uint8_t> pmt;
     std::vector<uint8_t> pending;
     int pmt_pid = -1;
+    // PMT section being reassembled across TS packets, and the complete
+    // video-only rewrite of the last valid PMT. `live_pmt` is what live
+    // preview sends instead of the original PMT when audio is stripped.
+    std::vector<uint8_t> pmt_section;
+    size_t pmt_section_need = 0;
+    std::vector<uint8_t> live_pmt;
+    bool live_pmt_ok = false;
+    // Set when the most recent PMT section was malformed or had a bad CRC.
+    // Live preview then keeps the original bytes instead of stripping audio.
+    bool pmt_invalid = false;
     // Stream type of the video elementary stream from the PMT (0x1b H.264,
     // 0x24 H.265) and its PID. Parameter-set caching below is H.264-only.
     int video_type = -1;
@@ -593,26 +604,170 @@ struct MediaService::Impl {
       }
     }
 
-    void ParsePmt(const uint8_t* p, size_t payload) {
-      const size_t pointer = p[payload];
-      const size_t section = payload + 1 + pointer;
-      if (section + 12 > 188 || p[section] != 0x02)
+    // MPEG-2 CRC32, as used by PSI sections: poly 0x04C11DB7, init
+    // 0xFFFFFFFF, no final xor. A valid section's CRC over the whole section
+    // (including the appended CRC) is zero.
+    static uint32_t Crc32Mpeg(const uint8_t* data, size_t len) {
+      static const auto table = [] {
+        std::array<uint32_t, 256> values{};
+        for (uint32_t i = 0; i < 256; ++i) {
+          uint32_t crc = i << 24;
+          for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04c11db7u : (crc << 1);
+          values[i] = crc;
+        }
+        return values;
+      }();
+      uint32_t crc = 0xffffffffu;
+      for (size_t i = 0; i < len; ++i)
+        crc = (crc << 8) ^ table[((crc >> 24) ^ data[i]) & 0xff];
+      return crc;
+    }
+
+    // Rebuilds a PMT section without the audio elementary streams. ES entries
+    // with stream_type 0x0f (ADTS AAC) or a PID in `audio_pids` are dropped
+    // together with their 5-byte header and ES_info descriptors. Returns
+    // false, leaving `out` untouched, when the section is malformed or a
+    // rewrite would remove every stream; callers then keep the original PMT.
+    static bool BuildVideoOnlyPmt(const std::vector<uint8_t>& section,
+                                  const std::set<int>& audio_pids, std::vector<uint8_t>* out) {
+      if (section.size() < 16 || section[0] != 0x02)
+        return false;
+      const size_t total = 3 + (((section[1] & 0x0f) << 8) | section[2]);
+      if (total < 16 || total > section.size())
+        return false;
+      if (Crc32Mpeg(section.data(), total) != 0)
+        return false;
+      const size_t program_info = ((section[10] & 0x0f) << 8) | section[11];
+      const size_t es_start = 12 + program_info;
+      const size_t es_end = total - 4;
+      if (es_start > es_end)
+        return false;
+      std::vector<uint8_t> body(section.begin(), section.begin() + es_start);
+      size_t i = es_start;
+      size_t kept = 0;
+      int first_video_pid = -1;
+      while (i + 5 <= es_end) {
+        const uint8_t type = section[i];
+        const int pid = ((section[i + 1] & 0x1f) << 8) | section[i + 2];
+        const size_t info = ((section[i + 3] & 0x0f) << 8) | section[i + 4];
+        if (i + 5 + info > es_end)
+          return false;
+        if (type != 0x0f && audio_pids.find(pid) == audio_pids.end()) {
+          body.insert(body.end(), section.begin() + i, section.begin() + i + 5 + info);
+          if (first_video_pid < 0 && (type == 0x1b || type == 0x24))
+            first_video_pid = pid;
+          ++kept;
+        }
+        i += 5 + info;
+      }
+      if (i != es_end || kept == 0)
+        return false;
+      // If PCR rides on an audio PID that is about to disappear, move it to
+      // the first video ES so demuxers are not left waiting for a PCR that
+      // never comes.
+      const int pcr_pid = ((section[8] & 0x1f) << 8) | section[9];
+      if (audio_pids.find(pcr_pid) != audio_pids.end()) {
+        if (first_video_pid < 0)
+          return false;
+        body[8] = static_cast<uint8_t>((body[8] & 0xe0) | ((first_video_pid >> 8) & 0x1f));
+        body[9] = static_cast<uint8_t>(first_video_pid & 0xff);
+      }
+      const size_t new_length = body.size() - 3 + 4;
+      if (new_length > 0x0fff)
+        return false;
+      body[1] = static_cast<uint8_t>((body[1] & 0xf0) | ((new_length >> 8) & 0x0f));
+      body[2] = static_cast<uint8_t>(new_length & 0xff);
+      const uint32_t crc = Crc32Mpeg(body.data(), body.size());
+      body.push_back(static_cast<uint8_t>(crc >> 24));
+      body.push_back(static_cast<uint8_t>(crc >> 16));
+      body.push_back(static_cast<uint8_t>(crc >> 8));
+      body.push_back(static_cast<uint8_t>(crc));
+      out->swap(body);
+      return true;
+    }
+
+    // Packs a complete PMT section into 188-byte TS packets on `pid`. The
+    // first packet carries PUSI and a zero pointer_field, later packets carry
+    // the rest of the section with PUSI=0. Unused payload bytes are 0xFF
+    // stuffing and the continuity counter advances once per packet.
+    static void AppendLivePmtPackets(const std::vector<uint8_t>& section, int pid,
+                                     std::atomic<uint8_t>* cc, std::vector<uint8_t>* out) {
+      if (section.empty() || pid <= 0 || pid >= 0x1fff)
         return;
-      const int section_length = ((p[section + 1] & 0x0f) << 8) | p[section + 2];
-      if (section_length < 9)
+      size_t consumed = 0;
+      bool first = true;
+      while (consumed < section.size()) {
+        uint8_t packet[188];
+        std::memset(packet, 0xff, sizeof(packet));
+        packet[0] = 0x47;
+        packet[1] = static_cast<uint8_t>((first ? 0x40 : 0x00) | ((pid >> 8) & 0x1f));
+        packet[2] = static_cast<uint8_t>(pid & 0xff);
+        packet[3] =
+            static_cast<uint8_t>(0x10 | (cc->fetch_add(1, std::memory_order_relaxed) & 0x0f));
+        size_t pos = 4;
+        if (first)
+          packet[pos++] = 0x00; // pointer_field
+        const size_t take = std::min<size_t>(188 - pos, section.size() - consumed);
+        std::memcpy(packet + pos, section.data() + consumed, take);
+        consumed += take;
+        out->insert(out->end(), packet, packet + 188);
+        first = false;
+      }
+    }
+
+    // Copies the TS packets that belong to the live (video-only) preview:
+    // audio PIDs are dropped and every PMT occurrence is replaced by the
+    // rewritten section. Original PMT continuation packets are dropped; the
+    // replacement always starts fresh on PUSI, so a multi-packet PMT is still
+    // replaced by a valid section.
+    static void FilterLivePackets(const uint8_t* data, size_t len,
+                                  const std::set<int>& audio_pids, int pmt_pid,
+                                  const std::vector<uint8_t>& live_pmt, std::atomic<uint8_t>* cc,
+                                  std::vector<uint8_t>* out) {
+      for (size_t off = 0; off + 188 <= len; off += 188) {
+        const uint8_t* p = data + off;
+        if (p[0] != 0x47)
+          continue;
+        const int pid = ((p[1] & 0x1f) << 8) | p[2];
+        if (pid == pmt_pid) {
+          if ((p[1] & 0x40) != 0)
+            AppendLivePmtPackets(live_pmt, pmt_pid, cc, out);
+          continue;
+        }
+        if (audio_pids.find(pid) != audio_pids.end())
+          continue;
+        out->insert(out->end(), p, p + 188);
+      }
+    }
+
+    // Parses an assembled PMT section: refreshes the audio/video PID sets and
+    // builds the video-only rewrite used by live preview. A malformed or
+    // corrupt section leaves the previous state untouched so live preview
+    // keeps working with the last good PMT instead of emitting a bad one.
+    void ParsePmtSection() {
+      const std::vector<uint8_t>& section = pmt_section;
+      if (section.size() < 16 || section[0] != 0x02)
         return;
-      const size_t end = section + 3 + static_cast<size_t>(section_length) - 4;
-      if (end > 188)
-        return; // Multi-packet PMT: keep the previous PID set.
-      const size_t program_info = ((p[section + 10] & 0x0f) << 8) | p[section + 11];
-      size_t i = section + 12 + program_info;
+      const size_t total = 3 + (((section[1] & 0x0f) << 8) | section[2]);
+      if (total < 16 || total > section.size())
+        return;
+      if (Crc32Mpeg(section.data(), total) != 0)
+        return;
+      const size_t program_info = ((section[10] & 0x0f) << 8) | section[11];
+      const size_t end = total - 4;
+      size_t i = 12 + program_info;
+      if (i > end)
+        return;
       std::set<int> pids;
       int video = -1;
       int video_program_pid = -1;
       while (i + 5 <= end) {
-        const uint8_t type = p[i];
-        const int pid = ((p[i + 1] & 0x1f) << 8) | p[i + 2];
-        const size_t info = ((p[i + 3] & 0x0f) << 8) | p[i + 4];
+        const uint8_t type = section[i];
+        const int pid = ((section[i + 1] & 0x1f) << 8) | section[i + 2];
+        const size_t info = ((section[i + 3] & 0x0f) << 8) | section[i + 4];
+        if (i + 5 + info > end)
+          return;
         switch (type) {
         case 0x03: // MPEG-1 audio
         case 0x04: // MPEG-2 audio
@@ -634,23 +789,59 @@ struct MediaService::Impl {
         }
         i += 5 + info;
       }
+      if (i != end)
+        return;
       audio_pids = std::move(pids);
       if (video >= 0) {
         video_type = video;
         video_pid = video_program_pid;
       }
+      std::vector<uint8_t> rewritten;
+      if (BuildVideoOnlyPmt(section, audio_pids, &rewritten)) {
+        live_pmt = std::move(rewritten);
+        live_pmt_ok = true;
+      } else {
+        live_pmt.clear();
+        live_pmt_ok = false;
+      }
     }
 
-    static std::vector<uint8_t> RemoveAudioPackets(const uint8_t* data, size_t len,
-                                                   const std::set<int>& pids) {
-      std::vector<uint8_t> out;
-      out.reserve(len);
-      for (size_t off = 0; off + 188 <= len; off += 188) {
-        const int pid = ((data[off + 1] & 0x1f) << 8) | data[off + 2];
-        if (pids.find(pid) == pids.end())
-          out.insert(out.end(), data + off, data + off + 188);
+    // Reassembles a PMT section across TS packets. `payload` is the offset of
+    // the packet payload, matching the calculation already done by ParseTs.
+    void HandlePmtPacket(const uint8_t* p, size_t payload, bool pusi) {
+      if (pusi) {
+        const size_t pointer = p[payload];
+        const size_t start = payload + 1 + pointer;
+        if (start >= 188) {
+          pmt_section.clear();
+          pmt_section_need = 0;
+          return;
+        }
+        pmt_section.assign(p + start, p + 188);
+        pmt_section_need = 0;
+      } else {
+        if (pmt_section.empty())
+          return; // Continuation without a known section start: ignore.
+        pmt_section.insert(pmt_section.end(), p + payload, p + 188);
       }
-      return out;
+      if (pmt_section_need == 0) {
+        if (pmt_section.size() < 3)
+          return; // Need more bytes to learn the section length.
+        const size_t section_length = ((pmt_section[1] & 0x0f) << 8) | pmt_section[2];
+        const size_t total = 3 + section_length;
+        if (section_length < 9 || total > 4098) {
+          pmt_section.clear();
+          pmt_section_need = 0;
+          return;
+        }
+        pmt_section_need = total;
+      }
+      if (pmt_section.size() < pmt_section_need)
+        return;
+      pmt_section.resize(pmt_section_need);
+      ParsePmtSection();
+      pmt_section.clear();
+      pmt_section_need = 0;
     }
 
     void ParseTs(const uint8_t* data, size_t len) {
@@ -680,13 +871,21 @@ struct MediaService::Impl {
           const size_t section = payload + 1 + pointer;
           if (section + 12 <= 188 && p[section] == 0x00) {
             const int pmt = ((p[section + 10] & 0x1f) << 8) | p[section + 11];
-            if (pmt > 0 && pmt < 0x1fff)
+            if (pmt > 0 && pmt < 0x1fff && pmt != pmt_pid) {
+              // A new PMT PID invalidates the old section rewrite.
               pmt_pid = pmt;
+              pmt_section.clear();
+              pmt_section_need = 0;
+              audio_pids.clear();
+              live_pmt.clear();
+              live_pmt_ok = false;
+            }
             pat.assign(p, p + 188);
           }
-        } else if (pid == pmt_pid && pusi) {
-          pmt.assign(p, p + 188);
-          ParsePmt(p, payload);
+        } else if (pid == pmt_pid && pmt_pid >= 0) {
+          if (pusi)
+            pmt.assign(p, p + 188);
+          HandlePmtPacket(p, payload, pusi);
         }
         offset += 188;
       }
@@ -823,8 +1022,13 @@ struct MediaService::Impl {
     // Starts at the most recent keyframe's PES packet. The cached SPS/PPS
     // packets are prepended when they are not already part of the selected
     // range, so the result decodes on its own even if the encoder sent
-    // parameter sets only once at the start of the stream.
-    std::vector<uint8_t> Snapshot() {
+    // parameter sets only once at the start of the stream. When
+    // `strip_live_audio` is set, audio packets are removed and every PMT in
+    // the snapshot is replaced by the video-only rewrite.
+    std::vector<uint8_t> Snapshot(bool strip_live_audio = false,
+                                  std::atomic<uint8_t>* live_cc = nullptr) {
+      const bool rewrite_pmt = strip_live_audio && live_pmt_ok && !live_pmt.empty() &&
+                               live_cc != nullptr;
       std::vector<uint8_t> out;
       uint64_t start = keyframe_offset != UINT64_MAX ? keyframe_offset : first_offset;
       start = (start / 188) * 188;
@@ -840,7 +1044,11 @@ struct MediaService::Impl {
                   (parameter_sets ? sps_packet.size() + pps_packet.size() : 0) +
                   static_cast<size_t>(total_offset - start));
       out.insert(out.end(), pat.begin(), pat.end());
-      out.insert(out.end(), pmt.begin(), pmt.end());
+      if (rewrite_pmt) {
+        AppendLivePmtPackets(live_pmt, pmt_pid, live_cc, &out);
+      } else {
+        out.insert(out.end(), pmt.begin(), pmt.end());
+      }
       if (parameter_sets) {
         // Offsets at or after start are already in the copied chunks below.
         if (sps_offset < start)
@@ -853,7 +1061,12 @@ struct MediaService::Impl {
         if (end <= start)
           continue;
         const size_t from = start > chunk.start ? static_cast<size_t>(start - chunk.start) : 0;
-        out.insert(out.end(), chunk.bytes->begin() + from, chunk.bytes->end());
+        if (rewrite_pmt) {
+          FilterLivePackets(chunk.bytes->data() + from, chunk.bytes->size() - from, audio_pids,
+                            pmt_pid, live_pmt, live_cc, &out);
+        } else {
+          out.insert(out.end(), chunk.bytes->begin() + from, chunk.bytes->end());
+        }
       }
       return out;
     }
@@ -882,6 +1095,10 @@ struct MediaService::Impl {
     std::vector<uint8_t> align_carry;
     std::unordered_map<uint64_t, std::shared_ptr<Subscriber>> subscribers;
     std::unordered_map<uint64_t, std::shared_ptr<RawSubscriber>> raw_subscribers;
+    // Continuity counter shared by the periodic PMT replacements and the
+    // initial snapshot's PMT, so live subscribers see one consistent PID.
+    std::atomic<uint8_t> live_pmt_cc{0};
+    bool live_pmt_fallback_logged = false;
     uint64_t next_subscriber_id = 1;
     uint64_t next_raw_subscriber_id = 1;
 
@@ -967,14 +1184,24 @@ struct MediaService::Impl {
       std::vector<std::shared_ptr<Subscriber>> subscriber_list;
       std::vector<std::shared_ptr<RawSubscriber>> raw_list;
       std::set<int> audio_pids;
+      int pmt_pid = -1;
+      std::vector<uint8_t> live_pmt;
       bool strip_live_audio = false;
+      bool pmt_rewrite_failed = false;
       {
         std::lock_guard<std::mutex> lock(mutex);
         demux.Ingest(data, len, &keyframes, &chunk_start);
         last_ingest_ms = NowMs();
-        strip_live_audio = !owner->live_audio_enabled.load() && !demux.audio_pids.empty();
-        if (strip_live_audio)
+        const bool audio_disabled = !owner->live_audio_enabled.load();
+        strip_live_audio =
+            audio_disabled && !demux.audio_pids.empty() && demux.live_pmt_ok;
+        if (strip_live_audio) {
           audio_pids = demux.audio_pids;
+          pmt_pid = demux.pmt_pid;
+          live_pmt = demux.live_pmt;
+        } else if (audio_disabled && !demux.audio_pids.empty()) {
+          pmt_rewrite_failed = true;
+        }
         subscriber_list.reserve(subscribers.size());
         for (const auto& [id, sub] : subscribers) {
           (void)id;
@@ -985,6 +1212,12 @@ struct MediaService::Impl {
           raw_list.push_back(sub);
         }
         status.has_keyframe = demux.keyframe_offset != UINT64_MAX;
+      }
+      if (pmt_rewrite_failed && !live_pmt_fallback_logged) {
+        live_pmt_fallback_logged = true;
+        std::fprintf(stderr,
+                     "[media %lld/%s] live PMT rewrite failed; sending original bytes\n",
+                     static_cast<long long>(channel_id), kind.c_str());
       }
       for (const auto& sub : raw_list) {
         if (sub->sink)
@@ -1007,11 +1240,8 @@ struct MediaService::Impl {
         // already received the original buffer above and keep their audio.
         std::vector<uint8_t> packets;
         packets.reserve(len - start);
-        for (size_t offset = start; offset + 188 <= len; offset += 188) {
-          const int pid = ((data[offset + 1] & 0x1f) << 8) | data[offset + 2];
-          if (audio_pids.find(pid) == audio_pids.end())
-            packets.insert(packets.end(), data + offset, data + offset + 188);
-        }
+        TSDemux::FilterLivePackets(data + start, len - start, audio_pids, pmt_pid, live_pmt,
+                                   &live_pmt_cc, &packets);
         if (packets.empty())
           return true;
         if (!sub->Reserve(packets.size()))
@@ -1088,10 +1318,9 @@ struct MediaService::Impl {
         std::lock_guard<std::mutex> lock(mutex);
         sub->id = next_subscriber_id++;
         subscribers[sub->id] = sub;
-        initial = demux.Snapshot();
-        if (!owner->live_audio_enabled.load() && !demux.audio_pids.empty() && !initial.empty()) {
-          initial = TSDemux::RemoveAudioPackets(initial.data(), initial.size(), demux.audio_pids);
-        }
+        const bool strip_live_audio = !owner->live_audio_enabled.load() &&
+                                      !demux.audio_pids.empty() && demux.live_pmt_ok;
+        initial = demux.Snapshot(strip_live_audio, &live_pmt_cc);
       }
       const uint64_t id = sub->id;
       std::weak_ptr<Stream> weak = shared_from_this();
