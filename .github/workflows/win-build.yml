@@ -71,6 +71,80 @@ jobs:
             -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64"
           cmake --build build --parallel
 
+      - name: Private-protocol SDK smoke test
+        run: |
+          set -euo pipefail
+          # The prebuilt libuvcpp DLL is not installed under /mingw64, so put
+          # the release archive's bin directory on PATH for the SDK and server.
+          export PATH="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-mingw-x64/bin:/mingw64/bin:$PATH"
+          DATA_DIR="$RUNNER_TEMP/sdkdata"
+          rm -rf "$DATA_DIR"
+          mkdir -p "$DATA_DIR"
+          DATA_ARG="$(cygpath -w "$DATA_DIR")"
+          ./build/uvnvr.exe --port 18099 --private-port 15159 \
+            --data-dir "$DATA_ARG" --log-level info \
+            > "$RUNNER_TEMP/uvnvr-sdk-server.log" 2>&1 &
+          SERVER_PID=$!
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in $(seq 1 120); do
+            if curl -fsS --max-time 2 \
+                http://127.0.0.1:18099/api/v1/setup/status >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::the private-protocol test server did not become ready"
+            cat "$RUNNER_TEMP/uvnvr-sdk-server.log"
+            exit 1
+          fi
+          curl -fsS --max-time 10 -H 'Content-Type: application/json' \
+            -d '{"password":"SdkSmoke123!","confirmPassword":"SdkSmoke123!","timezone":"UTC"}' \
+            http://127.0.0.1:18099/api/v1/setup >/dev/null
+
+          run_case() {
+            name="$1"
+            shift
+            out="$RUNNER_TEMP/sdk-$name.out"
+            set +e
+            timeout --kill-after=5 30 "$@" > "$out" 2>&1
+            rc=$?
+            set -e
+            echo "== $name (exit $rc) =="
+            cat "$out"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::sample_basic ($name) exited with $rc"
+              cat "$RUNNER_TEMP/uvnvr-sdk-server.log"
+              exit 1
+            fi
+            if ! grep -q 'channels:' "$out"; then
+              echo "::error::sample_basic ($name) did not print channels:"
+              cat "$RUNNER_TEMP/uvnvr-sdk-server.log"
+              exit 1
+            fi
+            if ! grep -q "^connected via $name\$" "$out"; then
+              echo "::error::sample_basic ($name) did not connect via $name"
+              cat "$RUNNER_TEMP/uvnvr-sdk-server.log"
+              exit 1
+            fi
+          }
+
+          # QUIC first (the server listens on TCP and QUIC on the same port),
+          # then the explicit TCP-only path.
+          run_case quic ./build/uvnvr_sample_basic.exe \
+            127.0.0.1 15159 admin 'SdkSmoke123!'
+          run_case tcp env UVNVR_SDK_TRANSPORT=tcp \
+            ./build/uvnvr_sample_basic.exe 127.0.0.1 15159 admin 'SdkSmoke123!'
+
+          cleanup
+          trap - EXIT
+
       - name: Stage portable tree
         run: |
           VERSION="${{ steps.version.outputs.version }}"

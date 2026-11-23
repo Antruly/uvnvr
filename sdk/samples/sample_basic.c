@@ -34,6 +34,17 @@ int main(int argc, char** argv) {
 
   uvnvr_options_t options;
   uvnvr_options_init(&options);
+  /* UVNVR_SDK_TRANSPORT=tcp forces the TCP path, matching tests/test_sdk.c.
+     The default keeps QUIC probing enabled. */
+  {
+    const char* transport = getenv("UVNVR_SDK_TRANSPORT");
+    if (transport != NULL &&
+        (strcmp(transport, "tcp") == 0 || strcmp(transport, "TCP") == 0))
+      options.prefer_quic = 0;
+    const char* probe = getenv("UVNVR_SDK_QUIC_PROBE_MS");
+    if (probe != NULL && *probe != '\0')
+      options.quic_probe_timeout_ms = (uint32_t)strtoul(probe, NULL, 10);
+  }
   uvnvr_sdk_t* sdk = uvnvr_create(&options);
   if (sdk == NULL) {
     fprintf(stderr, "create failed: %s\n", uvnvr_last_error(NULL));
