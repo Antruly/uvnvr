@@ -494,7 +494,23 @@ std::string Envelope(const std::string& security, const std::string& body) {
 std::string SoapCall(const std::string& xaddr, const std::string& security, const std::string& body,
                      const std::string& username, const std::string& password,
                      std::string* error) {
-  return HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
+  std::string first =
+      HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
+  if (!first.empty() || security.empty() || username.empty())
+    return first;
+  // Some cameras sit behind HTTP authentication and reject the WS-Security
+  // header outright (HTTP 500). The HTTP Authorization is already handled by
+  // HttpPostTimeout, so retry the same operation without the SOAP security
+  // header before giving up.
+  std::string retry_error;
+  std::string retried = HttpPostTimeout(xaddr, Envelope("", body), 5, username, password,
+                                        &retry_error);
+  if (!retried.empty()) {
+    if (error)
+      error->clear();
+    return retried;
+  }
+  return first;
 }
 
 std::string DeviceServiceUrl(const std::string& xaddr) {
