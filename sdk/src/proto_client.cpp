@@ -49,8 +49,8 @@ json ParseJson(const std::string& text) {
 
 namespace {
 // Cross-thread tasks are drained from a libuv timer owned by this SDK. The
-// interval stays short while a connect or a request is in flight and relaxes
-// when the client is idle; I/O readiness still wakes the loop normally.
+// interval stays short while a connect is in flight or work is queued, and
+// relaxes when the client is idle; I/O readiness still wakes the loop.
 constexpr uint32_t kTaskPumpActiveMs = 2;
 constexpr uint32_t kTaskPumpIdleMs = 20;
 }  // namespace
