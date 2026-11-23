@@ -35,7 +35,7 @@ let noticeTimer: number | undefined
 const state = ref<'idle' | 'loading' | 'playing' | 'error'>('idle')
 const message = ref('')
 const activeSpeed = ref(props.speed || 1)
-const SPEED_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 4]
+const SPEED_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 4, 8, 16, 32]
 const speedIndex = computed(() => {
   const index = SPEED_STEPS.indexOf(activeSpeed.value)
   return index === -1 ? SPEED_STEPS.indexOf(1) : index
