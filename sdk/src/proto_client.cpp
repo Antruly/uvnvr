@@ -110,6 +110,10 @@ int Client::StartTaskPump() {
 
 void Client::OnTaskPump() {
   DrainTasks();
+  // ShutdownOnLoop() stops this timer and asks the loop to exit; do not re-arm
+  // it on the way out of the same callback.
+  if (!running_)
+    return;
   // Only a connect or queued work needs a fast tick. Responses and live
   // frames arrive through normal I/O readiness; they do not need the pump.
   bool busy = connecting_;
@@ -151,6 +155,9 @@ void Client::ShutdownOnLoop() {
     connect_waiter_.reset();
     CompletePending(waiter, UVNVR_ERR_CLOSED, "the SDK is shutting down", "", json::object());
   }
+  connecting_ = false;
+  quic_attempt_active_ = false;
+  hello_pending_ = false;
   live_.clear();
   // Refuse any Post() that races with teardown, then leave the loop.
   running_ = false;
