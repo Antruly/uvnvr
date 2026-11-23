@@ -82,6 +82,11 @@ const rangeStart = ref('')
 const rangeEnd = ref('')
 const windowMs = ref(24 * 60 * 60 * 1000)
 const playerRef = ref<InstanceType<typeof PlaybackPlayer> | null>(null)
+const calendarOpen = ref(false)
+const rangeOpen = ref(false)
+const dateWrapRef = ref<HTMLElement | null>(null)
+const rangeWrapRef = ref<HTMLElement | null>(null)
+const clipsCollapsed = ref(false)
 let reverseTimer: number | undefined
 let recordingsTimer: number | undefined
 let loadSeq = 0
@@ -240,6 +245,8 @@ function shiftMonth(delta: number) {
 function selectCalendarDay(cell: CalendarCell) {
   if (!cell.inMonth) calendarMonth.value = cell.day.slice(0, 7)
   day.value = cell.day
+  // Picking a date commits the choice; the popover has no "apply" step.
+  calendarOpen.value = false
 }
 
 function goToday() {
@@ -247,7 +254,50 @@ function goToday() {
   today.value = localDay(now)
   day.value = today.value
   calendarMonth.value = day.value.slice(0, 7)
+  calendarOpen.value = false
 }
+
+function toggleCalendar() {
+  rangeOpen.value = false
+  calendarOpen.value = !calendarOpen.value
+  if (calendarOpen.value) {
+    // Reopen on the month of the selected day, not on whatever month was
+    // browsed last time, so the highlighted day is in view.
+    calendarMonth.value = day.value.slice(0, 7)
+    void ensureMonth()
+  }
+}
+
+function toggleRange() {
+  calendarOpen.value = false
+  rangeOpen.value = !rangeOpen.value
+}
+
+function closePopovers() {
+  calendarOpen.value = false
+  rangeOpen.value = false
+}
+
+function onDocumentPointerDown(event: PointerEvent) {
+  const target = event.target as Node | null
+  if (!target) return
+  if (calendarOpen.value && !dateWrapRef.value?.contains(target)) calendarOpen.value = false
+  if (rangeOpen.value && !rangeWrapRef.value?.contains(target)) rangeOpen.value = false
+}
+
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closePopovers()
+}
+
+watch([calendarOpen, rangeOpen], ([calendar, range]) => {
+  if (calendar || range) {
+    document.addEventListener('pointerdown', onDocumentPointerDown, true)
+    document.addEventListener('keydown', onDocumentKeydown)
+  } else {
+    document.removeEventListener('pointerdown', onDocumentPointerDown, true)
+    document.removeEventListener('keydown', onDocumentKeydown)
+  }
+})
 
 function refreshAll() {
   invalidateMonthCache()
@@ -587,6 +637,8 @@ onBeforeUnmount(() => {
   loadSeq++
   if (reverseTimer !== undefined) window.clearInterval(reverseTimer)
   if (recordingsTimer !== undefined) window.clearInterval(recordingsTimer)
+  document.removeEventListener('pointerdown', onDocumentPointerDown, true)
+  document.removeEventListener('keydown', onDocumentKeydown)
 })
 
 onMounted(async () => {
@@ -612,33 +664,173 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="panel page-head">
-    <div>
+  <section class="panel playback-toolbar">
+    <div class="playback-toolbar-id">
       <span class="pill accent">{{ t('nav.playback') }}</span>
-      <h2>{{ t('playback.title') }}</h2>
-      <p>{{ t('playback.subtitle') }}</p>
+      <div class="playback-toolbar-name">
+        <h2>{{ channelName }}</h2>
+        <small>{{ t('playback.segments', { count: recordings.length }) }}</small>
+      </div>
     </div>
-    <div class="head-actions">
-      <button class="button" @click="refreshAll">
-        <AppIcon name="refresh" :size="16" />
-        {{ t('common.refresh') }}
-      </button>
-      <button class="button" :class="{ primary: reverse }" :disabled="!selected" @click="toggleReverse">
-        <AppIcon name="playback" :size="16" />
-        {{ reverse ? t('playback.reverseOn') : t('playback.reverse') }}
-      </button>
-      <button
-        class="button"
-        :disabled="!selected || selected.active || !canDownload || exporting"
-        @click="exportMp4"
-      >
-        <AppIcon name="save" :size="16" />
-        {{ exporting ? t('playback.exporting') : t('playback.exportMp4') }}
-      </button>
-      <button class="button" :disabled="!selected || selected.active" @click="download">
-        <AppIcon name="save" :size="16" />
-        {{ t('playback.download') }}
-      </button>
+
+    <div class="playback-toolbar-controls">
+      <div ref="dateWrapRef" class="playback-popover-wrap">
+        <button
+          class="input playback-date-trigger"
+          type="button"
+          :title="t('playback.chooseDate')"
+          :aria-expanded="calendarOpen"
+          aria-haspopup="dialog"
+          @click="toggleCalendar"
+        >
+          <AppIcon name="calendar" :size="15" />
+          <span>{{ day }}</span>
+          <AppIcon name="chevron" :size="12" class="playback-date-caret" />
+        </button>
+        <Transition name="popover">
+          <div
+            v-if="calendarOpen"
+            class="calendar-popover"
+            role="dialog"
+            :aria-label="t('playback.calendar')"
+          >
+            <div class="calendar-head">
+              <div class="calendar-heading">
+                <h3>{{ t('playback.calendar') }}</h3>
+                <span class="calendar-title">{{ calendarTitle }}</span>
+              </div>
+              <div class="calendar-nav">
+                <button
+                  class="icon-button small"
+                  :title="t('playback.calendarPrevMonth')"
+                  @click="shiftMonth(-1)"
+                >
+                  ‹
+                </button>
+                <button class="button small calendar-today" @click="goToday">
+                  {{ t('playback.calendarToday') }}
+                </button>
+                <button
+                  class="icon-button small"
+                  :title="t('playback.calendarNextMonth')"
+                  @click="shiftMonth(1)"
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+            <div class="calendar-grid calendar-weekdays">
+              <span v-for="weekday in weekdays" :key="weekday" class="calendar-weekday">
+                {{ weekday }}
+              </span>
+            </div>
+            <div class="calendar-grid">
+              <button
+                v-for="cell in calendarCells"
+                :key="cell.key"
+                class="calendar-day"
+                :class="{
+                  outside: !cell.inMonth,
+                  'has-recording': cell.hasRecording,
+                  today: cell.isToday,
+                  selected: cell.isSelected,
+                }"
+                @click="selectCalendarDay(cell)"
+              >
+                {{ cell.number }}
+              </button>
+            </div>
+            <div class="calendar-foot">
+              <span class="calendar-legend">
+                <span class="calendar-dot"></span>
+                {{ t('playback.calendarLegend') }}
+              </span>
+              <span v-if="monthLoading" class="spinner calendar-loading"></span>
+            </div>
+          </div>
+        </Transition>
+      </div>
+
+      <div class="playback-stream" :title="t('playback.stream')">
+        <span class="playback-stream-prefix" aria-hidden="true">{{ t('playback.stream') }}</span>
+        <select v-model="stream" class="input" :aria-label="t('playback.stream')">
+          <option value="main">MAIN</option>
+          <option value="sub">SUB</option>
+        </select>
+      </div>
+
+      <div ref="rangeWrapRef" class="playback-popover-wrap">
+        <button
+          class="button"
+          type="button"
+          :aria-expanded="rangeOpen"
+          aria-haspopup="dialog"
+          @click="toggleRange"
+        >
+          <AppIcon name="save" :size="16" />
+          {{ t('playback.exportRange') }}
+        </button>
+        <Transition name="popover">
+          <div
+            v-if="rangeOpen"
+            class="calendar-popover range-popover"
+            role="dialog"
+            :aria-label="t('playback.exportRange')"
+          >
+            <label class="field compact-field">
+              <span>{{ t('playback.rangeStart') }}</span>
+              <input v-model="rangeStart" class="input" type="datetime-local" />
+            </label>
+            <label class="field compact-field">
+              <span>{{ t('playback.rangeEnd') }}</span>
+              <input v-model="rangeEnd" class="input" type="datetime-local" />
+            </label>
+            <button
+              class="button primary"
+              :disabled="!canDownload || exporting"
+              @click="exportRangeFromForm"
+            >
+              <AppIcon name="save" :size="15" />
+              {{ exporting ? t('playback.exporting') : t('playback.exportRange') }}
+            </button>
+          </div>
+        </Transition>
+      </div>
+
+      <div class="head-actions playback-actions">
+        <button class="button" :title="t('common.refresh')" @click="refreshAll">
+          <AppIcon name="refresh" :size="16" />
+          <span class="button-label">{{ t('common.refresh') }}</span>
+        </button>
+        <button
+          class="button"
+          :class="{ primary: reverse }"
+          :disabled="!selected"
+          :title="reverse ? t('playback.reverseOn') : t('playback.reverse')"
+          @click="toggleReverse"
+        >
+          <AppIcon name="playback" :size="16" />
+          <span class="button-label">{{ reverse ? t('playback.reverseOn') : t('playback.reverse') }}</span>
+        </button>
+        <button
+          class="button"
+          :disabled="!selected || selected.active || !canDownload || exporting"
+          :title="exporting ? t('playback.exporting') : t('playback.exportMp4')"
+          @click="exportMp4"
+        >
+          <AppIcon name="save" :size="16" />
+          <span class="button-label">{{ exporting ? t('playback.exporting') : t('playback.exportMp4') }}</span>
+        </button>
+        <button
+          class="button"
+          :disabled="!selected || selected.active"
+          :title="t('playback.download')"
+          @click="download"
+        >
+          <AppIcon name="save" :size="16" />
+          <span class="button-label">{{ t('playback.download') }}</span>
+        </button>
+      </div>
     </div>
   </section>
 
@@ -646,7 +838,7 @@ onMounted(async () => {
   <p v-if="error" class="form-error">{{ error }}</p>
 
   <div class="playback-workspace">
-    <aside class="panel channel-rail playback-channel-rail">
+    <aside class="panel channel-rail playback-channel-rail" :aria-label="t('playback.channelList')">
       <div class="channel-rail-head">
         <h3>{{ t('playback.channelList') }}</h3>
         <span class="count-badge">{{ channels.length }}</span>
@@ -670,122 +862,35 @@ onMounted(async () => {
     </aside>
 
     <div class="playback-main">
-      <section class="panel playback-filters">
-        <label class="field compact-field">
-          <span>{{ t('playback.stream') }}</span>
-          <select v-model="stream" class="input">
-            <option value="main">MAIN</option>
-            <option value="sub">SUB</option>
-          </select>
-        </label>
-        <div class="field compact-field">
-          <span>{{ t('playback.date') }}</span>
-          <strong class="playback-date-value">{{ calendarTitle }} · {{ day }}</strong>
-        </div>
-        <span class="muted playback-count">{{ t('playback.segments', { count: recordings.length }) }}</span>
-        <div class="range-export">
-          <label class="field compact-field">
-            <span>{{ t('playback.rangeStart') }}</span>
-            <input v-model="rangeStart" class="input" type="datetime-local" />
-          </label>
-          <label class="field compact-field">
-            <span>{{ t('playback.rangeEnd') }}</span>
-            <input v-model="rangeEnd" class="input" type="datetime-local" />
-          </label>
-          <button class="button" :disabled="!canDownload || exporting" @click="exportRangeFromForm">
-            <AppIcon name="save" :size="15" />
-            {{ t('playback.exportRange') }}
-          </button>
+      <section v-if="loading" class="panel empty-state playback-loading">
+        <span class="spinner"></span>
+        {{ t('common.loading') }}
+      </section>
+      <section v-else class="panel playback-stage">
+        <PlaybackPlayer
+          v-if="selected"
+          ref="playerRef"
+          :channel-id="channelId"
+          :stream="stream"
+          :start-ms="playStartMs"
+          :end-ms="dayEnd"
+          :speed="speed"
+          :step-ms="skipStepMs"
+          :title="`${channelName} · ${formatTime(positionMs)}`"
+          @seek="onSeek"
+          @speed-change="onSpeedChange"
+          @position="onPosition"
+          @ended="onEnded"
+        />
+        <div v-else class="empty-state">
+          <AppIcon name="playback" :size="28" />
+          <span>{{ t('playback.noRecordings') }}</span>
         </div>
       </section>
 
-      <div class="playback-layout">
-        <section class="panel playback-calendar">
-          <div class="calendar-head">
-            <div class="calendar-heading">
-              <h3>{{ t('playback.calendar') }}</h3>
-              <span class="calendar-title">{{ calendarTitle }}</span>
-            </div>
-            <div class="calendar-nav">
-              <button
-                class="icon-button small"
-                :title="t('playback.calendarPrevMonth')"
-                @click="shiftMonth(-1)"
-              >
-                ‹
-              </button>
-              <button class="button small calendar-today" @click="goToday">
-                {{ t('playback.calendarToday') }}
-              </button>
-              <button
-                class="icon-button small"
-                :title="t('playback.calendarNextMonth')"
-                @click="shiftMonth(1)"
-              >
-                ›
-              </button>
-            </div>
-          </div>
-          <div class="calendar-grid calendar-weekdays">
-            <span v-for="weekday in weekdays" :key="weekday" class="calendar-weekday">
-              {{ weekday }}
-            </span>
-          </div>
-          <div class="calendar-grid">
-            <button
-              v-for="cell in calendarCells"
-              :key="cell.key"
-              class="calendar-day"
-              :class="{
-                outside: !cell.inMonth,
-                'has-recording': cell.hasRecording,
-                today: cell.isToday,
-                selected: cell.isSelected,
-              }"
-              @click="selectCalendarDay(cell)"
-            >
-              {{ cell.number }}
-            </button>
-          </div>
-          <div class="calendar-foot">
-            <span class="calendar-legend">
-              <span class="calendar-dot"></span>
-              {{ t('playback.calendarLegend') }}
-            </span>
-            <span v-if="monthLoading" class="spinner calendar-loading"></span>
-          </div>
-        </section>
-
-        <section v-if="loading" class="panel empty-state playback-loading">
-          <span class="spinner"></span>
-          {{ t('common.loading') }}
-        </section>
-        <section v-else class="panel playback-stage">
-          <PlaybackPlayer
-            v-if="selected"
-            ref="playerRef"
-            :channel-id="channelId"
-            :stream="stream"
-            :start-ms="playStartMs"
-            :end-ms="dayEnd"
-            :speed="speed"
-            :step-ms="skipStepMs"
-            :title="`${channelName} · ${formatTime(positionMs)}`"
-            @seek="onSeek"
-            @speed-change="onSpeedChange"
-            @position="onPosition"
-            @ended="onEnded"
-          />
-          <div v-else class="empty-state">
-            <AppIcon name="playback" :size="28" />
-            <span>{{ t('playback.noRecordings') }}</span>
-          </div>
-        </section>
-      </div>
-
       <template v-if="!loading">
 
-    <section class="panel timeline-panel">
+    <section class="panel playback-timeline">
       <div class="timeline-header">
         <h3>{{ t('playback.timeline') }}</h3>
         <div class="timeline-zoom">
@@ -829,48 +934,70 @@ onMounted(async () => {
       </div>
     </section>
 
-    <section class="panel table-panel">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>{{ t('playback.start') }}</th>
-            <th>{{ t('playback.end') }}</th>
-            <th>{{ t('playback.duration') }}</th>
-            <th>{{ t('playback.size') }}</th>
-            <th>{{ t('playback.type') }}</th>
-            <th>{{ t('common.actions') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="recording in recordings" :key="recording.id">
-            <td>{{ formatTime(recording.startMs) }}</td>
-            <td>{{ formatTime(recording.endMs) }}</td>
-            <td>{{ Math.round(recording.durationMs / 1000) }}s</td>
-            <td>{{ formatBytes(recording.sizeBytes) }}</td>
-            <td>
-              <span class="pill">{{ recording.recordType }}</span>
-              <span v-if="recording.active" class="status-pill info">{{ t('playback.live') }}</span>
-            </td>
-            <td>
-              <button class="button small" @click="playFrom(recording)">
-                <AppIcon name="playback" :size="14" />
-                {{ t('playback.play') }}
-              </button>
-              <button
-                v-if="canMaintain && !recording.active"
-                class="button small danger"
-                @click="removeRecording(recording)"
-              >
-                <AppIcon name="trash" :size="14" />
-                {{ t('common.delete') }}
-              </button>
-            </td>
-          </tr>
-          <tr v-if="recordings.length === 0">
-            <td colspan="6" class="empty-cell">{{ t('playback.noRecordings') }}</td>
-          </tr>
-        </tbody>
-      </table>
+    <section class="panel playback-clips" :class="{ collapsed: clipsCollapsed }">
+      <div class="playback-clips-head">
+        <h3>
+          {{ t('playback.clips') }}
+          <span class="count-badge">{{ recordings.length }}</span>
+        </h3>
+        <button
+          class="button small"
+          type="button"
+          :aria-expanded="!clipsCollapsed"
+          @click="clipsCollapsed = !clipsCollapsed"
+        >
+          <AppIcon
+            name="chevron"
+            :size="14"
+            class="playback-clips-caret"
+            :class="{ flipped: clipsCollapsed }"
+          />
+          {{ clipsCollapsed ? t('playback.expandList') : t('playback.collapseList') }}
+        </button>
+      </div>
+      <div v-show="!clipsCollapsed" class="playback-clips-body">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>{{ t('playback.start') }}</th>
+              <th>{{ t('playback.end') }}</th>
+              <th>{{ t('playback.duration') }}</th>
+              <th>{{ t('playback.size') }}</th>
+              <th>{{ t('playback.type') }}</th>
+              <th>{{ t('common.actions') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="recording in recordings" :key="recording.id">
+              <td>{{ formatTime(recording.startMs) }}</td>
+              <td>{{ formatTime(recording.endMs) }}</td>
+              <td>{{ Math.round(recording.durationMs / 1000) }}s</td>
+              <td>{{ formatBytes(recording.sizeBytes) }}</td>
+              <td>
+                <span class="pill">{{ recording.recordType }}</span>
+                <span v-if="recording.active" class="status-pill info">{{ t('playback.live') }}</span>
+              </td>
+              <td>
+                <button class="button small" @click="playFrom(recording)">
+                  <AppIcon name="playback" :size="14" />
+                  {{ t('playback.play') }}
+                </button>
+                <button
+                  v-if="canMaintain && !recording.active"
+                  class="button small danger"
+                  @click="removeRecording(recording)"
+                >
+                  <AppIcon name="trash" :size="14" />
+                  {{ t('common.delete') }}
+                </button>
+              </td>
+            </tr>
+            <tr v-if="recordings.length === 0">
+              <td colspan="6" class="empty-cell">{{ t('playback.noRecordings') }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
       </template>
     </div>

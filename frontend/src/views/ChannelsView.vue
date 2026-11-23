@@ -524,7 +524,9 @@ function flash(message: string) {
 }
 
 function snapshotUrl(channel: Channel) {
-  return `/api/v1/channels/${channel.id}/snapshot?t=${thumbVersion[channel.id] ?? 0}`
+  // Thumbnails only need a small frame: a 1080p decode costs about a second
+  // on the appliance, while 480x270 comes back in roughly 0.2 s.
+  return `/api/v1/channels/${channel.id}/snapshot?width=480&height=270&quality=6&t=${thumbVersion[channel.id] ?? 0}`
 }
 
 function thumbFailed(channel: Channel) {
@@ -545,7 +547,7 @@ function capture(channel: Channel) {
   thumbLoading.value = new Set([...thumbLoading.value, channel.id])
   thumbVersion[channel.id] = version
   failedThumbs.value = new Set([...failedThumbs.value].filter((id) => id !== channel.id))
-  previewImage.value = `/api/v1/channels/${channel.id}/snapshot?t=${version}`
+  previewImage.value = `/api/v1/channels/${channel.id}/snapshot?width=1280&height=720&quality=4&t=${version}`
 }
 
 function closePreview() {

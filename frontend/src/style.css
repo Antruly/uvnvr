@@ -2662,50 +2662,269 @@ select.input {
    Playback
    -------------------------------------------------------------------------- */
 
-.playback-filters {
-  display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  gap: 14px;
-  padding: 16px 18px;
-}
-
-.date-nav {
+.playback-toolbar {
+  /* Above the player panel (so the calendar popover is not painted behind it)
+     but below the sticky topbar (z-index 10). */
+  position: relative;
+  z-index: 9;
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 12px 18px;
 }
 
-.date-nav .input {
-  min-width: 150px;
+.playback-toolbar-id {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
-.playback-count {
+.playback-toolbar-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.playback-toolbar-name h2 {
+  overflow: hidden;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playback-toolbar-name small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.playback-toolbar-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-left: auto;
-  align-self: center;
+}
+
+.playback-actions {
+  flex-wrap: nowrap;
+}
+
+/* Below the widest desktop the labelled actions no longer fit next to the
+   channel summary; icon-only buttons keep the query row on one line (and the
+   channel block vertically centred against it) at 1280px and in between. */
+@media (max-width: 1599px) {
+  .playback-actions .button-label {
+    display: none;
+  }
+
+  .playback-actions .button {
+    padding: 0 11px;
+  }
+}
+
+.playback-popover-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.playback-date-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  min-height: 40px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.playback-date-caret {
+  color: var(--muted-2);
+  transition: transform 140ms ease;
+}
+
+.playback-date-trigger[aria-expanded='true'] .playback-date-caret {
+  transform: rotate(180deg);
+}
+
+.playback-stream {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 128px;
+}
+
+.playback-stream-prefix {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.playback-stream .input {
+  height: 40px;
+  min-height: 40px;
+  padding-left: 52px;
   font-size: 12px;
 }
 
+/* One control height for the whole query row keeps every top/bottom edge on
+   the same line; the stream select no longer carries a label above it. */
+.playback-toolbar-controls .playback-date-trigger,
+.playback-toolbar-controls .playback-popover-wrap > .button,
+.playback-toolbar-controls .playback-actions .button {
+  height: 40px;
+  min-height: 40px;
+}
+
 .playback-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 10px;
-  min-height: 420px;
+  min-height: 260px;
+}
+
+.playback-player-shell {
+  /* Reserve room below the video for the always-visible transport bar. */
+  --playback-player-h: max(240px, calc(100vh - 390px));
+  display: flex;
+  flex-direction: column;
+  width: min(100%, calc(var(--playback-player-h) * 16 / 9));
+  max-width: 100%;
 }
 
 .playback-player {
   position: relative;
   width: 100%;
-  min-height: 420px;
+  max-height: var(--playback-player-h);
+  aspect-ratio: 16 / 9;
   border-radius: 10px;
   overflow: hidden;
-  background: #03070c;
+  background: #000;
 }
 
 .playback-video {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: 480px;
+  height: 100%;
   object-fit: contain;
-  background: #03070c;
+  background: #000;
+}
+
+.playback-fullscreen {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  color: #e6eef8;
+  background: rgba(2, 6, 12, 0.62);
+  border-color: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(4px);
+}
+
+.playback-fullscreen:hover {
+  color: #ffffff;
+  background: rgba(8, 20, 34, 0.9);
+}
+
+.playback-title,
+.playback-controls,
+.playback-fullscreen {
+  transition: opacity 180ms ease;
+}
+
+.playback-player-shell.controls-hidden {
+  cursor: none;
+}
+
+.playback-player-shell.controls-hidden .playback-title,
+.playback-player-shell.controls-hidden .playback-controls,
+.playback-player-shell.controls-hidden .playback-fullscreen {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The fullscreen element is the whole shell, never the page. */
+.playback-player-shell:fullscreen,
+.playback-player-shell.is-fullscreen {
+  inset: 0;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+.playback-player-shell:fullscreen .playback-player,
+.playback-player-shell.is-fullscreen .playback-player {
+  flex: 1 1 auto;
+  width: 100%;
+  max-height: none;
+  aspect-ratio: auto;
+  min-height: 0;
+  border-radius: 0;
+}
+
+.playback-player-shell:fullscreen .playback-video,
+.playback-player-shell.is-fullscreen .playback-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Only fullscreen overlays the bar on the picture. */
+.playback-player-shell:fullscreen .playback-controls,
+.playback-player-shell.is-fullscreen .playback-controls {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 18px;
+  z-index: 4;
+  margin-top: 0;
+  border-color: transparent;
+  backdrop-filter: blur(4px);
+}
+
+.playback-player-shell:fullscreen .playback-title,
+.playback-player-shell.is-fullscreen .playback-title {
+  top: 18px;
+  left: 18px;
+}
+
+.playback-player-shell::backdrop {
+  background: #000;
+}
+
+.playback-fs-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 95;
+  max-width: 360px;
+  padding: 11px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12px;
 }
 
 .playback-title {
@@ -2721,17 +2940,15 @@ select.input {
 }
 
 .playback-controls {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  min-height: 42px;
+  margin-top: 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(2, 6, 12, 0.72);
-  backdrop-filter: blur(4px);
   color: #e6eef8;
 }
 
@@ -2751,16 +2968,64 @@ select.input {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
-.transport-speed select {
-  padding: 2px 6px;
-  border-radius: 6px;
+.transport-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
   background: rgba(10, 18, 30, 0.9);
   color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.transport-step:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(20, 34, 52, 0.95);
+}
+
+.transport-step:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.transport-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 6px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(10, 18, 30, 0.9);
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.transport-reset:hover {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(20, 34, 52, 0.95);
+}
+
+.transport-speed-value {
+  min-width: 36px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .timeline-panel {
@@ -2781,6 +3046,38 @@ select.input {
 .timeline {
   position: relative;
   padding-top: 18px;
+}
+
+/* Compact 24h timeline that sits directly under the player. */
+.playback-timeline {
+  padding: 8px 14px 10px;
+}
+
+.playback-timeline .timeline-header {
+  margin-bottom: 3px;
+}
+
+.playback-timeline .timeline-header h3 {
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+.playback-timeline .timeline {
+  padding-top: 12px;
+}
+
+.playback-timeline .timeline-hours {
+  height: 11px;
+  margin-bottom: 3px;
+}
+
+.playback-timeline .timeline-track {
+  height: 28px;
+}
+
+.playback-timeline .timeline-block {
+  top: 3px;
+  bottom: 3px;
 }
 
 .timeline-hours {
@@ -2843,30 +3140,32 @@ select.input {
 }
 
 @media (max-width: 700px) {
-  .playback-video {
-    height: 260px;
+  .playback-toolbar {
+    align-items: flex-start;
   }
 
-  .playback-player {
-    min-height: 260px;
+  .playback-toolbar-controls {
+    width: 100%;
+    margin-left: 0;
   }
 
-  .playback-stage {
-    min-height: 260px;
+  .playback-actions {
+    flex-wrap: wrap;
   }
 }
 
 .playback-workspace {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
 }
 
 .playback-channel-rail {
   position: sticky;
   top: 16px;
-  max-height: calc(100vh - 240px);
+  max-height: calc(100vh - 250px);
+  overflow: hidden;
 }
 
 .playback-channel-list {
@@ -2880,37 +3179,104 @@ select.input {
 .playback-main {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
 
-.playback-date-value {
+.playback-loading {
+  min-height: 320px;
+}
+
+.playback-clips {
+  overflow: hidden;
+}
+
+.playback-clips-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+}
+
+.playback-clips-head h3 {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--input-bg);
-  color: var(--text-soft);
+  gap: 8px;
   font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  letter-spacing: 0.03em;
 }
 
-.playback-layout {
-  display: grid;
-  grid-template-columns: 296px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
+.playback-clips-caret {
+  transition: transform 160ms ease;
 }
 
-.playback-loading {
-  min-height: 420px;
+.playback-clips-caret.flipped {
+  transform: rotate(-90deg);
 }
 
-.playback-calendar {
+.playback-clips-body {
+  max-height: 30vh;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+.playback-clips-body .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 14px;
+  background: var(--panel);
+}
+
+.playback-clips-body .data-table td {
+  padding: 8px 14px;
+}
+
+.playback-clips-body .data-table td .button + .button {
+  margin-left: 6px;
+}
+
+/* Calendar popover anchored to the toolbar date field. */
+.calendar-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 60;
+  width: 320px;
   padding: 14px 16px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  backdrop-filter: blur(16px);
+}
+
+.range-popover {
+  left: auto;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 300px;
+}
+
+.range-popover .button {
+  justify-content: center;
+}
+
+.popover-enter-active,
+.popover-leave-active {
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.popover-enter-from,
+.popover-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 .calendar-head {
@@ -3056,25 +3422,31 @@ select.input {
   border-width: 2px;
 }
 
-@media (max-width: 1100px) {
-  .playback-layout {
-    grid-template-columns: minmax(0, 1fr);
+/* Narrow desktop and tablets: the channel rail becomes a horizontal strip
+   above the player, while the calendar stays a popover. */
+@media (max-width: 1279px) {
+  .playback-toolbar {
+    padding: 10px 16px;
   }
 
-  .playback-calendar {
-    max-width: 360px;
-  }
-}
-
-@media (max-width: 900px) {
   .playback-workspace {
     grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
   }
 
   .playback-channel-rail {
     position: static;
     max-height: none;
-    padding: 12px 14px;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .playback-channel-rail .channel-rail-head h3 {
+    font-size: 12px;
+  }
+
+  .playback-channel-rail .channel-item {
+    padding: 6px 9px;
   }
 
   .playback-channel-list {
@@ -3087,7 +3459,38 @@ select.input {
   .playback-channel-list .channel-item {
     flex: 0 0 auto;
     width: auto;
-    min-width: 156px;
+    min-width: 150px;
+  }
+}
+
+/* Keep the player high on small laptops: the action buttons become
+   icon-only (their labels move to title tooltips). */
+@media (max-width: 1100px) {
+  .playback-toolbar {
+    padding: 8px 14px;
+    gap: 8px 14px;
+  }
+
+  .playback-actions .button-label {
+    display: none;
+  }
+
+  .playback-actions .button {
+    padding: 0 11px;
+  }
+
+  /* The rail is a bare horizontal scroller at this width; its heading would
+     only push the player further down the viewport. */
+  .playback-channel-rail {
+    padding: 6px 8px;
+  }
+
+  .playback-channel-rail .channel-rail-head {
+    display: none;
+  }
+
+  .playback-stage {
+    padding: 6px;
   }
 }
 
