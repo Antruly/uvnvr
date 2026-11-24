@@ -474,8 +474,18 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
       g_auth_cache.erase(cached);
     }
   }
-  if (!HttpExchange(url, body, timeout_seconds, "", &response, error))
-    return {};
+  // Simple embedded HTTP servers sometimes accept a connection and drop it
+  // when they are still busy with the previous request. One short retry is
+  // enough for those devices and keeps a genuine failure fast.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    if (HttpExchange(url, body, timeout_seconds, "", &response, error))
+      break;
+    const bool closed = error != nullptr &&
+                        error->find("closed the connection without a response") != std::string::npos;
+    if (!closed || attempt == 1)
+      return {};
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
   if (response.status == 401 && !username.empty()) {
     const std::string authorization = BuildAuthorization(url, response.headers, username, password);
     if (!authorization.empty()) {
