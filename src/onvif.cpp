@@ -588,28 +588,35 @@ std::string Envelope(const std::string& security, const std::string& body) {
 std::string SoapCall(const std::string& xaddr, const std::string& security, const std::string& body,
                      const std::string& username, const std::string& password,
                      std::string* error) {
-  std::string first =
-      HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
-  if (!first.empty() || security.empty() || username.empty())
-    return first;
-  // A network level failure means the device never answered: retrying without
-  // the security header would only double the wait.
-  if (error != nullptr && (error->find("cannot connect") != std::string::npos ||
-                           error->find("cannot resolve") != std::string::npos))
-    return first;
-  // Some cameras sit behind HTTP authentication and reject the WS-Security
-  // header outright (HTTP 500). The HTTP Authorization is already handled by
-  // HttpPostTimeout, so retry the same operation without the SOAP security
-  // header before giving up.
-  std::string retry_error;
-  std::string retried = HttpPostTimeout(xaddr, Envelope("", body), 5, username, password,
-                                        &retry_error);
-  if (!retried.empty()) {
-    if (error)
-      error->clear();
-    return retried;
+  // Cameras behind HTTP authentication reject a request that carries both the
+  // Digest Authorization and a WS-Security token: the extra header makes the
+  // camera answer 401 or 500 and burns its single nonce, so the retry that
+  // follows fails as well. Try the plain envelope first and fall back to
+  // WS-Security only when the device does not accept HTTP credentials.
+  if (!security.empty() && !username.empty()) {
+    std::string plain_error;
+    std::string plain =
+        HttpPostTimeout(xaddr, Envelope("", body), 5, username, password, &plain_error);
+    if (!plain.empty()) {
+      if (error)
+        error->clear();
+      return plain;
+    }
+    if (plain_error.find("cannot connect") != std::string::npos ||
+        plain_error.find("cannot resolve") != std::string::npos) {
+      if (error)
+        *error = plain_error;
+      return {};
+    }
+    const bool auth_rejected = plain_error.find("(authentication rejected)") != std::string::npos ||
+                               plain_error.find("HTTP 401") != std::string::npos;
+    if (!auth_rejected) {
+      if (error)
+        *error = plain_error;
+      return {};
+    }
   }
-  return first;
+  return HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
 }
 
 std::string DeviceServiceUrl(const std::string& xaddr) {
