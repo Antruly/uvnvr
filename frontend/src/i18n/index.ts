@@ -312,9 +312,9 @@ const messages = {
       lastOffline: 'offline:',
       reconnect: 'Reconnect',
       reconnecting: 'Reconnect requested.',
-      scanOnvif: 'Scan ONVIF',
+      scanOnvif: 'Scan devices',
       scanHint:
-        'Uses WS-Discovery plus Hikvision and Dahua probes on ports 80, 8000 and 8080 for the recorder’s subnet. Enter camera credentials before scanning.',
+        'Sends ONVIF WS-Discovery, Hikvision SADP and Dahua discovery probes in parallel and lists every device within four seconds, with MAC, model and serial; enter camera credentials before scanning.',
       useSavedCredentials: 'Use saved camera credentials',
       savedCredentialsHint:
         'Using the default account “{username}” from Settings → Camera defaults.',
@@ -1038,9 +1038,9 @@ const messages = {
       lastOffline: '离线',
       reconnect: '重连',
       reconnecting: '已请求重连。',
-      scanOnvif: '扫描 ONVIF',
+      scanOnvif: '扫描设备',
       scanHint:
-        '使用 WS-Discovery，并对录像机所在网段的 80、8000、8080 端口探测海康与大华设备；扫描前请填写摄像头账号密码。',
+        '同时发出 ONVIF WS-Discovery、海康 SADP 与大华私有探测，4 秒内汇总局域网设备（含 MAC、型号、序列号）；扫描前请填写摄像头账号密码。',
       useSavedCredentials: '使用已保存的摄像头凭据',
       savedCredentialsHint: '正在使用“设置 → 摄像头默认凭据”中的账号“{username}”。',
       noSavedCredentials:
