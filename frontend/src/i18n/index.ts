@@ -97,7 +97,7 @@ const messages = {
       loginFailed: 'Invalid username or password.',
       togglePassword: 'Show or hide the password',
       mobilePasswordHint:
-        'On a phone keyboard, type symbols such as @ with the English layout. Full-width symbols and stray spaces are accepted automatically.',
+        'On a phone keyboard, type symbols such as the at-sign with the English layout. Full-width symbols and stray spaces are accepted automatically.',
       locked: 'The recorder is temporarily locked after too many failed sign-in attempts.',
       lockedRetry: 'Try again in {seconds}s.',
       setupComplete: 'Administrator created.',
@@ -821,7 +821,7 @@ const messages = {
       passwordMismatch: '两次输入的密码不一致。',
       loginFailed: '用户名或密码错误。',
       togglePassword: '显示或隐藏密码',
-      mobilePasswordHint: '手机键盘输入 @ 等符号时请切到英文；系统也会自动兼容全角符号和多余空格。',
+      mobilePasswordHint: '手机键盘输入 at 符号等字符时请切到英文；系统也会自动兼容全角符号和多余空格。',
       locked: '登录失败次数过多，录像机已临时锁定。',
       lockedRetry: '请在 {seconds} 秒后重试。',
       setupComplete: '管理员账户已创建。',
