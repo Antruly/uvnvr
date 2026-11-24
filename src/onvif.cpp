@@ -587,29 +587,39 @@ std::string Envelope(const std::string& security, const std::string& body) {
 
 std::string SoapCall(const std::string& xaddr, const std::string& security, const std::string& body,
                      const std::string& username, const std::string& password,
-                     std::string* error) {
-  std::string first =
-      HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
-  if (!first.empty() || security.empty() || username.empty())
-    return first;
-  // A network level failure means the device never answered: retrying without
-  // the security header would only double the wait.
-  if (error != nullptr && (error->find("cannot connect") != std::string::npos ||
-                           error->find("cannot resolve") != std::string::npos))
-    return first;
-  // Some cameras sit behind HTTP authentication and reject the WS-Security
-  // header outright (HTTP 500). The HTTP Authorization is already handled by
-  // HttpPostTimeout, so retry the same operation without the SOAP security
-  // header before giving up.
-  std::string retry_error;
-  std::string retried = HttpPostTimeout(xaddr, Envelope("", body), 5, username, password,
-                                        &retry_error);
-  if (!retried.empty()) {
-    if (error)
-      error->clear();
-    return retried;
+                     std::string* error, int timeout_seconds = 5) {
+  // Cameras behind HTTP authentication reject a request that carries both the
+  // Digest Authorization and a WS-Security token: the extra header makes the
+  // camera answer 401/500 and consumes its nonce counter, so the retry that
+  // follows fails as well. Try the plain envelope first and only fall back to
+  // WS-Security when the device clearly does not accept HTTP credentials.
+  if (!security.empty() && !username.empty()) {
+    std::string plain_error;
+    std::string plain = HttpPostTimeout(xaddr, Envelope("", body), timeout_seconds, username,
+                                        password, &plain_error);
+    if (!plain.empty()) {
+      if (error)
+        error->clear();
+      return plain;
+    }
+    if (plain_error.find("cannot connect") != std::string::npos ||
+        plain_error.find("cannot resolve") != std::string::npos) {
+      if (error)
+        *error = plain_error;
+      return {};
+    }
+    const bool auth_rejected = plain_error.find("(authentication rejected)") != std::string::npos ||
+                               plain_error.find("HTTP 401") != std::string::npos;
+    if (!auth_rejected) {
+      // The device answered but refused the operation itself (SOAP fault):
+      // sending the same call with a WS-Security token will not change that.
+      if (error)
+        *error = plain_error;
+      return {};
+    }
   }
-  return first;
+  return HttpPostTimeout(xaddr, Envelope(security, body), timeout_seconds, username, password,
+                         error);
 }
 
 std::string DeviceServiceUrl(const std::string& xaddr) {
@@ -996,6 +1006,105 @@ std::string ResolveMediaService(const std::string& device, const std::string& se
                                 const std::string& username, const std::string& password,
                                 std::string* error);
 
+namespace {
+
+std::string UrlDecode(std::string value) {
+  std::string out;
+  out.reserve(value.size());
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (value[i] == '%' && i + 2 < value.size()) {
+      const auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+          return c - '0';
+        if (c >= 'a' && c <= 'f')
+          return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+          return c - 'A' + 10;
+        return -1;
+      };
+      const int high = hex(value[i + 1]);
+      const int low = hex(value[i + 2]);
+      if (high >= 0 && low >= 0) {
+        out.push_back(static_cast<char>((high << 4) | low));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(value[i] == '+' ? ' ' : value[i]);
+  }
+  return out;
+}
+
+// GetScopes returns one ScopeItem per scope. The device name is published as
+// onvif://www.onvif.org/name/<value>; hardware/location carry related values.
+// Return the first non-empty name scope.
+std::string ScopeValue(const std::string& xml, const std::string& key) {
+  const std::string prefix = "onvif://www.onvif.org/" + key + "/";
+  size_t pos = 0;
+  while ((pos = xml.find(prefix, pos)) != std::string::npos) {
+    size_t end = pos + prefix.size();
+    while (end < xml.size() && xml[end] != '<' && xml[end] != '&' && xml[end] != '"' &&
+           !std::isspace(static_cast<unsigned char>(xml[end])))
+      ++end;
+    const std::string value = UrlDecode(xml.substr(pos + prefix.size(),
+                                                  end - pos - prefix.size()));
+    if (!value.empty())
+      return value;
+    pos = end;
+  }
+  return {};
+}
+
+// Fills identity fields (manufacturer/model/firmware/serial/name) through the
+// device service. Returns false only when the device service did not answer.
+bool ReadOnvifIdentity(const std::string& service, const std::string& security,
+                       const std::string& username, const std::string& password, int timeout_seconds,
+                       OnvifInfo* info, std::string* error) {
+  const std::string device_xml =
+      SoapCall(service, security,
+               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username,
+               password, error, timeout_seconds);
+  if (device_xml.empty())
+    return false;
+  info->manufacturer = ExtractTag(device_xml, "Manufacturer");
+  info->model = ExtractTag(device_xml, "Model");
+  info->firmware = ExtractTag(device_xml, "FirmwareVersion");
+  info->serial = ExtractTag(device_xml, "SerialNumber");
+
+  std::string scope_error;
+  const std::string scopes_xml =
+      SoapCall(service, security,
+               "<GetScopes xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username, password,
+               &scope_error, timeout_seconds);
+  if (!scopes_xml.empty()) {
+    info->device_name = ScopeValue(scopes_xml, "name");
+    if (info->device_name.empty())
+      info->device_name = ScopeValue(scopes_xml, "hardware");
+  }
+  return true;
+}
+
+} // namespace
+
+bool ProbeOnvifIdentity(const std::string& xaddr, const std::string& username,
+                        const std::string& password, OnvifInfo* info, std::string* error,
+                        int timeout_seconds) {
+  if (info == nullptr) {
+    if (error != nullptr)
+      *error = "missing ONVIF output";
+    return false;
+  }
+  if (!EnsureWinsock(error))
+    return false;
+  const std::string service = DeviceServiceUrl(xaddr);
+  if (!ReadOnvifIdentity(service, SecurityHeader(username, password), username, password,
+                         timeout_seconds, info, error))
+    return false;
+  if (info->device_name.empty())
+    info->device_name = info->model;
+  return true;
+}
+
 bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std::string& password,
                 OnvifInfo* info, std::string* error) {
   if (!EnsureWinsock(error))
@@ -1003,16 +1112,10 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   const std::string service = DeviceServiceUrl(xaddr);
   const std::string security = SecurityHeader(username, password);
 
-  const std::string device_xml =
-      SoapCall(service, security,
-               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username,
-               password, error);
-  if (device_xml.empty())
+  if (!ReadOnvifIdentity(service, security, username, password, 5, info, error))
     return false;
-  info->manufacturer = ExtractTag(device_xml, "Manufacturer");
-  info->model = ExtractTag(device_xml, "Model");
-  info->firmware = ExtractTag(device_xml, "FirmwareVersion");
-  info->serial = ExtractTag(device_xml, "SerialNumber");
+  if (info->device_name.empty())
+    info->device_name = info->model;
 
   // Some devices expose the media service on its own path, and answering
   // GetProfiles on the device endpoint returns a SOAP fault. Resolve the
