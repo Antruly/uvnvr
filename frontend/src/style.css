@@ -1976,6 +1976,10 @@ select.input {
   width: min(760px, 100%);
 }
 
+.modal-scan {
+  width: min(1180px, 96vw);
+}
+
 .modal-head {
   display: flex;
   align-items: center;
@@ -4488,27 +4492,111 @@ select.input {
   accent-color: var(--accent);
 }
 
+.scan-table-wrap {
+  max-height: 54vh;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+
+.scan-table {
+  min-width: 1000px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.scan-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 9px 10px;
+  background: var(--table-head-bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.scan-table td {
+  padding: 7px 10px;
+  line-height: 1.35;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.scan-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.scan-table .check-cell {
+  width: 34px;
+  padding-right: 4px;
+  padding-left: 8px;
+}
+
+.scan-col-ip {
+  width: 112px;
+}
+
+.scan-col-protocol {
+  width: 112px;
+}
+
+.scan-col-port {
+  width: 82px;
+}
+
+.scan-col-name {
+  width: 148px;
+}
+
+.scan-col-model {
+  width: 140px;
+}
+
+.scan-col-ident {
+  width: 168px;
+}
+
+.scan-table .scan-col-actions {
+  width: 168px;
+  min-width: 168px;
+  white-space: nowrap;
+}
+
+.scan-source-note,
+.scan-ident span {
+  display: block;
+  overflow: hidden;
+  color: var(--muted-2);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-source-note {
+  margin-top: 3px;
+}
+
+.scan-port {
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-name-cell,
+.scan-model-cell {
+  overflow-wrap: anywhere;
+}
+
+.scan-name-cell {
+  color: var(--text);
+}
+
 .scan-actions {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
-.scan-sources {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-top: 5px;
-}
-
-.scan-source {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  line-height: 1;
-  padding: 3px 6px;
+.scan-actions .button {
+  white-space: nowrap;
 }
 
 

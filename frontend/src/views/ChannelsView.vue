@@ -429,12 +429,30 @@ function deviceSources(device: OnvifDevice) {
 
 function sourceLabel(source: string) {
   const labels: Record<string, string> = {
-    onvif: 'ONVIF',
+    onvif: 'WS-Discovery',
     sadp: 'SADP',
     dahua: 'Dahua',
     hikvision: 'Hikvision',
   }
-  return labels[source] ?? source.toUpperCase()
+  return labels[source] ?? source
+}
+
+// The protocol column shows one primary tag; where the answer came from is a
+// secondary line so a device found by both SADP and ONVIF stays one row.
+function protocolLabel(device: OnvifDevice) {
+  return deviceProtocol(device).toUpperCase()
+}
+
+function sourceSummary(device: OnvifDevice) {
+  return [...new Set(deviceSources(device).map(sourceLabel))].join(' · ')
+}
+
+function portText(port?: number) {
+  return typeof port === 'number' && port > 0 ? String(port) : '—'
+}
+
+function scanName(device: OnvifDevice) {
+  return device.name || device.model || '—'
 }
 
 async function detectFromModal() {
@@ -1493,7 +1511,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="scan.open" class="modal-backdrop" @click.self="scan.open = false">
-      <div class="modal panel modal-wide">
+      <div class="modal panel modal-wide modal-scan">
         <div class="modal-head">
           <h3>{{ t('channels.scanOnvif') }}</h3>
           <button type="button" class="icon-button small" @click="scan.open = false">
@@ -1565,83 +1583,89 @@ onBeforeUnmount(() => {
         <p v-if="atChannelLimit" class="form-error">
           {{ t('channels.limitReached', { limit: onboarding?.maxChannels ?? 128 }) }}
         </p>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th class="check-cell">
-                <input
-                  type="checkbox"
-                  :checked="allDevicesSelected()"
-                  :aria-label="t('channels.selectAll')"
-                  @change="toggleAllDevices"
-                />
-              </th>
-              <th>{{ t('channels.ip') }}</th>
-              <th>{{ t('channels.protocol') }}</th>
-              <th>{{ t('channels.port') }}</th>
-              <th>{{ t('channels.name') }}</th>
-              <th>{{ t('common.actions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="device in scan.devices" :key="deviceKey(device)">
-              <td class="check-cell">
-                <input
-                  type="checkbox"
-                  :checked="scanSelection.has(deviceKey(device))"
-                  :disabled="scanStatus[deviceKey(device)] === 'added'"
-                  @change="toggleDevice(deviceKey(device))"
-                />
-              </td>
-              <td>{{ device.ip }}</td>
-              <td>
-                <span class="pill">{{ deviceProtocol(device) }}</span>
-                <small v-if="device.brand" class="muted"> {{ device.brand }}</small>
-                <div class="scan-sources">
+        <div class="scan-table-wrap">
+          <table class="data-table scan-table">
+            <thead>
+              <tr>
+                <th class="check-cell">
+                  <input
+                    type="checkbox"
+                    :checked="allDevicesSelected()"
+                    :aria-label="t('channels.selectAll')"
+                    @change="toggleAllDevices"
+                  />
+                </th>
+                <th class="scan-col-ip">{{ t('channels.ip') }}</th>
+                <th class="scan-col-protocol">{{ t('channels.scanProtocol') }}</th>
+                <th class="scan-col-port">{{ t('channels.scanHttpPort') }}</th>
+                <th class="scan-col-port">{{ t('channels.scanRtspPort') }}</th>
+                <th class="scan-col-name">{{ t('channels.scanName') }}</th>
+                <th class="scan-col-model">{{ t('channels.scanModel') }}</th>
+                <th class="scan-col-ident">{{ t('channels.scanMacSerial') }}</th>
+                <th class="scan-col-actions">{{ t('common.actions') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="device in scan.devices" :key="deviceKey(device)">
+                <td class="check-cell">
+                  <input
+                    type="checkbox"
+                    :checked="scanSelection.has(deviceKey(device))"
+                    :disabled="scanStatus[deviceKey(device)] === 'added'"
+                    @change="toggleDevice(deviceKey(device))"
+                  />
+                </td>
+                <td class="mono">{{ device.ip }}</td>
+                <td>
+                  <span class="pill scan-protocol">{{ protocolLabel(device) }}</span>
                   <span
-                    v-for="source in deviceSources(device)"
-                    :key="source"
-                    class="scan-source"
-                  >{{ sourceLabel(source) }}</span>
-                </div>
-              </td>
-              <td class="mono">{{ device.httpPort ?? 80 }}</td>
-              <td>
-                {{ device.name || device.model || device.ip }}
-                <small v-if="device.mac || device.serial" class="block muted mono">
-                  {{ [device.mac, device.serial].filter(Boolean).join(' · ') }}
-                </small>
-                <small v-if="device.xaddr && deviceProtocol(device) === 'onvif'" class="mono block muted">
-                  {{ device.xaddr }}
-                </small>
-              </td>
-              <td>
-                <div class="scan-actions">
-                  <button class="button small" :disabled="scan.probing === deviceKey(device) || scanStatus[deviceKey(device)] === 'added'" @click="probe(device)">
-                    {{ scan.probing === deviceKey(device) ? t('common.loading') : t('channels.probe') }}
-                  </button>
-                  <button
-                    class="button small primary"
-                    :disabled="scan.probing === deviceKey(device) || scanAdding || scanStatus[deviceKey(device)] === 'added' || atChannelLimit"
-                    @click="quickAdd(device)"
-                  >
-                    {{
-                      scanStatus[deviceKey(device)] === 'added'
-                        ? t('channels.added')
-                        : scan.probing === deviceKey(device)
-                          ? t('channels.adding')
-                          : t('channels.addNow')
-                    }}
-                  </button>
-                </div>
-                <small v-if="scanErrors[deviceKey(device)]" class="block error-text">{{ scanErrors[deviceKey(device)] }}</small>
-              </td>
-            </tr>
-            <tr v-if="scan.devices.length === 0">
-              <td colspan="6" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
-            </tr>
-          </tbody>
-        </table>
+                    v-if="sourceSummary(device)"
+                    class="scan-source-note"
+                    :title="sourceSummary(device)"
+                  >{{ sourceSummary(device) }}</span>
+                </td>
+                <td class="mono scan-port">{{ portText(device.httpPort) }}</td>
+                <td class="mono scan-port">{{ portText(device.rtspPort) }}</td>
+                <td class="scan-name-cell">{{ scanName(device) }}</td>
+                <td class="scan-model-cell">{{ device.model || '—' }}</td>
+                <td class="scan-ident">
+                  <span class="mono" :title="`MAC: ${device.mac || '—'}`">{{ device.mac || '—' }}</span>
+                  <span class="mono" :title="`S/N: ${device.serial || '—'}`">{{ device.serial || '—' }}</span>
+                </td>
+                <td class="scan-col-actions">
+                  <div class="scan-actions">
+                    <button
+                      class="button small"
+                      :disabled="scan.probing === deviceKey(device) || scanStatus[deviceKey(device)] === 'added'"
+                      @click="probe(device)"
+                    >
+                      {{ scan.probing === deviceKey(device) ? t('common.loading') : t('channels.probe') }}
+                    </button>
+                    <button
+                      class="button small primary"
+                      :disabled="scan.probing === deviceKey(device) || scanAdding || scanStatus[deviceKey(device)] === 'added' || atChannelLimit"
+                      @click="quickAdd(device)"
+                    >
+                      {{
+                        scanStatus[deviceKey(device)] === 'added'
+                          ? t('channels.added')
+                          : scan.probing === deviceKey(device)
+                            ? t('channels.adding')
+                            : t('channels.addNow')
+                      }}
+                    </button>
+                  </div>
+                  <small v-if="scanErrors[deviceKey(device)]" class="block error-text">
+                    {{ scanErrors[deviceKey(device)] }}
+                  </small>
+                </td>
+              </tr>
+              <tr v-if="scan.devices.length === 0">
+                <td colspan="9" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <div v-if="scan.result" class="notice">
           {{ scan.result.device.manufacturer }} {{ scan.result.device.model }} ·
           {{ scan.result.profiles.length }} profile(s)
