@@ -72,6 +72,8 @@ Global settings live in the existing `settings` table and are managed through
 | `minFaceQuality` | `ai.minFaceQuality` | `0.3` | 0–1 |
 | `snapshotRetentionDays` | `ai.snapshotRetentionDays` | `30` | 1–3650 |
 | `stub` | `ai.stub` | `0` | bool |
+| `faceModelDir` | `ai.face.modelDir` | `<data_dir>/models/inspireface` | resource pack file, or a directory containing one |
+| `facePixelLevel` | `ai.face.pixelLevel` | `-1` | `-1` (SDK default) or 160–1280 |
 | `plateWatchlist` | `ai.plate.watchlist` | empty | comma/space separated plates |
 | `faceWatchlist` | `ai.face.watchlist` | empty | comma separated `ai_faces.id` |
 | `faceMatchThreshold` | `ai.face.matchThreshold` | `0.75` | 0–1 |
@@ -199,13 +201,26 @@ Existing alert acknowledgement (`POST /api/v1/alerts/:id/ack`) works unchanged.
   not compiled, `UVNVR_ENABLE_AI=0` is defined and the rest of the service is
   unchanged. Linux uses the system OpenCV; a Windows MinGW build looks for
   `~/.local/opencv4-mingw`.
+* `UVNVR_ENABLE_INSPIREFACE` (CMake, default OFF) builds the real face engine
+  against the InspireFace SDK (Apache-2.0). Point `UVNVR_INSPIREFACE_ROOT` (or
+  `INSPIREFACE_ROOT`) at the SDK root that contains `include/inspireface.h` and
+  `lib/libInspireFace`. When the SDK is missing the option prints the reason and
+  the face engine stays on the stub; the service still builds and runs.
+  The SDK is launched once per process and each face worker owns one V2 session.
+  `HF_ENABLE_FACE_RECOGNITION | HF_ENABLE_QUALITY` is requested first and the
+  session is retried with recognition only when the pack has no quality model.
+* `UVNVR_BUILD_TOOLS` (CMake, default OFF) builds `face_cli` when InspireFace is
+  enabled. It prints face count, boxes, quality, the first 8 feature values,
+  timing, and the cosine similarity between repeated runs on one image.
 * Unit test: configure with `-DUVNVR_BUILD_TESTS=ON`, then `ctest` runs
   `ai_plate_post` (no OpenCV needed).
 
 ## Phase 2/3 integration points
 
-1. Implement HyperLPR3/InspireFace behind `uvnvr::AiEngine` in
-   `src/ai/ai_engine.cpp` (`CreatePlateEngine` / `CreateFaceEngine`).
+1. The plate and face engines are selected behind `uvnvr::AiEngine` in
+   `src/ai/ai_engine.cpp` (`CreatePlateEngine` / `CreateFaceEngine`); the
+   InspireFace implementation lives in `src/ai/engine_inspireface.cpp` and
+   falls back to the stub when its pack or SDK is unavailable.
 2. Keep `Name()` stable (`"hyperlpr3"`, `"inspireface"`); it is stored in the
    `engine` column and shown by `POST /api/v1/ai/test`.
 3. Return normalised boxes in the **input** image coordinate space; the

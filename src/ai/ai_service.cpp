@@ -497,6 +497,16 @@ struct AiService::Impl {
     settings.dedup_seconds = static_cast<int>(
         std::max<int64_t>(0, std::min<int64_t>(3600, SettingInt("ai.dedupSeconds", 10))));
     settings.stub = SettingBool("ai.stub", false);
+    std::string face_model_dir = Setting("ai.face.modelDir", "");
+    if (face_model_dir.empty()) {
+      face_model_dir =
+          (std::filesystem::path(opts.data_dir) / "models" / "inspireface").string();
+    } else if (std::filesystem::path(face_model_dir).is_relative()) {
+      face_model_dir = (std::filesystem::path(opts.data_dir) / face_model_dir).string();
+    }
+    settings.face_model_dir = std::move(face_model_dir);
+    settings.face_pixel_level = static_cast<int>(
+        std::max<int64_t>(-1, std::min<int64_t>(1280, SettingInt("ai.face.pixelLevel", -1))));
     settings.plate_watchlist = Setting("ai.plate.watchlist", "");
     settings.face_watchlist = Setting("ai.face.watchlist", "");
   }
@@ -564,6 +574,8 @@ struct AiService::Impl {
     config.min_face_quality = settings.min_face_quality;
     config.face_match_threshold = settings.face_match_threshold;
     config.dedup_seconds = settings.dedup_seconds;
+    config.face_model_dir = settings.face_model_dir;
+    config.face_pixel_level = settings.face_pixel_level;
     config.plate_watchlist = settings.plate_watchlist;
     config.face_watchlist = settings.face_watchlist;
     return config;
@@ -837,6 +849,8 @@ struct AiService::Impl {
     NameCurrentThread("ai-face");
     AiConfig engine_config;
     engine_config.stub = runtime.stub;
+    engine_config.model_dir = runtime.face_model_dir;
+    engine_config.face_pixel_level = runtime.face_pixel_level;
     std::string error;
     std::unique_ptr<AiEngine> engine = CreateFaceEngine(engine_config, &error);
     if (!engine) {
@@ -1487,6 +1501,8 @@ json AiService::ConfigJson() const {
               {"minFaceQuality", s.min_face_quality},
               {"snapshotRetentionDays", s.snapshot_retention_days},
               {"stub", s.stub},
+              {"faceModelDir", s.face_model_dir},
+              {"facePixelLevel", s.face_pixel_level},
               {"plateWatchlist", s.plate_watchlist},
               {"faceWatchlist", s.face_watchlist},
               {"faceMatchThreshold", s.face_match_threshold},
@@ -1567,6 +1583,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   double min_plate = 0.6;
   double min_face = 0.3;
   double match_threshold = 0.75;
+  int64_t face_pixel_level = -1;
+  std::string face_model_dir;
   std::string plate_watchlist;
   std::string face_watchlist;
   if (!read_bool("enabled", &enabled) || !read_bool("plateEnabled", &plate) ||
@@ -1577,8 +1595,10 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
       !read_int("faceWorkers", 1, 16, &face_workers) ||
       !read_int("snapshotRetentionDays", 1, 3650, &retention) ||
       !read_int("dedupSeconds", 0, 3600, &dedup) ||
+      !read_int("facePixelLevel", -1, 1280, &face_pixel_level) ||
       !read_double("minPlateConfidence", &min_plate) || !read_double("minFaceQuality", &min_face) ||
       !read_double("faceMatchThreshold", &match_threshold) ||
+      !read_text("faceModelDir", &face_model_dir) ||
       !read_text("plateWatchlist", &plate_watchlist) ||
       !read_text("faceWatchlist", &face_watchlist)) {
     return false;
@@ -1611,6 +1631,10 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     updates.push_back({"ai.snapshotRetentionDays", std::to_string(retention)});
   if (body.contains("stub"))
     updates.push_back({"ai.stub", stub ? "1" : "0"});
+  if (body.contains("faceModelDir"))
+    updates.push_back({"ai.face.modelDir", face_model_dir});
+  if (body.contains("facePixelLevel"))
+    updates.push_back({"ai.face.pixelLevel", std::to_string(face_pixel_level)});
   if (body.contains("plateWatchlist"))
     updates.push_back({"ai.plate.watchlist", plate_watchlist});
   if (body.contains("faceWatchlist"))

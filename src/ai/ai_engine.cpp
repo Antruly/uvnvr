@@ -4,9 +4,14 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+
+#if defined(UVNVR_ENABLE_INSPIREFACE) && UVNVR_ENABLE_INSPIREFACE
+#include "engine_inspireface.h"
+#endif
 
 namespace uvnvr {
 namespace {
@@ -158,6 +163,20 @@ std::unique_ptr<AiEngine> CreatePlateEngine(const AiConfig& config, std::string*
 }
 
 std::unique_ptr<AiEngine> CreateFaceEngine(const AiConfig& config, std::string* error) {
+  if (StubRequested(config))
+    return CreateStub(config, false, error);
+
+#if defined(UVNVR_ENABLE_INSPIREFACE) && UVNVR_ENABLE_INSPIREFACE
+  {
+    std::string inspire_error;
+    std::unique_ptr<AiEngine> engine = CreateInspireFaceEngine(config, &inspire_error);
+    if (engine)
+      return engine;
+    std::fprintf(stderr,
+                 "ai: InspireFace unavailable (%s); falling back to the stub face engine\n",
+                 inspire_error.c_str());
+  }
+#endif
   return CreateStub(config, false, error);
 }
 

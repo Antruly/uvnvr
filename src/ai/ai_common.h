@@ -20,6 +20,10 @@ struct AiSettings {
   int snapshot_retention_days = 30;
   int dedup_seconds = 10;
   bool stub = false;
+  // InspireFace resource-pack directory (relative paths resolve under data_dir)
+  // and detector input level; -1 keeps the SDK default.
+  std::string face_model_dir;
+  int face_pixel_level = -1;
   std::string plate_watchlist;
   std::string face_watchlist;
 };
@@ -50,6 +54,8 @@ struct AiRuntimeConfig {
   double min_face_quality = 0.3;
   double face_match_threshold = 0.75;
   int dedup_seconds = 10;
+  std::string face_model_dir;
+  int face_pixel_level = -1;
   std::string plate_watchlist;
   std::string face_watchlist;
 };

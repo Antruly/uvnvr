@@ -12,7 +12,12 @@ struct AiConfig {
   // UVNVR_AI_STUB=1 environment variable has the same effect and is what the
   // end-to-end checks use.
   bool stub = false;
+  // Directory containing the face model pack (or the pack file itself). The
+  // plate engine ignores it.
   std::string model_dir;
+  // InspireFace detector input level (multiple of 160), or -1 for the SDK
+  // default. Ignored by the stub and plate engines.
+  int face_pixel_level = -1;
 };
 
 struct AiPlateResult {

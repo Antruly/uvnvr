@@ -1269,6 +1269,8 @@ bool App::Migrate(std::string* error) {
       {"ai.minFaceQuality", "0.3"},
       {"ai.snapshotRetentionDays", "30"},
       {"ai.stub", "0"},
+      {"ai.face.modelDir", ""},
+      {"ai.face.pixelLevel", "-1"},
       {"ai.plate.watchlist", ""},
       {"ai.face.watchlist", ""},
       {"ai.face.matchThreshold", "0.75"},

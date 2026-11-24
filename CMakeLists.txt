@@ -12,6 +12,12 @@ option(UVNVR_EMBED_WEB "Embed the built frontend into the binary" OFF)
 option(UVNVR_BUILD_SDK "Build the private-protocol C SDK" ON)
 option(UVNVR_ENABLE_QUIC "Enable the QUIC listener for the private protocol" ON)
 option(UVNVR_ENABLE_AI "Build the AI recognition pipeline (requires OpenCV)" ON)
+option(UVNVR_ENABLE_INSPIREFACE
+       "Build the InspireFace face engine (requires OpenCV and the InspireFace SDK; falls back to the stub)"
+       OFF)
+option(UVNVR_BUILD_TOOLS "Build developer tools (face_cli)" OFF)
+set(UVNVR_INSPIREFACE_ROOT "" CACHE PATH
+    "InspireFace SDK root containing include/inspireface.h and lib/libInspireFace")
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -58,6 +64,63 @@ if(UVNVR_ENABLE_AI)
   endif()
 else()
   message(STATUS "ai: disabled by UVNVR_ENABLE_AI=OFF")
+endif()
+
+# InspireFace is optional and must never make the build fail. When it is asked
+# for but the SDK (or OpenCV) is unavailable, the face engine stays on the
+# stage-1 stub and the reason is printed here.
+set(UVNVR_INSPIREFACE_ENABLED 0)
+if(UVNVR_ENABLE_INSPIREFACE)
+  if(NOT UVNVR_AI_ENABLED)
+    message(STATUS
+      "ai: InspireFace requested but AI/OpenCV is unavailable; falling back to the stub face engine")
+  else()
+    set(_uvnvr_inspireface_roots)
+    if(UVNVR_INSPIREFACE_ROOT)
+      list(APPEND _uvnvr_inspireface_roots "${UVNVR_INSPIREFACE_ROOT}")
+    endif()
+    foreach(_uvnvr_env INSPIREFACE_ROOT INSPIREFACE_SDK_ROOT)
+      if(DEFINED ENV{${_uvnvr_env}} AND NOT "$ENV{${_uvnvr_env}}" STREQUAL "")
+        list(APPEND _uvnvr_inspireface_roots "$ENV{${_uvnvr_env}}")
+      endif()
+    endforeach()
+
+    find_path(UVNVR_INSPIREFACE_INCLUDE_DIR NAMES inspireface.h
+              PATHS ${_uvnvr_inspireface_roots}
+              PATH_SUFFIXES include InspireFace/include NO_DEFAULT_PATH)
+    if(NOT UVNVR_INSPIREFACE_INCLUDE_DIR)
+      find_path(UVNVR_INSPIREFACE_INCLUDE_DIR NAMES inspireface.h)
+    endif()
+    find_library(UVNVR_INSPIREFACE_LIBRARY
+                 NAMES InspireFace libInspireFace inspireface
+                 PATHS ${_uvnvr_inspireface_roots}
+                 PATH_SUFFIXES lib InspireFace/lib NO_DEFAULT_PATH)
+    if(NOT UVNVR_INSPIREFACE_LIBRARY)
+      find_library(UVNVR_INSPIREFACE_LIBRARY NAMES InspireFace libInspireFace inspireface)
+    endif()
+
+    if(UVNVR_INSPIREFACE_INCLUDE_DIR AND UVNVR_INSPIREFACE_LIBRARY)
+      set(UVNVR_INSPIREFACE_ENABLED 1)
+      get_filename_component(UVNVR_INSPIREFACE_LIBRARY_DIR
+                             "${UVNVR_INSPIREFACE_LIBRARY}" DIRECTORY)
+      get_filename_component(UVNVR_INSPIREFACE_LIBRARY_NAME
+                             "${UVNVR_INSPIREFACE_LIBRARY}" NAME)
+      message(STATUS "ai: InspireFace enabled (${UVNVR_INSPIREFACE_LIBRARY})")
+    else()
+      if(NOT UVNVR_INSPIREFACE_INCLUDE_DIR)
+        set(_uvnvr_inspireface_reason
+            "inspireface.h was not found; set UVNVR_INSPIREFACE_ROOT to the SDK root")
+      else()
+        set(_uvnvr_inspireface_reason
+            "libInspireFace was not found under ${_uvnvr_inspireface_roots}; set UVNVR_INSPIREFACE_ROOT")
+      endif()
+      message(STATUS
+        "ai: InspireFace requested but ${_uvnvr_inspireface_reason}; falling back to the stub face engine")
+    endif()
+  endif()
+else()
+  message(STATUS
+    "ai: InspireFace disabled by UVNVR_ENABLE_INSPIREFACE=OFF; the face engine is the stage-1 stub")
 endif()
 
 if(UVNVR_LIBUVCPP_ROOT)
@@ -173,7 +236,20 @@ if(UVNVR_AI_ENABLED)
   target_link_libraries(uvnvr PRIVATE ${OpenCV_LIBS})
 endif()
 
-target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED})
+if(UVNVR_INSPIREFACE_ENABLED)
+  target_sources(uvnvr PRIVATE src/ai/engine_inspireface.cpp)
+  target_include_directories(uvnvr PRIVATE "${UVNVR_INSPIREFACE_INCLUDE_DIR}")
+  target_link_libraries(uvnvr PRIVATE "${UVNVR_INSPIREFACE_LIBRARY}")
+  set_property(TARGET uvnvr APPEND PROPERTY BUILD_RPATH "${UVNVR_INSPIREFACE_LIBRARY_DIR}")
+  if(UVNVR_INSPIREFACE_LIBRARY_NAME MATCHES "\\.(so|dylib)(\\..*)?$" OR
+     UVNVR_INSPIREFACE_LIBRARY_NAME MATCHES "\\.dll$")
+    install(FILES "${UVNVR_INSPIREFACE_LIBRARY}" DESTINATION lib)
+  endif()
+endif()
+
+target_compile_definitions(uvnvr PRIVATE
+  UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED}
+  UVNVR_ENABLE_INSPIREFACE=${UVNVR_INSPIREFACE_ENABLED})
 
 if(WIN32)
   # The icon resource is what Explorer and shortcuts display; SetupIconFile
@@ -257,6 +333,30 @@ endif()
 
 install(TARGETS uvnvr RUNTIME DESTINATION bin)
 install(DIRECTORY frontend/dist/ DESTINATION share/uvnvr/frontend/dist OPTIONAL)
+
+if(UVNVR_BUILD_TOOLS)
+  if(UVNVR_INSPIREFACE_ENABLED)
+    # Standalone smoke/benchmark tool for the same face engine the AI service
+    # uses, so a model pack can be validated before starting the service.
+    add_executable(face_cli
+      tools/face_cli/main.cpp
+      src/ai/engine_inspireface.cpp
+    )
+    target_include_directories(face_cli PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/ai"
+      "${UVNVR_INSPIREFACE_INCLUDE_DIR}"
+      ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(face_cli PRIVATE UVNVR_ENABLE_INSPIREFACE=1)
+    target_link_libraries(face_cli PRIVATE "${UVNVR_INSPIREFACE_LIBRARY}" ${OpenCV_LIBS})
+    set_target_properties(face_cli PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set_property(TARGET face_cli APPEND PROPERTY BUILD_RPATH
+                 "${UVNVR_INSPIREFACE_LIBRARY_DIR}")
+  else()
+    message(STATUS "tools: face_cli skipped because InspireFace is not enabled")
+  endif()
+endif()
 
 if(UVNVR_BUILD_SDK)
   add_subdirectory(sdk)

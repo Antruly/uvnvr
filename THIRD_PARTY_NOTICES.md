@@ -13,6 +13,7 @@ ship the exact license texts and source offer for the versions it bundles.
 | [FFmpeg](https://ffmpeg.org/) | LGPL-2.1-or-later; bundled builds use the LGPLv3 option | CLI subprocess, not linked into UvNVR |
 | [SQLite](https://sqlite.org/) | Public domain | Configuration, index, audit database |
 | [OpenSSL](https://www.openssl.org/) | Apache-2.0 | TLS and cryptography |
+| [InspireFace](https://github.com/HyperInspire/InspireFace) | Apache-2.0 | Optional face detection/recognition SDK (`UVNVR_ENABLE_INSPIREFACE`, loaded as a shared library) |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | JSON |
 | [spdlog](https://github.com/gabime/spdlog) | MIT | Application logging (introduced with the backend modules) |
 | [Vue 3](https://vuejs.org/) | MIT | Frontend |
