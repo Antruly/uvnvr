@@ -503,6 +503,10 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
     return {};
   if (response.status == 401 && !username.empty()) {
     const std::string authorization = BuildAuthorization(url, response.headers, username, password);
+    if (authorization.empty() && std::getenv("UVNVR_ONVIF_TRACE") != nullptr) {
+      std::fprintf(stderr, "[onvif] no digest from challenge: %s\n",
+                   response.headers.substr(0, 300).c_str());
+    }
     if (!authorization.empty()) {
       HttpRawResponse retried;
       if (!exchange(authorization + "\r\n", &retried))
