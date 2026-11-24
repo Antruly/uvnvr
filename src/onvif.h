@@ -22,10 +22,19 @@ struct OnvifInfo {
   std::string model;
   std::string firmware;
   std::string serial;
+  // Display name taken from the `name=` scope returned by GetScopes, or the
+  // model when the camera exposes no name scope.
+  std::string device_name;
   std::vector<OnvifProfile> profiles;
 };
 
 bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::string* error);
+// Reads GetDeviceInformation and GetScopes only. This is the cheap probe used
+// by protocol detection: a camera that answers identity but fails the media
+// service is still identified as ONVIF.
+bool ProbeOnvifIdentity(const std::string& xaddr, const std::string& username,
+                        const std::string& password, OnvifInfo* info, std::string* error,
+                        int timeout_seconds = 2);
 bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std::string& password,
                 OnvifInfo* info, std::string* error);
 

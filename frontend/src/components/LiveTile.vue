@@ -18,6 +18,7 @@ export interface LiveChannel {
   mainState?: string
   mainError?: string
   subState?: string
+  subError?: string
 }
 
 const props = defineProps<{
@@ -110,7 +111,10 @@ async function start() {
       failed = true
       state.value = 'error'
       message.value = typeof detail === 'string' ? detail : t('preview.streamError')
-      if (!destroyed) {
+      // A camera the server reports as offline gets no automatic retry: the
+      // status socket only flips the dot, and the operator pulls the stream
+      // again with Retry (or by reopening the layout).
+      if (!destroyed && !offline.value) {
         retryTimer.value = window.setTimeout(() => void start(), 5000)
       }
     })
@@ -124,7 +128,7 @@ async function start() {
   } catch (caught) {
     state.value = 'error'
     message.value = caught instanceof Error ? caught.message : t('preview.streamError')
-    if (!destroyed) {
+    if (!destroyed && !offline.value) {
       retryTimer.value = window.setTimeout(() => void start(), 5000)
     }
   }
@@ -190,6 +194,9 @@ defineExpose({ reload: start })
       <AppIcon name="info" :size="24" />
       <strong>{{ t('preview.streamError') }}</strong>
       <span>{{ message }}</span>
+      <button class="button small" type="button" @click.stop="start">
+        {{ t('common.retry') }}
+      </button>
     </div>
     <div v-if="offline && state === 'playing'" class="live-offline">
       <AppIcon name="info" :size="20" />

@@ -7,6 +7,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useChannelStatusStore } from '@/stores/channelStatus'
 import { useEventStore } from '@/stores/events'
 import { useTabsStore } from '@/stores/tabs'
 import { useTheme } from '@/stores/theme'
@@ -14,6 +15,7 @@ import { useTheme } from '@/stores/theme'
 const app = useAppStore()
 const auth = useAuthStore()
 const events = useEventStore()
+const channelStatus = useChannelStatusStore()
 const tabs = useTabsStore()
 const route = useRoute()
 const router = useRouter()
@@ -102,6 +104,8 @@ function closeTab(path: string) {
 
 async function logout() {
   disconnectEvents()
+  disconnectStatus()
+  statusConnectedBefore = false
   await auth.logout()
   tabs.$reset()
   await router.push('/login')
@@ -178,11 +182,92 @@ function disconnectEvents() {
   events.setConnected(false)
 }
 
+// Channel-state socket. It is separate from /ws/events: viewers without
+// alert.view (preview and playback) still need online/offline changes.
+let statusSocket: WebSocket | null = null
+let statusReconnectTimer: number | undefined
+let statusReconnectDelay = 1000
+let statusConnectedBefore = false
+
+function scheduleStatusReconnect() {
+  if (statusReconnectTimer !== undefined || !auth.user) return
+  statusReconnectTimer = window.setTimeout(() => {
+    statusReconnectTimer = undefined
+    void connectStatus()
+  }, statusReconnectDelay)
+  statusReconnectDelay = Math.min(30000, statusReconnectDelay * 2)
+}
+
+async function alignStatusAfterReconnect() {
+  // The server streams changes only, so a reconnect needs one full snapshot
+  // before the diff stream can be trusted again.
+  try {
+    const rows = await api<Array<Record<string, unknown>>>('/api/v1/channels')
+    if (!auth.user) return
+    channelStatus.replaceFromChannels(rows)
+  } catch {
+    // A preview-only account cannot read /channels; the page's own fallback
+    // refresh still aligns it.
+    channelStatus.bumpResync()
+  }
+}
+
+async function connectStatus() {
+  if (!auth.user || statusSocket) return
+  try {
+    const ticket = await api<{ wsPath: string }>('/api/v1/status/ticket', { method: 'POST' })
+    if (!auth.user) return
+    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const current = new WebSocket(`${scheme}://${window.location.host}${ticket.wsPath}`)
+    statusSocket = current
+    current.onopen = () => {
+      channelStatus.setConnected(true)
+      statusReconnectDelay = 1000
+      if (statusConnectedBefore) void alignStatusAfterReconnect()
+      statusConnectedBefore = true
+    }
+    current.onmessage = (message) => {
+      try {
+        channelStatus.apply(JSON.parse(String(message.data)))
+      } catch {
+        /* Ignore malformed status frames. */
+      }
+    }
+    current.onclose = () => {
+      channelStatus.setConnected(false)
+      if (statusSocket === current) statusSocket = null
+      scheduleStatusReconnect()
+    }
+    current.onerror = () => current.close()
+  } catch {
+    scheduleStatusReconnect()
+  }
+}
+
+function disconnectStatus() {
+  if (statusReconnectTimer !== undefined) {
+    window.clearTimeout(statusReconnectTimer)
+    statusReconnectTimer = undefined
+  }
+  if (statusSocket) {
+    const current = statusSocket
+    statusSocket = null
+    current.close()
+  }
+  channelStatus.setConnected(false)
+}
+
 watch(
   () => auth.user,
   (user) => {
-    if (user) void connectEvents()
-    else disconnectEvents()
+    if (user) {
+      void connectEvents()
+      void connectStatus()
+    } else {
+      statusConnectedBefore = false
+      disconnectEvents()
+      disconnectStatus()
+    }
   },
   { immediate: true },
 )
@@ -195,6 +280,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disconnectEvents()
+  disconnectStatus()
   if (toastTimer !== undefined) window.clearTimeout(toastTimer)
 })
 </script>

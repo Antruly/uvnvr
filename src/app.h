@@ -59,6 +59,7 @@ struct StreamTicket {
   int64_t expires_at = 0;
   bool playback = false;
   bool events = false;
+  bool status = false;
   int64_t start_ms = 0;
   int64_t end_ms = 0;
   double speed = 1.0;
@@ -147,7 +148,13 @@ private:
                           std::string* token, int64_t* expires_at, std::string* error);
   bool CreateEventsTicket(int64_t user_id, std::string* token, int64_t* expires_at,
                           std::string* error);
+  bool CreateStatusTicket(int64_t user_id, std::string* token, int64_t* expires_at,
+                          std::string* error);
   void BroadcastEvent(const json& event);
+  void BroadcastStatus(const json& message);
+  void StatusRun();
+  void StartStatusPush();
+  void StopStatusPush();
   bool ValidateStreamTicket(const std::string& token, StreamTicket* ticket);
   bool VerifyRtspCredentials(const std::string& username, const std::string& password);
   std::string RtspHa1ForUser(const std::string& username);
@@ -286,6 +293,14 @@ private:
     std::atomic<uint64_t> next_id{1};
   };
   std::shared_ptr<EventHub> event_hub_ = std::make_shared<EventHub>();
+  // /ws/status: one changed-item push per second. Kept separate from the
+  // alert socket because viewers without alert.view still need channel state.
+  std::shared_ptr<EventHub> status_hub_ = std::make_shared<EventHub>();
+  std::thread status_thread_;
+  std::atomic<bool> status_stop_{false};
+  // Serialised changed items from the previous tick; the next push contains
+  // only rows whose JSON differs.
+  std::map<int64_t, std::string> last_status_snapshot_;
   std::atomic<bool> setup_required_{true};
   std::mutex serial_mutex_;
   std::string serial_;
