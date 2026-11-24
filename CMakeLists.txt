@@ -12,6 +12,8 @@ option(UVNVR_EMBED_WEB "Embed the built frontend into the binary" OFF)
 option(UVNVR_BUILD_SDK "Build the private-protocol C SDK" ON)
 option(UVNVR_ENABLE_QUIC "Enable the QUIC listener for the private protocol" ON)
 option(UVNVR_ENABLE_AI "Build the AI recognition pipeline (requires OpenCV)" ON)
+option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (requires OpenSSL)"
+       ON)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -174,6 +176,36 @@ if(UVNVR_AI_ENABLED)
 endif()
 
 target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED})
+
+# GM crypto library: SM2/SM3/SM4 primitives plus device certificate handling.
+# It is a standalone library, not linked into the server, so no existing
+# authentication path changes. OpenSSL 3 provides SM2/SM3/SM4; when it is
+# unavailable the module is skipped and the rest of the build is unaffected.
+set(UVNVR_GM_CRYPTO_ENABLED 0)
+if(UVNVR_ENABLE_GM_CRYPTO)
+  find_package(OpenSSL 3.0 QUIET COMPONENTS Crypto)
+  if(OpenSSL_FOUND AND TARGET OpenSSL::Crypto)
+    set(UVNVR_GM_CRYPTO_ENABLED 1)
+    add_library(uvnvr_gm_crypto STATIC
+      src/crypto/sm.cpp
+      src/crypto/cert.cpp
+    )
+    target_include_directories(uvnvr_gm_crypto PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_gm_crypto PUBLIC OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_gm_crypto PUBLIC UVNVR_ENABLE_GM_CRYPTO=1)
+    if(MSVC)
+      target_compile_options(uvnvr_gm_crypto PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_gm_crypto PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    message(STATUS "gm_crypto: enabled")
+  else()
+    message(STATUS
+      "gm_crypto: OpenSSL 3 Crypto not found; UVNVR_ENABLE_GM_CRYPTO is forced OFF")
+  endif()
+else()
+  message(STATUS "gm_crypto: disabled by UVNVR_ENABLE_GM_CRYPTO=OFF")
+endif()
 
 if(WIN32)
   # The icon resource is what Explorer and shortcuts display; SetupIconFile
