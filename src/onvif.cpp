@@ -324,6 +324,9 @@ bool HttpExchange(const std::string& url, const std::string& body, int timeout_s
                  HeaderValue(out->headers, "WWW-Authenticate").c_str());
     if (!extra_headers.empty())
       std::fprintf(stderr, "[onvif]   header: %s\n", extra_headers.c_str());
+    if (out->status >= 400)
+      std::fprintf(stderr, "[onvif]   fault: %s\n",
+                   out->body.substr(0, 400).c_str());
   }
   return true;
 }
