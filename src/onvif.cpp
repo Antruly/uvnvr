@@ -450,10 +450,30 @@ std::string BuildAuthorization(const std::string& url, const std::string& header
   return header;
 }
 
+// Desk2ONVIF hands out one nonce and accepts the first digest that uses it,
+// then rejects later nonce counts until the challenge is renewed. Keeping the
+// header that just worked and replaying it keeps a multi-step probe on the
+// path the camera already accepted; a 401 simply drops the cache entry.
+std::mutex g_auth_cache_mutex;
+std::map<std::string, std::string> g_auth_cache;
+
 std::string HttpPostTimeout(const std::string& url, const std::string& body, int timeout_seconds,
                             const std::string& username, const std::string& password,
                             std::string* error) {
   HttpRawResponse response;
+  const std::string cache_key = username + "@" + url;
+  if (!username.empty()) {
+    std::lock_guard<std::mutex> lock(g_auth_cache_mutex);
+    auto cached = g_auth_cache.find(cache_key);
+    if (cached != g_auth_cache.end()) {
+      HttpRawResponse reused;
+      if (!HttpExchange(url, body, timeout_seconds, cached->second + "\r\n", &reused, error))
+        return {};
+      if (reused.status < 400)
+        return reused.body;
+      g_auth_cache.erase(cached);
+    }
+  }
   if (!HttpExchange(url, body, timeout_seconds, "", &response, error))
     return {};
   if (response.status == 401 && !username.empty()) {
@@ -463,6 +483,12 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
       if (!HttpExchange(url, body, timeout_seconds, authorization + "\r\n", &retried, error))
         return {};
       response = std::move(retried);
+      if (response.status < 400) {
+        std::lock_guard<std::mutex> lock(g_auth_cache_mutex);
+        if (g_auth_cache.size() > 128)
+          g_auth_cache.clear();
+        g_auth_cache[cache_key] = authorization;
+      }
       // A camera that rotates its nonce answers the first digest attempt with
       // a new challenge; honour it once instead of failing the whole call.
       if (response.status == 401) {
