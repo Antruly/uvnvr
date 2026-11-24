@@ -1000,10 +1000,10 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
                      reinterpret_cast<const sockaddr*>(&target), sizeof(target)) >= 0)
           ++round_sent;
       } else {
-        for (const auto& interface : interfaces) {
+        for (const auto& iface : interfaces) {
           setsockopt(socket, IPPROTO_IP, IP_MULTICAST_IF,
-                     reinterpret_cast<const char*>(&interface.address),
-                     sizeof(interface.address));
+                     reinterpret_cast<const char*>(&iface.address),
+                     sizeof(iface.address));
           if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
                        reinterpret_cast<const sockaddr*>(&target), sizeof(target)) >= 0)
             ++round_sent;
