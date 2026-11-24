@@ -20,6 +20,13 @@ bool ProbeBrandHttp(const std::string& host, int port, const std::string& userna
                     const std::string& password, const std::string& preferred,
                     BrandDeviceInfo* info, std::string* error);
 
+// Protocol-specific probes used by detection so each attempt can report its
+// own failure reason instead of a combined "no brand answered".
+bool ProbeHikvisionDevice(const std::string& host, int port, const std::string& username,
+                          const std::string& password, BrandDeviceInfo* info, std::string* error);
+bool ProbeDahuaDevice(const std::string& host, int port, const std::string& username,
+                      const std::string& password, BrandDeviceInfo* info, std::string* error);
+
 struct BrandEncoderConfig {
   std::string encoding;
   int width = 0;

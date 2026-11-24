@@ -15,6 +15,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <string_view>
+#include <uv.h>
 #include <vector>
 #ifdef _WIN32
 #else
@@ -648,16 +649,16 @@ std::string Envelope(const std::string& security, const std::string& body) {
 
 std::string SoapCall(const std::string& xaddr, const std::string& security, const std::string& body,
                      const std::string& username, const std::string& password,
-                     std::string* error) {
+                     std::string* error, int timeout_seconds = 5) {
   // Cameras behind HTTP authentication reject a request that carries both the
   // Digest Authorization and a WS-Security token: the extra header makes the
-  // camera answer 401 or 500 and burns its single nonce, so the retry that
-  // follows fails as well. Try the plain envelope first and fall back to
-  // WS-Security only when the device does not accept HTTP credentials.
+  // camera answer 401/500 and consumes its nonce counter, so the retry that
+  // follows fails as well. Try the plain envelope first and only fall back to
+  // WS-Security when the device clearly does not accept HTTP credentials.
   if (!security.empty() && !username.empty()) {
     std::string plain_error;
-    std::string plain =
-        HttpPostTimeout(xaddr, Envelope("", body), 5, username, password, &plain_error);
+    std::string plain = HttpPostTimeout(xaddr, Envelope("", body), timeout_seconds, username,
+                                        password, &plain_error);
     if (!plain.empty()) {
       if (error)
         error->clear();
@@ -672,12 +673,15 @@ std::string SoapCall(const std::string& xaddr, const std::string& security, cons
     const bool auth_rejected = plain_error.find("(authentication rejected)") != std::string::npos ||
                                plain_error.find("HTTP 401") != std::string::npos;
     if (!auth_rejected) {
+      // The device answered but refused the operation itself (SOAP fault):
+      // sending the same call with a WS-Security token will not change that.
       if (error)
         *error = plain_error;
       return {};
     }
   }
-  return HttpPostTimeout(xaddr, Envelope(security, body), 5, username, password, error);
+  return HttpPostTimeout(xaddr, Envelope(security, body), timeout_seconds, username, password,
+                         error);
 }
 
 std::string DeviceServiceUrl(const std::string& xaddr) {
@@ -918,9 +922,95 @@ std::vector<OnvifEvent> ParseNotificationEvents(const std::string& xml) {
   return events;
 }
 
+// Defined below with the rest of the scope helpers.
+std::string UrlDecode(std::string value);
+
+struct LocalIpv4Address {
+  in_addr address{};
+};
+
+// One entry per non-loopback IPv4 interface. Discovery sends a Probe out of
+// each of them: the default multicast route only reaches the interface the OS
+// picked, which hides cameras on a second NIC.
+std::vector<LocalIpv4Address> LocalIpv4Addresses() {
+  std::vector<LocalIpv4Address> addresses;
+  uv_interface_address_t* entries = nullptr;
+  int count = 0;
+  if (uv_interface_addresses(&entries, &count) != 0)
+    return addresses;
+  for (int i = 0; i < count; ++i) {
+    const auto& entry = entries[i];
+    if (entry.address.address4.sin_family != AF_INET || entry.is_internal)
+      continue;
+    const unsigned long host = ntohl(entry.address.address4.sin_addr.s_addr);
+    if (host == 0 || (host >> 24) == 127)
+      continue;
+    LocalIpv4Address local;
+    local.address = entry.address.address4.sin_addr;
+    const bool duplicate =
+        std::any_of(addresses.begin(), addresses.end(), [&](const LocalIpv4Address& existing) {
+          return existing.address.s_addr == local.address.s_addr;
+        });
+    if (!duplicate)
+      addresses.push_back(local);
+  }
+  uv_free_interface_addresses(entries, count);
+  return addresses;
+}
+
+std::string ScopeTokenValue(const std::string& token, const std::string& key) {
+  // Standard scope form: onvif://www.onvif.org/<key>/<value>.
+  const std::string path = "onvif://www.onvif.org/" + key + "/";
+  size_t pos = token.find(path);
+  if (pos != std::string::npos)
+    return UrlDecode(token.substr(pos + path.size()));
+  // Some devices publish key=value pairs instead of the path form.
+  const std::string query = key + "=";
+  pos = token.find(query);
+  if (pos != std::string::npos) {
+    size_t end = pos + query.size();
+    while (end < token.size() && token[end] != '&' && token[end] != ';')
+      ++end;
+    return UrlDecode(token.substr(pos + query.size(), end - pos - query.size()));
+  }
+  return {};
+}
+
+std::pair<std::string, std::string> ScopeIdentity(const std::string& scopes) {
+  std::string name;
+  std::string hardware;
+  size_t start = 0;
+  while (start < scopes.size()) {
+    const size_t end = scopes.find_first_of(" \t\r\n", start);
+    const std::string token =
+        scopes.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!token.empty()) {
+      if (name.empty())
+        name = ScopeTokenValue(token, "name");
+      if (hardware.empty())
+        hardware = ScopeTokenValue(token, "hardware");
+    }
+    if (end == std::string::npos)
+      break;
+    start = end + 1;
+  }
+  return {name, hardware};
+}
+
 } // namespace
 
-bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::string* error) {
+bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::string* error,
+                   int* probes_sent, int* responses) {
+  if (devices == nullptr) {
+    if (error)
+      *error = "missing ONVIF discovery output";
+    return false;
+  }
+  devices->clear();
+  if (probes_sent)
+    *probes_sent = 0;
+  if (responses)
+    *responses = 0;
   if (!EnsureWinsock(error))
     return false;
   const Socket socket = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -933,10 +1023,6 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
   setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
              sizeof(reuse));
 
-  // TODO: on a multi-homed host, send one Probe per local IPv4 interface and
-  // set IP_MULTICAST_IF for each. Discovery currently relies on the OS's
-  // default multicast route, which is why cameras on a second NIC/subnet can
-  // be missed.
   sockaddr_in target{};
   target.sin_family = AF_INET;
   target.sin_port = htons(3702);
@@ -954,27 +1040,44 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
       "<w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action></e:Header>"
       "<e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body>"
       "</e:Envelope>";
-  devices->clear();
+  const std::vector<LocalIpv4Address> interfaces = LocalIpv4Addresses();
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(1, timeout_ms));
   auto next_probe = std::chrono::steady_clock::now();
-  int probes_sent = 0;
+  int sent = 0;
+  int received = 0;
+  int rounds = 0;
   std::array<char, 8192> buffer{};
 
-  // Keep collecting for the whole window instead of returning after the first
-  // recvfrom timeout, and retry the Probe twice so a lost multicast datagram
-  // does not hide a device.
+  // Keep collecting for the whole window and retry the Probe twice so a lost
+  // multicast datagram does not hide a device. Each round is sent out of every
+  // IPv4 interface; the OS default route is used when none is found.
   while (std::chrono::steady_clock::now() < deadline) {
     const auto now = std::chrono::steady_clock::now();
-    if (probes_sent < 3 && now >= next_probe) {
-      if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
-                   reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0) {
+    if (rounds < 3 && now >= next_probe) {
+      int round_sent = 0;
+      if (interfaces.empty()) {
+        if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
+                     reinterpret_cast<const sockaddr*>(&target), sizeof(target)) >= 0)
+          ++round_sent;
+      } else {
+        for (const auto& iface : interfaces) {
+          setsockopt(socket, IPPROTO_IP, IP_MULTICAST_IF,
+                     reinterpret_cast<const char*>(&iface.address),
+                     sizeof(iface.address));
+          if (::sendto(socket, message.data(), static_cast<int>(message.size()), 0,
+                       reinterpret_cast<const sockaddr*>(&target), sizeof(target)) >= 0)
+            ++round_sent;
+        }
+      }
+      if (round_sent == 0 && rounds == 0) {
         CloseSocket(socket);
         if (error)
           *error = "cannot send the ONVIF discovery probe";
         return false;
       }
-      ++probes_sent;
+      sent += round_sent;
+      ++rounds;
       next_probe = now + std::chrono::milliseconds(200);
     }
 
@@ -1026,43 +1129,186 @@ bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::strin
 #endif
       break;
     }
+    ++received;
     const std::string response(buffer.data(), static_cast<size_t>(n));
     std::string xaddrs = ExtractTag(response, "XAddrs");
     if (xaddrs.empty())
       xaddrs = ExtractTag(response, "XAddr");
+    const std::string scopes = Trim(ExtractTag(response, "Scopes"));
+    const auto [scope_name, scope_hardware] = ScopeIdentity(scopes);
+    std::string endpoint;
+    for (const std::string& block : ExtractBlocks(response, "EndpointReference")) {
+      endpoint = Trim(ExtractTag(block, "Address"));
+      if (!endpoint.empty())
+        break;
+    }
+
     size_t start = 0;
     while (start < xaddrs.size()) {
       const size_t end = xaddrs.find_first_of(" \t\r\n", start);
       const std::string address =
           xaddrs.substr(start, end == std::string::npos ? std::string::npos : end - start);
-      if (address.rfind("http://", 0) == 0) {
+      if (address.rfind("http://", 0) == 0 || address.rfind("https://", 0) == 0) {
         OnvifDevice device;
         device.xaddr = address;
-        const size_t host_start = 7;
+        device.endpoint = endpoint;
+        device.scopes = scopes;
+        device.name = scope_name;
+        device.hardware = scope_hardware;
+        const size_t host_start = address.find("://") + 3;
         const size_t slash = address.find('/', host_start);
-        device.ip = address.substr(host_start, slash == std::string::npos ? std::string::npos
-                                                                          : slash - host_start);
-        const size_t colon = device.ip.find(':');
-        if (colon != std::string::npos)
-          device.ip = device.ip.substr(0, colon);
-        const bool duplicate =
-            std::any_of(devices->begin(), devices->end(),
-                        [&](const OnvifDevice& entry) { return entry.ip == device.ip; });
-        if (!duplicate && !device.ip.empty())
+        std::string authority =
+            address.substr(host_start, slash == std::string::npos ? std::string::npos
+                                                                  : slash - host_start);
+        const size_t at = authority.rfind('@');
+        if (at != std::string::npos)
+          authority = authority.substr(at + 1);
+        if (!authority.empty() && authority.front() == '[') {
+          const size_t close = authority.find(']');
+          device.ip = authority.substr(1, close == std::string::npos ? std::string::npos
+                                                                     : close - 1);
+        } else {
+          const size_t colon = authority.find(':');
+          device.ip =
+              authority.substr(0, colon == std::string::npos ? std::string::npos : colon);
+        }
+        if (device.ip.empty())
+          continue;
+        const auto existing =
+            std::find_if(devices->begin(), devices->end(),
+                         [&](const OnvifDevice& entry) { return entry.ip == device.ip; });
+        if (existing == devices->end()) {
           devices->push_back(device);
+        } else {
+          // A retransmitted ProbeMatch or a second XAddr for the same host can
+          // carry the same data; keep the first non-empty value of each field.
+          if (existing->xaddr.empty())
+            existing->xaddr = device.xaddr;
+          if (existing->endpoint.empty())
+            existing->endpoint = device.endpoint;
+          if (existing->scopes.empty())
+            existing->scopes = device.scopes;
+          if (existing->name.empty())
+            existing->name = device.name;
+          if (existing->hardware.empty())
+            existing->hardware = device.hardware;
+        }
       }
       if (end == std::string::npos)
         break;
       start = end + 1;
     }
   }
+  if (probes_sent)
+    *probes_sent = sent;
+  if (responses)
+    *responses = received;
   CloseSocket(socket);
-  return true;
+  return sent > 0;
 }
 
 std::string ResolveMediaService(const std::string& device, const std::string& security,
                                 const std::string& username, const std::string& password,
                                 std::string* error);
+
+namespace {
+
+std::string UrlDecode(std::string value) {
+  std::string out;
+  out.reserve(value.size());
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (value[i] == '%' && i + 2 < value.size()) {
+      const auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+          return c - '0';
+        if (c >= 'a' && c <= 'f')
+          return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+          return c - 'A' + 10;
+        return -1;
+      };
+      const int high = hex(value[i + 1]);
+      const int low = hex(value[i + 2]);
+      if (high >= 0 && low >= 0) {
+        out.push_back(static_cast<char>((high << 4) | low));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(value[i] == '+' ? ' ' : value[i]);
+  }
+  return out;
+}
+
+// GetScopes returns one ScopeItem per scope. The device name is published as
+// onvif://www.onvif.org/name/<value>; hardware/location carry related values.
+// Return the first non-empty name scope.
+std::string ScopeValue(const std::string& xml, const std::string& key) {
+  const std::string prefix = "onvif://www.onvif.org/" + key + "/";
+  size_t pos = 0;
+  while ((pos = xml.find(prefix, pos)) != std::string::npos) {
+    size_t end = pos + prefix.size();
+    while (end < xml.size() && xml[end] != '<' && xml[end] != '&' && xml[end] != '"' &&
+           !std::isspace(static_cast<unsigned char>(xml[end])))
+      ++end;
+    const std::string value = UrlDecode(xml.substr(pos + prefix.size(),
+                                                  end - pos - prefix.size()));
+    if (!value.empty())
+      return value;
+    pos = end;
+  }
+  return {};
+}
+
+// Fills identity fields (manufacturer/model/firmware/serial/name) through the
+// device service. Returns false only when the device service did not answer.
+bool ReadOnvifIdentity(const std::string& service, const std::string& security,
+                       const std::string& username, const std::string& password, int timeout_seconds,
+                       OnvifInfo* info, std::string* error) {
+  const std::string device_xml =
+      SoapCall(service, security,
+               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username,
+               password, error, timeout_seconds);
+  if (device_xml.empty())
+    return false;
+  info->manufacturer = ExtractTag(device_xml, "Manufacturer");
+  info->model = ExtractTag(device_xml, "Model");
+  info->firmware = ExtractTag(device_xml, "FirmwareVersion");
+  info->serial = ExtractTag(device_xml, "SerialNumber");
+
+  std::string scope_error;
+  const std::string scopes_xml =
+      SoapCall(service, security,
+               "<GetScopes xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username, password,
+               &scope_error, timeout_seconds);
+  if (!scopes_xml.empty()) {
+    info->device_name = ScopeValue(scopes_xml, "name");
+    if (info->device_name.empty())
+      info->device_name = ScopeValue(scopes_xml, "hardware");
+  }
+  return true;
+}
+
+} // namespace
+
+bool ProbeOnvifIdentity(const std::string& xaddr, const std::string& username,
+                        const std::string& password, OnvifInfo* info, std::string* error,
+                        int timeout_seconds) {
+  if (info == nullptr) {
+    if (error != nullptr)
+      *error = "missing ONVIF output";
+    return false;
+  }
+  if (!EnsureWinsock(error))
+    return false;
+  const std::string service = DeviceServiceUrl(xaddr);
+  if (!ReadOnvifIdentity(service, SecurityHeader(username, password), username, password,
+                         timeout_seconds, info, error))
+    return false;
+  if (info->device_name.empty())
+    info->device_name = info->model;
+  return true;
+}
 
 bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std::string& password,
                 OnvifInfo* info, std::string* error) {
@@ -1071,16 +1317,10 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   const std::string service = DeviceServiceUrl(xaddr);
   const std::string security = SecurityHeader(username, password);
 
-  const std::string device_xml =
-      SoapCall(service, security,
-               "<GetDeviceInformation xmlns=\"http://www.onvif.org/ver10/device/wsdl\"/>", username,
-               password, error);
-  if (device_xml.empty())
+  if (!ReadOnvifIdentity(service, security, username, password, 5, info, error))
     return false;
-  info->manufacturer = ExtractTag(device_xml, "Manufacturer");
-  info->model = ExtractTag(device_xml, "Model");
-  info->firmware = ExtractTag(device_xml, "FirmwareVersion");
-  info->serial = ExtractTag(device_xml, "SerialNumber");
+  if (info->device_name.empty())
+    info->device_name = info->model;
 
   // Some devices expose the media service on its own path, and answering
   // GetProfiles on the device endpoint returns a SOAP fault. Resolve the

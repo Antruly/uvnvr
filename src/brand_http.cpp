@@ -19,8 +19,10 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -225,6 +227,52 @@ struct HttpResponse {
   std::string body;
 };
 
+// A LAN scan probes many offline addresses. Blocking connect() waits for the
+// platform SYN timeout (seconds), so bound it: unreachable hosts must fail in
+// well under a second or the whole scan stalls.
+bool ConnectWithTimeout(Socket socket, const struct sockaddr* addr, int addr_len, int seconds) {
+  if (::connect(socket, addr, addr_len) == 0)
+    return true;
+  bool pending = false;
+#ifdef _WIN32
+  pending = (WSAGetLastError() == WSAEWOULDBLOCK);
+  if (!pending)
+    return false;
+  u_long mode = 1;
+  ioctlsocket(socket, FIONBIO, &mode);
+#else
+  pending = (errno == EINPROGRESS);
+  if (!pending)
+    return false;
+  const int flags = fcntl(socket, F_GETFL, 0);
+  fcntl(socket, F_SETFL, flags | O_NONBLOCK);
+#endif
+  fd_set writable;
+  FD_ZERO(&writable);
+  FD_SET(socket, &writable);
+  struct timeval tv;
+  tv.tv_sec = seconds;
+  tv.tv_usec = 0;
+  bool connected = false;
+  if (::select(static_cast<int>(socket) + 1, nullptr, &writable, nullptr, &tv) > 0) {
+    int so_error = 0;
+#ifdef _WIN32
+    int len = sizeof(so_error);
+#else
+    socklen_t len = sizeof(so_error);
+#endif
+    getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
+    connected = (so_error == 0);
+  }
+#ifdef _WIN32
+  mode = 0;
+  ioctlsocket(socket, FIONBIO, &mode);
+#else
+  fcntl(socket, F_SETFL, flags);
+#endif
+  return connected;
+}
+
 bool SendRaw(const std::string& host, int port, const std::string& request, HttpResponse* response,
              std::string* error) {
   if (!InitSockets(error))
@@ -254,7 +302,7 @@ bool SendRaw(const std::string& host, int port, const std::string& request, Http
     setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout),
                sizeof(timeout));
 #endif
-    if (::connect(socket, entry->ai_addr, static_cast<int>(entry->ai_addrlen)) == 0)
+    if (ConnectWithTimeout(socket, entry->ai_addr, static_cast<int>(entry->ai_addrlen), 1))
       break;
     CloseSocket(socket);
     socket = kInvalidSocket;
@@ -405,8 +453,17 @@ bool ProbeHikvision(const std::string& host, int port, const std::string& userna
   if (!HttpRequest(host, port, "GET", "/ISAPI/System/deviceInfo", "", "", username, password,
                    &response, error))
     return false;
-  if (response.status != 200 || (response.body.find("DeviceInfo") == std::string::npos &&
-                                 response.body.find("deviceName") == std::string::npos)) {
+  if (response.status != 200) {
+    if (error != nullptr)
+      *error = response.status == 401
+                   ? "the ISAPI service rejected the credentials"
+                   : "the ISAPI service returned HTTP " + std::to_string(response.status);
+    return false;
+  }
+  if (response.body.find("DeviceInfo") == std::string::npos &&
+      response.body.find("deviceName") == std::string::npos) {
+    if (error != nullptr)
+      *error = "the HTTP service answered but returned no ISAPI deviceInfo";
     return false;
   }
   info->protocol = "hikvision";
@@ -439,12 +496,20 @@ bool ProbeDahua(const std::string& host, int port, const std::string& username,
   if (!HttpRequest(host, port, "GET", "/cgi-bin/magicBox.cgi?action=getDeviceType", "", "",
                    username, password, &response, error))
     return false;
-  if (response.status != 200)
+  if (response.status != 200) {
+    if (error != nullptr)
+      *error = response.status == 401
+                   ? "the Dahua CGI service rejected the credentials"
+                   : "the Dahua CGI service returned HTTP " + std::to_string(response.status);
     return false;
+  }
   const auto values = ParseKeyValues(response.body);
   const auto type = values.find("type");
-  if (type == values.end() && response.body.find("type=") == std::string::npos)
+  if (type == values.end() && response.body.find("type=") == std::string::npos) {
+    if (error != nullptr)
+      *error = "the HTTP service answered but returned no Dahua deviceType";
     return false;
+  }
   info->protocol = "dahua";
   info->brand = "Dahua";
   info->model = type == values.end() ? "" : type->second;
@@ -672,6 +737,34 @@ bool SetBrandEncoderConfig(const std::string& protocol, const std::string& host,
   if (error != nullptr)
     *error = "the channel has no supported brand encoder API";
   return false;
+}
+
+bool ProbeHikvisionDevice(const std::string& host, int port, const std::string& username,
+                          const std::string& password, BrandDeviceInfo* info, std::string* error) {
+  BrandDeviceInfo candidate;
+  std::string probe_error;
+  if (!ProbeHikvision(host, port, username, password, &candidate, &probe_error)) {
+    if (error != nullptr)
+      *error = probe_error.empty() ? "no Hikvision ISAPI service answered" : probe_error;
+    return false;
+  }
+  if (info != nullptr)
+    *info = std::move(candidate);
+  return true;
+}
+
+bool ProbeDahuaDevice(const std::string& host, int port, const std::string& username,
+                      const std::string& password, BrandDeviceInfo* info, std::string* error) {
+  BrandDeviceInfo candidate;
+  std::string probe_error;
+  if (!ProbeDahua(host, port, username, password, &candidate, &probe_error)) {
+    if (error != nullptr)
+      *error = probe_error.empty() ? "no Dahua CGI service answered" : probe_error;
+    return false;
+  }
+  if (info != nullptr)
+    *info = std::move(candidate);
+  return true;
 }
 
 bool ProbeBrandHttp(const std::string& host, int port, const std::string& username,

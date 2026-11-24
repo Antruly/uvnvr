@@ -1,6 +1,8 @@
 #include "app.h"
 
 #include "brand_http.h"
+#include "detect.h"
+#include "discovery.h"
 #include "exporter.h"
 #include "onvif.h"
 #include "openapi.h"
@@ -1193,6 +1195,12 @@ bool App::Migrate(std::string* error) {
       {"motion.sensitivity", "50"},
       {"motion.cooldown_seconds", "60"},
       {"motion.region", "0,0,100,100"},
+      {"scan.window_ms", "4000"},
+      {"scan.onvif", "1"},
+      {"scan.sadp", "1"},
+      {"scan.dahua", "1"},
+      {"scan.sadp_targets", "239.255.255.250:37020,255.255.255.255:37020"},
+      {"scan.dahua_targets", "239.255.255.231:37810,266.0.0.100:22531"},
   };
   for (const auto& [key, value] : settings) {
     uvcpp::uvcpp_db_params params;
@@ -2252,6 +2260,7 @@ int App::Run() {
   }
   StartPrivateProtocol();
   StartMonitors();
+  StartStatusPush();
 
   std::printf("setup required: %s\n", setup_required_.load() ? "yes" : "no");
   std::error_code data_ec;
@@ -2687,6 +2696,57 @@ void App::RegisterCoreRoutes() {
                            !UpdateMotionSettings(body, &*error))
                          return;
 
+                       if (body.contains("scan") && body["scan"].is_object()) {
+                         const auto& scan = body["scan"];
+                         const auto set_scan = [&](const char* key,
+                                                   const std::string& value) -> bool {
+                           std::string db_error;
+                           if (!SetSetting(std::string("scan.") + key, value, &db_error)) {
+                             *error = db_error;
+                             return false;
+                           }
+                           return true;
+                         };
+                         if (scan.contains("windowMs")) {
+                           if (!scan["windowMs"].is_number_integer()) {
+                             *error = "scan windowMs must be an integer";
+                             return;
+                           }
+                           const int64_t window = JsonInt(scan, "windowMs", 4000);
+                           if (window < 500 || window > 60000) {
+                             *error = "scan windowMs must be between 500 and 60000";
+                             return;
+                           }
+                           if (!set_scan("window_ms", std::to_string(window)))
+                             return;
+                         }
+                         for (const char* key : {"onvif", "sadp", "dahua"}) {
+                           if (scan.contains(key)) {
+                             if (!scan[key].is_boolean()) {
+                               *error = std::string("scan ") + key + " must be a boolean";
+                               return;
+                             }
+                             if (!set_scan(key, scan[key].get<bool>() ? "1" : "0"))
+                               return;
+                           }
+                         }
+                         for (const char* key : {"sadpTargets", "dahuaTargets"}) {
+                           if (scan.contains(key)) {
+                             if (!scan[key].is_string() ||
+                                 scan[key].get<std::string>().size() > 1024) {
+                               *error = std::string("scan ") + key +
+                                        " must be a string of at most 1024 characters";
+                               return;
+                             }
+                             const std::string setting =
+                                 std::string(key) == "sadpTargets" ? "sadp_targets"
+                                                                   : "dahua_targets";
+                             if (!set_scan(setting.c_str(), scan[key].get<std::string>()))
+                               return;
+                           }
+                         }
+                       }
+
                        if (body.contains("system") && body["system"].is_object()) {
                          const auto& system = body["system"];
                          if (system.contains("timezone")) {
@@ -3076,6 +3136,16 @@ json App::SettingsJson() {
                       {"sensitivity", GetSettingInt("motion.sensitivity", 50)},
                       {"cooldownSeconds", GetSettingInt("motion.cooldown_seconds", 60)},
                       {"region", MotionRegionJson(GetSetting("motion.region", "0,0,100,100"))}}},
+      {"scan", json{{"windowMs", GetSettingInt("scan.window_ms", 4000)},
+                    {"onvif", GetSettingInt("scan.onvif", 1) != 0},
+                    {"sadp", GetSettingInt("scan.sadp", 1) != 0},
+                    {"dahua", GetSettingInt("scan.dahua", 1) != 0},
+                    {"sadpTargets",
+                     GetSetting("scan.sadp_targets",
+                                "239.255.255.250:37020,255.255.255.255:37020")},
+                    {"dahuaTargets",
+                     GetSetting("scan.dahua_targets",
+                                "239.255.255.231:37810,266.0.0.100:22531")}}},
       {"system", json{{"timezone", GetSetting("system.timezone", "UTC")},
                       {"language", GetSetting("system.language", "auto")},
                       {"gpuEnabled", GetSettingInt("system.gpu_enabled", 1) != 0},
@@ -3112,6 +3182,281 @@ void SendOp(uvcpp::uvcpp_web_response& resp, const OpResult& result) {
   } else {
     SendError(resp, result.status, result.code, result.message);
   }
+}
+
+// Normalises "a.b.c", "a.b.c.0/24" or empty into a /24 prefix. Returns an
+// empty string when the value is not four valid octets (a trailing /prefix is
+// accepted and ignored: the UI scans one /24 at a time).
+std::string NormaliseSubnet(const std::string& value) {
+  std::string text = value;
+  const size_t slash = text.find('/');
+  if (slash != std::string::npos)
+    text = text.substr(0, slash);
+  while (!text.empty() && text.back() == '.')
+    text.pop_back();
+  std::vector<int> octets;
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t dot = text.find('.', start);
+    const std::string part =
+        text.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+    int octet = 0;
+    const auto parsed = std::from_chars(part.data(), part.data() + part.size(), octet);
+    if (part.empty() || parsed.ec != std::errc() || parsed.ptr != part.data() + part.size() ||
+        octet < 0 || octet > 255)
+      return {};
+    octets.push_back(octet);
+    if (dot == std::string::npos)
+      break;
+    start = dot + 1;
+  }
+  if (octets.size() != 3 && octets.size() != 4)
+    return {};
+  return std::to_string(octets[0]) + "." + std::to_string(octets[1]) + "." +
+         std::to_string(octets[2]);
+}
+
+// Lists the /24 prefixes of the recorder's own IPv4 interfaces so the brand
+// scan can look for cameras that do not answer WS-Discovery.
+std::vector<std::string> LocalSubnetPrefixes() {
+  std::vector<std::string> prefixes;
+  uv_interface_address_t* addresses = nullptr;
+  int count = 0;
+  if (uv_interface_addresses(&addresses, &count) != 0)
+    return prefixes;
+  for (int i = 0; i < count; ++i) {
+    const auto& address = addresses[i];
+    if (address.address.address4.sin_family != AF_INET || address.is_internal)
+      continue;
+    const auto* bytes =
+        reinterpret_cast<const unsigned char*>(&address.address.address4.sin_addr.s_addr);
+    // uv stores the address in network byte order; read the octets directly.
+    const std::string prefix = std::to_string(bytes[0]) + "." + std::to_string(bytes[1]) + "." +
+                               std::to_string(bytes[2]);
+    if (prefix == "0.0.0" || prefix == "127.0.0")
+      continue;
+    if (std::find(prefixes.begin(), prefixes.end(), prefix) == prefixes.end())
+      prefixes.push_back(prefix);
+  }
+  uv_free_interface_addresses(addresses, count);
+  return prefixes;
+}
+
+std::vector<std::string> ExpandSubnet(const std::string& prefix) {
+  std::vector<std::string> hosts;
+  hosts.reserve(254);
+  for (int last = 1; last < 255; ++last)
+    hosts.push_back(prefix + "." + std::to_string(last));
+  return hosts;
+}
+
+struct BrandScanHit {
+  std::string ip;
+  int port = 0;
+  std::string protocol;
+  BrandDeviceInfo info;
+};
+
+// Probes every host on the three camera HTTP ports in parallel. Hikvision is
+// tried before Dahua on the same port; a connection refusal returns quickly
+// thanks to the bounded connect in brand_http.cpp.
+std::vector<BrandScanHit> ProbeBrandHosts(const std::vector<std::string>& hosts,
+                                          const std::string& username,
+                                          const std::string& password) {
+  std::vector<BrandScanHit> hits;
+  if (hosts.empty())
+    return hits;
+  static constexpr int kPorts[] = {80, 8000, 8080};
+  const size_t jobs = hosts.size() * 3;
+  std::atomic<size_t> next{0};
+  std::mutex mutex;
+  const size_t thread_count = std::min<size_t>(32, std::max<size_t>(1, jobs / 8));
+  std::vector<std::thread> workers;
+  workers.reserve(thread_count);
+  for (size_t worker = 0; worker < thread_count; ++worker) {
+    workers.emplace_back([&] {
+      while (true) {
+        const size_t job = next.fetch_add(1, std::memory_order_relaxed);
+        if (job >= jobs)
+          break;
+        const std::string& ip = hosts[job / 3];
+        const int port = kPorts[job % 3];
+        BrandDeviceInfo info;
+        std::string probe_error;
+        if (ProbeHikvisionDevice(ip, port, username, password, &info, &probe_error)) {
+          std::lock_guard<std::mutex> lock(mutex);
+          hits.push_back(BrandScanHit{ip, port, "hikvision", info});
+        } else if (ProbeDahuaDevice(ip, port, username, password, &info, &probe_error)) {
+          std::lock_guard<std::mutex> lock(mutex);
+          hits.push_back(BrandScanHit{ip, port, "dahua", info});
+        }
+      }
+    });
+  }
+  for (auto& worker : workers)
+    worker.join();
+  std::sort(hits.begin(), hits.end(), [](const BrandScanHit& left, const BrandScanHit& right) {
+    if (left.ip != right.ip)
+      return left.ip < right.ip;
+    return left.port < right.port;
+  });
+  return hits;
+}
+
+// Scan merging is keyed by MAC first, then serial number, then IP. The key is
+// lower-cased alphanumerics so "44:19:B6" and "44-19-b6" compare equal.
+std::string ScanKey(const std::string& value) {
+  std::string key;
+  key.reserve(value.size());
+  for (const char c : value) {
+    if (std::isalnum(static_cast<unsigned char>(c)))
+      key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  }
+  return key;
+}
+
+std::string ScanString(const json& entry, const char* key) {
+  const auto it = entry.find(key);
+  if (it == entry.end() || !it->is_string())
+    return {};
+  return it->get<std::string>();
+}
+
+void ScanSetIfEmpty(json* entry, const char* key, const std::string& value) {
+  if (value.empty())
+    return;
+  const auto it = entry->find(key);
+  if (it == entry->end() || !it->is_string() || it->get<std::string>().empty())
+    (*entry)[key] = value;
+}
+
+void ScanAddSource(json* entry, const std::string& source) {
+  if (source.empty())
+    return;
+  json sources = json::array();
+  if (entry->contains("sources") && (*entry)["sources"].is_array())
+    sources = (*entry)["sources"];
+  for (const auto& existing : sources) {
+    if (existing.is_string() && existing.get<std::string>() == source)
+      return;
+  }
+  sources.push_back(source);
+  std::sort(sources.begin(), sources.end(), [](const json& left, const json& right) {
+    static const std::array<const char*, 3> order = {"onvif", "sadp", "dahua"};
+    const auto rank = [](const json& value) {
+      const std::string text = value.is_string() ? value.get<std::string>() : "";
+      for (size_t i = 0; i < order.size(); ++i) {
+        if (text == order[i])
+          return i;
+      }
+      return order.size();
+    };
+    return rank(left) < rank(right);
+  });
+  (*entry)["sources"] = std::move(sources);
+}
+
+// `sources` is the protocol list; `source` keeps the legacy enrichment label
+// (onvif/sadp/dahua, or isapi/cgi for the opt-in HTTP sweep).
+void ScanAddIncomingSources(json* entry, const json& incoming) {
+  // Copy the list first: `entry` may be the same object as `incoming`.
+  std::vector<std::string> sources;
+  if (incoming.contains("sources") && incoming["sources"].is_array()) {
+    for (const auto& source : incoming["sources"]) {
+      if (source.is_string() && !source.get<std::string>().empty())
+        sources.push_back(source.get<std::string>());
+    }
+  }
+  if (!sources.empty()) {
+    for (const std::string& source : sources)
+      ScanAddSource(entry, source);
+    return;
+  }
+  ScanAddSource(entry, ScanString(incoming, "source"));
+}
+
+int ScanProtocolRank(const std::string& protocol) {
+  if (protocol == "hikvision" || protocol == "dahua")
+    return 1;
+  if (protocol == "onvif")
+    return 0;
+  return -1;
+}
+
+// Merges one protocol's view of a device into the result list. A camera found
+// by both ONVIF and SADP keeps the ONVIF xaddr but adopts the vendor protocol
+// and identity fields, exactly like the old brand scan did.
+void MergeScanEntry(std::vector<json>* entries, json incoming) {
+  const std::string mac = ScanKey(ScanString(incoming, "mac"));
+  const std::string serial = ScanKey(ScanString(incoming, "serial"));
+  const std::string ip = ScanString(incoming, "ip");
+  int match = -1;
+  const auto find_by = [&](const char* field, const std::string& key) {
+    if (key.empty())
+      return -1;
+    for (size_t i = 0; i < entries->size(); ++i) {
+      if (ScanKey(ScanString((*entries)[i], field)) == key)
+        return static_cast<int>(i);
+    }
+    return -1;
+  };
+  if (match < 0 && !mac.empty())
+    match = find_by("mac", mac);
+  if (match < 0 && !serial.empty())
+    match = find_by("serial", serial);
+  if (match < 0 && !ip.empty()) {
+    for (size_t i = 0; i < entries->size(); ++i) {
+      if (ScanString((*entries)[i], "ip") == ip) {
+        match = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  if (match < 0) {
+    ScanAddIncomingSources(&incoming, incoming);
+    entries->push_back(std::move(incoming));
+    return;
+  }
+
+  json& existing = (*entries)[static_cast<size_t>(match)];
+  const std::string incoming_protocol = ScanString(incoming, "protocol");
+  const std::string existing_protocol = ScanString(existing, "protocol");
+  const bool upgrade = ScanProtocolRank(incoming_protocol) > ScanProtocolRank(existing_protocol);
+  for (const char* field : {"ip", "xaddr", "mac", "serial", "firmware", "name", "model", "brand",
+                            "endpoint", "protocolHint"}) {
+    ScanSetIfEmpty(&existing, field, ScanString(incoming, field));
+  }
+  if (upgrade) {
+    existing["protocol"] = incoming_protocol;
+    existing["protocolHint"] = incoming_protocol;
+    if (!ScanString(incoming, "source").empty())
+      existing["source"] = ScanString(incoming, "source");
+    if (incoming.contains("httpPort"))
+      existing["httpPort"] = incoming["httpPort"];
+    if (incoming.contains("rtspPort"))
+      existing["rtspPort"] = incoming["rtspPort"];
+  }
+  ScanAddIncomingSources(&existing, incoming);
+}
+
+std::vector<std::string> SplitSettingList(const std::string& value) {
+  std::vector<std::string> items;
+  size_t start = 0;
+  while (start <= value.size()) {
+    const size_t comma = value.find(',', start);
+    std::string item =
+        value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front())))
+      item.erase(item.begin());
+    while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back())))
+      item.pop_back();
+    if (!item.empty())
+      items.push_back(std::move(item));
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
+  return items;
 }
 
 } // namespace
@@ -4717,6 +5062,144 @@ void App::BroadcastEvent(const json& event) {
   }
 }
 
+bool App::CreateStatusTicket(int64_t user_id, std::string* token, int64_t* expires_at,
+                             std::string* error) {
+  *token = RandomHex(24);
+  if (token->empty()) {
+    if (error)
+      *error = "cannot generate a status ticket";
+    return false;
+  }
+  *expires_at = NowSeconds() + 30;
+  std::lock_guard<std::mutex> lock(tickets_mutex_);
+  const int64_t now = NowSeconds();
+  for (auto it = tickets_.begin(); it != tickets_.end();) {
+    if (it->second.expires_at <= now)
+      it = tickets_.erase(it);
+    else
+      ++it;
+  }
+  StreamTicket ticket;
+  ticket.user_id = user_id;
+  ticket.expires_at = *expires_at;
+  ticket.status = true;
+  tickets_[*token] = ticket;
+  return true;
+}
+
+void App::BroadcastStatus(const json& message) {
+  if (!status_hub_)
+    return;
+  const std::string text = message.dump();
+  std::vector<std::shared_ptr<EventClient>> clients;
+  {
+    std::lock_guard<std::mutex> lock(status_hub_->mutex);
+    clients.reserve(status_hub_->clients.size());
+    for (const auto& [id, client] : status_hub_->clients) {
+      (void)id;
+      clients.push_back(client);
+    }
+  }
+  for (const auto& client : clients) {
+    web_.post([client, text] {
+      auto* connection = client->connection.load();
+      if (connection == nullptr || !connection->is_open())
+        return;
+      if (connection->send_text(text.data(), text.size()) != 0)
+        client->connection = nullptr;
+    });
+  }
+}
+
+// Runs on its own thread: one diff per second, and only changed channels are
+// sent. The channel rows themselves are also read by MonitorRun every three
+// seconds; this loop is the low-latency path for the UI.
+void App::StatusRun() {
+  int64_t last_ping_ms = 0;
+  while (!status_stop_.load()) {
+    size_t client_count = 0;
+    if (status_hub_) {
+      std::lock_guard<std::mutex> lock(status_hub_->mutex);
+      client_count = status_hub_->clients.size();
+    }
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    if (client_count == 0) {
+      // A client that reconnects pulls GET /api/v1/channels itself, then the
+      // next tick re-sends every row because the snapshot is empty.
+      last_status_snapshot_.clear();
+    } else {
+      std::string error;
+      const std::vector<ChannelRow> channels = LoadChannels(&error);
+      json items = json::array();
+      std::map<int64_t, std::string> snapshot;
+      for (const auto& channel : channels) {
+        StreamStatus main_status;
+        StreamStatus sub_status;
+        if (media_ && channel.enabled) {
+          main_status = media_->Status(channel.id, "main");
+          sub_status = media_->Status(channel.id, "sub");
+        } else {
+          main_status.state = "disabled";
+          sub_status.state = "disabled";
+        }
+        if (!channel.enabled) {
+          main_status.state = "disabled";
+          main_status.error.clear();
+          sub_status.state = "disabled";
+          sub_status.error.clear();
+        } else if (!channel.sub_enabled) {
+          sub_status.state = "disabled";
+          sub_status.error.clear();
+        }
+        json item = json{{"id", channel.id},
+                         {"name", channel.name},
+                         {"enabled", channel.enabled},
+                         {"mainState", main_status.state},
+                         {"mainError", main_status.error},
+                         {"subState", sub_status.state},
+                         {"subError", sub_status.error},
+                         {"lastOnlineAt", channel.last_online_at},
+                         {"lastOfflineAt", channel.last_offline_at}};
+        std::string serialised = item.dump();
+        const auto previous = last_status_snapshot_.find(channel.id);
+        if (previous == last_status_snapshot_.end() || previous->second != serialised)
+          items.push_back(std::move(item));
+        snapshot[channel.id] = std::move(serialised);
+      }
+      // Deleted channels simply disappear from the snapshot; clients learn
+      // about the deletion from their 30 s fallback refresh.
+      last_status_snapshot_ = std::move(snapshot);
+      if (!items.empty()) {
+        BroadcastStatus(json{{"type", "channel.status"},
+                             {"items", std::move(items)},
+                             {"ts", now_ms}});
+        last_ping_ms = now_ms;
+      } else if (now_ms - last_ping_ms >= 20000) {
+        BroadcastStatus(json{{"type", "ping"}, {"ts", now_ms}});
+        last_ping_ms = now_ms;
+      }
+    }
+    // At most one push per second, and never a busy loop when stopping.
+    for (int tick = 0; tick < 10 && !status_stop_.load(); ++tick)
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+
+void App::StartStatusPush() {
+  if (status_thread_.joinable())
+    return;
+  status_stop_ = false;
+  status_thread_ = std::thread([this] { StatusRun(); });
+}
+
+void App::StopStatusPush() {
+  status_stop_ = true;
+  if (status_thread_.joinable())
+    status_thread_.join();
+}
+
 bool App::VerifyRtspCredentials(const std::string& username, const std::string& password) {
   uvcpp::uvcpp_db_table table;
   uvcpp::uvcpp_db_params params;
@@ -5039,25 +5522,10 @@ void App::RegisterChannelRoutes() {
             const json watermark = body.contains("watermark") && body["watermark"].is_object()
                                        ? body["watermark"]
                                        : json::object();
-            // RTSP clients only need the stream URL. Derive a display name
-            // from the camera address or the URL instead of rejecting the
-            // request when the name was left blank.
-            if (name.empty()) {
-              std::string inferred = host;
-              if (inferred.empty() && !main_url.empty()) {
-                const size_t scheme = main_url.find("://");
-                size_t start = scheme == std::string::npos ? 0 : scheme + 3;
-                const size_t path = main_url.find('/', start);
-                const size_t at =
-                    main_url.rfind('@', path == std::string::npos ? main_url.size() : path);
-                if (at != std::string::npos && at >= start)
-                  start = at + 1;
-                const size_t end = main_url.find_first_of(":/?#", start);
-                inferred = main_url.substr(
-                    start, (end == std::string::npos ? main_url.size() : end) - start);
-              }
-              name = inferred.empty() ? "Camera" : inferred;
-            }
+            // A blank name is resolved from the device (ONVIF GetScopes,
+            // ISAPI deviceName, Dahua getMachineName) once credentials are
+            // available; the address is only a fallback.
+            const bool derive_name = name.empty();
             if (name.size() > 64) {
               SendError(resp, 400, "invalid_name", "channel name must be at most 64 characters");
               next();
@@ -5108,12 +5576,13 @@ void App::RegisterChannelRoutes() {
             const std::string ua = req.header("User-Agent", "");
             auto op = std::make_shared<OpResult>();
             RunWork(
-                [this, name, protocol, host, port, http_port, username, password, use_default,
-                 main_url, sub_url, sub_explicit, sub_enabled, enabled, group_id, brand, media,
-                 watermark, actor, ip, ua, op] {
+                [this, name, derive_name, protocol, host, port, http_port, username, password,
+                 use_default, main_url, sub_url, sub_explicit, sub_enabled, enabled, group_id,
+                 brand, media, watermark, actor, ip, ua, op] {
                   std::string resolved_main = main_url;
                   std::string resolved_sub = sub_url;
                   std::string resolved_brand = brand;
+                  std::string resolved_name = name;
                   bool resolved_sub_enabled = sub_enabled;
                   std::string resolved_username;
                   std::string resolved_password;
@@ -5156,7 +5625,59 @@ void App::RegisterChannelRoutes() {
                       resolved_sub_enabled = true;
                     if (resolved_brand.empty())
                       resolved_brand = info.manufacturer;
+                    if (derive_name && resolved_name.empty())
+                      resolved_name = !info.device_name.empty() ? info.device_name : info.model;
                   }
+                  if (derive_name && resolved_name.empty() && protocol == "onvif" &&
+                      !host.empty()) {
+                    // The stream URL came from the operator, so the identity
+                    // probe above did not run. Read the device name alone.
+                    OnvifInfo identity;
+                    std::string ignored;
+                    const std::string xaddr =
+                        "http://" + host + ":" + std::to_string(http_port) +
+                        "/onvif/device_service";
+                    if (ProbeOnvifIdentity(xaddr, resolved_username, resolved_password, &identity,
+                                           &ignored, 2))
+                      resolved_name = !identity.device_name.empty() ? identity.device_name
+                                                                    : identity.model;
+                  }
+                  if (derive_name && resolved_name.empty() &&
+                      (protocol == "hikvision" || protocol == "dahua") && !host.empty()) {
+                    BrandDeviceInfo brand_info;
+                    std::string ignored;
+                    const bool probed =
+                        protocol == "hikvision"
+                            ? ProbeHikvisionDevice(host, http_port, resolved_username,
+                                                   resolved_password, &brand_info, &ignored)
+                            : ProbeDahuaDevice(host, http_port, resolved_username,
+                                               resolved_password, &brand_info, &ignored);
+                    if (probed) {
+                      resolved_name = brand_info.name.empty() ? brand_info.model : brand_info.name;
+                      if (resolved_brand.empty())
+                        resolved_brand = brand_info.brand;
+                    }
+                  }
+                  if (derive_name && resolved_name.empty()) {
+                    // The camera exposed no name: fall back to the address
+                    // (or the host in the stream URL), then a generic label.
+                    std::string inferred = host;
+                    if (inferred.empty() && !resolved_main.empty()) {
+                      const size_t scheme = resolved_main.find("://");
+                      size_t start = scheme == std::string::npos ? 0 : scheme + 3;
+                      const size_t path = resolved_main.find('/', start);
+                      const size_t at = resolved_main.rfind(
+                          '@', path == std::string::npos ? resolved_main.size() : path);
+                      if (at != std::string::npos && at >= start)
+                        start = at + 1;
+                      const size_t end = resolved_main.find_first_of(":/?#", start);
+                      inferred = resolved_main.substr(
+                          start, (end == std::string::npos ? resolved_main.size() : end) - start);
+                    }
+                    resolved_name = inferred.empty() ? "Camera" : inferred;
+                  }
+                  if (resolved_name.size() > 64)
+                    resolved_name.resize(64);
                   if (resolved_sub_enabled && resolved_sub.empty())
                     resolved_sub_enabled = false;
                   const int64_t max_channels =
@@ -5200,7 +5721,7 @@ void App::RegisterChannelRoutes() {
                     return;
                   }
                   uvcpp::uvcpp_db_params params;
-                  params.add(name);
+                  params.add(resolved_name);
                   params.add(protocol);
                   params.add(host);
                   params.add(port);
@@ -5246,9 +5767,10 @@ void App::RegisterChannelRoutes() {
                     }
                   }
                   Audit("channel", "info", actor.username, ip, ua, "channel", std::to_string(id),
-                        "create", "success", "", json{{"name", name}}.dump());
+                        "create", "success", "", json{{"name", resolved_name}}.dump());
                   op->status = 201;
-                  op->data = json{{"id", id}, {"name", name}, {"groupId", group_id}};
+                  op->data =
+                      json{{"id", id}, {"name", resolved_name}, {"groupId", group_id}};
                 },
                 [this, op, &resp, next] {
                   if (op->ok && op->data.contains("id")) {
@@ -6421,34 +6943,319 @@ void App::RegisterLayoutRoutes() {
 }
 
 void App::RegisterOnvifRoutes() {
+  uvcpp::uvcpp_web_handler discover_handler =
+      [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+             uvcpp::uvcpp_web_next next) {
+        json body = json::parse(req.body_str(), nullptr, false);
+        if (body.is_discarded() || !body.is_object())
+          body = json::object();
+        const std::string subnet_raw = JsonString(body, "subnet");
+        const std::string subnet = NormaliseSubnet(subnet_raw);
+        if (!subnet_raw.empty() && subnet.empty()) {
+          SendError(resp, 400, "invalid_subnet", "subnet must contain three or four octets");
+          next();
+          return;
+        }
+        const std::string username = JsonString(body, "username");
+        const std::string password = JsonString(body, "password");
+        const bool use_default = JsonBool(body, "useDefaultCredentials", false);
+        auto op = std::make_shared<OpResult>();
+        RunWork(
+            [this, body, subnet, username, password, use_default, op] {
+              const auto started = std::chrono::steady_clock::now();
+              // Per-request overrides may sit at the top level or inside
+              // "scan"; both are accepted so existing clients keep working.
+              const json* scan_body = &body;
+              json scan_object = json::object();
+              if (body.contains("scan") && body["scan"].is_object()) {
+                scan_object = body["scan"];
+                scan_body = &scan_object;
+              }
+              const auto scan_bool = [&](const char* key, bool fallback) {
+                if (scan_body->contains(key)) {
+                  const auto& value = (*scan_body)[key];
+                  if (value.is_boolean())
+                    return value.get<bool>();
+                }
+                if (scan_body != &body && body.contains(key)) {
+                  const auto& value = body[key];
+                  if (value.is_boolean())
+                    return value.get<bool>();
+                }
+                return fallback;
+              };
+              const auto scan_int = [&](const char* key, int fallback) {
+                if (scan_body->contains(key)) {
+                  const auto& value = (*scan_body)[key];
+                  if (value.is_number_integer())
+                    return static_cast<int>(value.get<int64_t>());
+                }
+                if (scan_body != &body && body.contains(key)) {
+                  const auto& value = body[key];
+                  if (value.is_number_integer())
+                    return static_cast<int>(value.get<int64_t>());
+                }
+                return fallback;
+              };
+              const auto scan_list = [&](const char* key) {
+                std::vector<std::string> items;
+                const auto append = [&](const json& value) {
+                  if (value.is_string()) {
+                    for (auto& item : SplitSettingList(value.get<std::string>()))
+                      items.push_back(std::move(item));
+                  } else if (value.is_array()) {
+                    for (const auto& item : value) {
+                      if (item.is_string())
+                        items.push_back(item.get<std::string>());
+                    }
+                  }
+                };
+                if (scan_body->contains(key))
+                  append((*scan_body)[key]);
+                else if (scan_body != &body && body.contains(key))
+                  append(body[key]);
+                return items;
+              };
+
+              static constexpr const char* kDefaultSadpTargets =
+                  "239.255.255.250:37020,255.255.255.255:37020";
+              static constexpr const char* kDefaultDahuaTargets =
+                  "239.255.255.231:37810,266.0.0.100:22531";
+
+              ScanOptions options;
+              options.window_ms =
+                  scan_int("windowMs", static_cast<int>(GetSettingInt("scan.window_ms", 4000)));
+              options.onvif =
+                  scan_bool("onvif", GetSettingInt("scan.onvif", 1) != 0);
+              options.sadp = scan_bool("sadp", GetSettingInt("scan.sadp", 1) != 0);
+              options.dahua = scan_bool("dahua", GetSettingInt("scan.dahua", 1) != 0);
+              if (!options.onvif && !options.sadp && !options.dahua) {
+                op->ok = false;
+                op->status = 400;
+                op->code = "no_protocol_enabled";
+                op->message = "at least one of onvif, sadp or dahua must be enabled";
+                return;
+              }
+              options.sadp_targets = scan_list("sadpTargets");
+              if (options.sadp_targets.empty())
+                options.sadp_targets =
+                    SplitSettingList(GetSetting("scan.sadp_targets", kDefaultSadpTargets));
+              options.dahua_targets = scan_list("dahuaTargets");
+              if (options.dahua_targets.empty())
+                options.dahua_targets =
+                    SplitSettingList(GetSetting("scan.dahua_targets", kDefaultDahuaTargets));
+
+              ScanDiscoveryResult discovered = RunMultiProtocolDiscovery(options);
+
+              const auto xaddr_port = [](const std::string& xaddr) {
+                const size_t scheme = xaddr.find("://");
+                if (scheme == std::string::npos)
+                  return 80;
+                const size_t start = scheme + 3;
+                const size_t slash = xaddr.find('/', start);
+                const std::string authority = xaddr.substr(
+                    start, slash == std::string::npos ? std::string::npos : slash - start);
+                const size_t colon = authority.rfind(':');
+                if (colon == std::string::npos)
+                  return 80;
+                const int port = std::atoi(authority.c_str() + colon + 1);
+                return port > 0 && port <= 65535 ? port : 80;
+              };
+              const auto http_port_text = [](const json& entry, int fallback) {
+                const auto it = entry.find("httpPort");
+                if (it == entry.end() || !it->is_number_integer())
+                  return fallback;
+                return it->get<int>();
+              };
+
+              std::vector<json> entries;
+              for (const OnvifDevice& device : discovered.onvif_devices) {
+                if (device.ip.empty())
+                  continue;
+                const std::string name =
+                    !device.name.empty() ? device.name : device.hardware;
+                MergeScanEntry(
+                    &entries,
+                    json{{"ip", device.ip},
+                         {"xaddr", device.xaddr},
+                         {"endpoint", device.endpoint},
+                         {"scopes", device.scopes},
+                         {"protocol", "onvif"},
+                         {"protocolHint", "onvif"},
+                         {"httpPort", xaddr_port(device.xaddr)},
+                         {"rtspPort", 554},
+                         {"name", name},
+                         {"model", device.hardware},
+                         {"brand", ""},
+                         {"mac", ""},
+                         {"serial", ""},
+                         {"firmware", ""},
+                         {"source", "onvif"},
+                         {"sources", json::array({"onvif"})}});
+              }
+              for (const SadpDevice& device : discovered.sadp_devices) {
+                MergeScanEntry(
+                    &entries,
+                    json{{"ip", device.ip},
+                         {"xaddr", ""},
+                         {"protocol", "hikvision"},
+                         {"protocolHint", "hikvision"},
+                         {"httpPort", device.http_port},
+                         {"rtspPort", device.rtsp_port},
+                         {"name", device.description.empty() ? device.device_type
+                                                             : device.description},
+                         {"model", device.device_type},
+                         {"brand", "Hikvision"},
+                         {"mac", device.mac},
+                         {"serial", device.serial},
+                         {"firmware", device.firmware},
+                         {"source", "sadp"},
+                         {"sources", json::array({"sadp"})}});
+              }
+              for (const DahuaDevice& device : discovered.dahua_devices) {
+                MergeScanEntry(
+                    &entries,
+                    json{{"ip", device.ip},
+                         {"xaddr", ""},
+                         {"protocol", "dahua"},
+                         {"protocolHint", "dahua"},
+                         {"httpPort", device.http_port},
+                         {"rtspPort", device.rtsp_port},
+                         {"name", device.name.empty() ? device.device_type : device.name},
+                         {"model", device.device_type},
+                         {"brand", "Dahua"},
+                         {"mac", device.mac},
+                         {"serial", device.serial},
+                         {"firmware", device.version},
+                         {"source", "dahua"},
+                         {"sources", json::array({"dahua"})}});
+              }
+
+              // The old /24 HTTP sweep is opt-in now: SADP and DHDiscover
+              // find the same cameras without authenticating or touching 762
+              // ports per subnet.
+              if (JsonBool(body, "deepScan", false)) {
+                std::string resolved_user;
+                std::string resolved_pass;
+                std::string credential_error;
+                if (!ResolveCameraCredentials(use_default, username, password, &resolved_user,
+                                              &resolved_pass, &credential_error)) {
+                  op->ok = false;
+                  op->status = 400;
+                  op->code = "camera_defaults_missing";
+                  op->message = credential_error;
+                  return;
+                }
+                std::vector<std::string> hosts;
+                for (const json& entry : entries)
+                  hosts.push_back(ScanString(entry, "ip"));
+                const std::vector<std::string> prefixes =
+                    subnet.empty() ? LocalSubnetPrefixes()
+                                   : std::vector<std::string>{subnet};
+                for (const std::string& prefix : prefixes) {
+                  for (std::string& host : ExpandSubnet(prefix))
+                    hosts.push_back(std::move(host));
+                }
+                std::sort(hosts.begin(), hosts.end());
+                hosts.erase(std::unique(hosts.begin(), hosts.end()), hosts.end());
+                for (const BrandScanHit& hit : ProbeBrandHosts(hosts, resolved_user,
+                                                               resolved_pass)) {
+                  MergeScanEntry(
+                      &entries,
+                      json{{"ip", hit.ip},
+                           {"xaddr", ""},
+                           {"protocol", hit.protocol},
+                           {"protocolHint", hit.protocol},
+                           {"httpPort", hit.port},
+                           {"rtspPort", 554},
+                           {"name", hit.info.name.empty() ? hit.info.model : hit.info.name},
+                           {"model", hit.info.model},
+                           {"brand", hit.info.brand},
+                           {"mac", ""},
+                           {"serial", hit.info.serial},
+                           {"firmware", hit.info.firmware},
+                           {"source", hit.protocol == "hikvision" ? "isapi" : "cgi"},
+                           {"sources", json::array(
+                                           {hit.protocol == "hikvision" ? "sadp" : "dahua"})}});
+                }
+                for (json& entry : entries) {
+                  if (ScanString(entry, "protocol") != "onvif")
+                    continue;
+                  const std::string ip = ScanString(entry, "ip");
+                  CameraDetectResult detected;
+                  std::string detect_error;
+                  if (!DetectCamera(ip, http_port_text(entry, 80), resolved_user, resolved_pass,
+                                    "auto", &detected, &detect_error))
+                    continue;
+                  entry["protocol"] = detected.detected;
+                  entry["protocolHint"] = detected.detected;
+                  entry["httpPort"] = detected.http_port > 0 ? detected.http_port
+                                                             : http_port_text(entry, 80);
+                  entry["rtspPort"] = detected.rtsp_port;
+                  entry["name"] = detected.device_name.empty() ? detected.model
+                                                               : detected.device_name;
+                  entry["model"] = detected.model;
+                  entry["brand"] = detected.vendor;
+                  entry["source"] = detected.name_source;
+                }
+              }
+
+              std::sort(entries.begin(), entries.end(), [](const json& left, const json& right) {
+                const std::string left_ip = ScanString(left, "ip");
+                const std::string right_ip = ScanString(right, "ip");
+                if (left_ip != right_ip)
+                  return left_ip < right_ip;
+                return ScanString(left, "protocol") < ScanString(right, "protocol");
+              });
+              json items = json::array();
+              for (const json& entry : entries)
+                items.push_back(entry);
+
+              json tried = json::array();
+              bool any_sent = false;
+              std::string first_error;
+              for (const ScanProtocolStats& stats : discovered.stats) {
+                json entry = json{{"protocol", stats.protocol},
+                                  {"sent", stats.sent},
+                                  {"responses", stats.responses}};
+                if (!stats.error.empty()) {
+                  entry["error"] = stats.error;
+                  if (first_error.empty())
+                    first_error = stats.error;
+                }
+                if (stats.sent > 0)
+                  any_sent = true;
+                tried.push_back(std::move(entry));
+              }
+              if (!any_sent && items.empty() && !first_error.empty()) {
+                op->ok = false;
+                op->status = 502;
+                op->code = "discovery_failed";
+                op->message = first_error;
+                return;
+              }
+
+              const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count();
+              op->data = json{{"windowMs", discovered.window_ms},
+                              {"elapsedMs", elapsed_ms},
+                              {"devices", items},
+                              {"tried", tried}};
+              if (!discovered.warnings.empty())
+                op->data["warnings"] = discovered.warnings;
+              if (items.empty() && !first_error.empty())
+                op->data["message"] = first_error;
+            },
+            [op, &resp, next] {
+              SendOp(resp, *op);
+              next();
+            });
+      };
+
   web_.post("/api/v1/channels/discover",
-            Protected(
-                [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
-                       uvcpp::uvcpp_web_next next) {
-                  auto op = std::make_shared<OpResult>();
-                  RunWork(
-                      [op] {
-                        std::vector<OnvifDevice> devices;
-                        std::string error;
-                        if (!DiscoverOnvif(&devices, 3000, &error)) {
-                          op->ok = false;
-                          op->status = 502;
-                          op->code = "discovery_failed";
-                          op->message = error;
-                          return;
-                        }
-                        json items = json::array();
-                        for (const auto& device : devices) {
-                          items.push_back(json{{"xaddr", device.xaddr}, {"ip", device.ip}});
-                        }
-                        op->data = json{{"devices", items}};
-                      },
-                      [op, &resp, next] {
-                        SendOp(resp, *op);
-                        next();
-                      });
-                },
-                "channel.manage"));
+            Protected(discover_handler, "channel.manage"));
+  web_.post("/api/v1/channels/scan", Protected(discover_handler, "channel.manage"));
 
   web_.post("/api/v1/channels/onvif/probe",
             Protected(
@@ -6502,7 +7309,10 @@ void App::RegisterOnvifRoutes() {
                         op->data = json{{"device", json{{"manufacturer", info.manufacturer},
                                                         {"model", info.model},
                                                         {"firmware", info.firmware},
-                                                        {"serial", info.serial}}},
+                                                        {"serial", info.serial},
+                                                        {"deviceName", info.device_name}}},
+                                        {"deviceName", info.device_name},
+                                        {"nameSource", info.device_name.empty() ? "" : "onvif"},
                                         {"profiles", profiles}};
                       },
                       [op, &resp, next] {
@@ -6523,95 +7333,100 @@ void App::RegisterOnvifRoutes() {
                     return;
                   }
                   const std::string host = JsonString(body, "host");
-                  const int port = static_cast<int>(JsonInt(body, "httpPort", 80));
+                  // `port` is the new name; keep `httpPort` for callers that
+                  // predate the multi-protocol endpoint. Zero means "probe the
+                  // standard set" (80, 8080, 8000 / 554 for RTSP).
+                  int port = static_cast<int>(JsonInt(body, "port", 0));
+                  if (port == 0)
+                    port = static_cast<int>(JsonInt(body, "httpPort", 0));
                   const std::string username = JsonString(body, "username");
                   const std::string password = JsonString(body, "password");
                   const bool use_default = JsonBool(body, "useDefaultCredentials", false);
-                  const std::string preferred = JsonString(body, "brand");
-                  if (host.empty() || port < 1 || port > 65535) {
-                    SendError(resp, 400, "invalid_host", "host and a valid httpPort are required");
+                  std::string protocol = JsonString(body, "protocol", "onvif");
+                  if (!body.contains("protocol") && body.contains("brand")) {
+                    // Older clients sent a brand instead of a protocol.
+                    protocol = JsonString(body, "brand", "onvif");
+                  }
+                  if (host.empty() || port < 0 || port > 65535) {
+                    SendError(resp, 400, "invalid_host",
+                              "host and a valid port are required");
                     next();
                     return;
                   }
                   auto op = std::make_shared<OpResult>();
                   RunWork(
-                      [this, host, port, username, password, use_default, preferred, op] {
-                        std::string onvif_error;
-                        std::string brand_error;
+                      [this, host, port, username, password, use_default, protocol, op] {
                         std::string resolved_user;
                         std::string resolved_pass;
+                        std::string credential_error;
                         if (!ResolveCameraCredentials(use_default, username, password,
                                                       &resolved_user, &resolved_pass,
-                                                      &onvif_error)) {
+                                                      &credential_error)) {
                           op->ok = false;
                           op->status = 400;
                           op->code = "camera_defaults_missing";
-                          op->message = onvif_error;
+                          op->message = credential_error;
                           return;
                         }
-                        const std::string preferred_lower = [&preferred] {
-                          std::string value = preferred;
-                          for (char& c : value)
-                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                          return value;
-                        }();
-
-                        const auto try_onvif = [&]() {
-                          OnvifInfo info;
-                          const std::string xaddr = "http://" + host + ":" + std::to_string(port) +
-                                                    "/onvif/device_service";
-                          if (!ProbeOnvif(xaddr, resolved_user, resolved_pass, &info,
-                                          &onvif_error) ||
-                              info.profiles.empty()) {
-                            if (onvif_error.empty())
-                              onvif_error = "the camera did not return usable ONVIF profiles";
-                            return false;
-                          }
-                          const OnvifProfile& first = info.profiles.front();
-                          const bool has_sub = info.profiles.size() > 1;
-                          const std::string name = !first.name.empty()
-                                                       ? first.name
-                                                       : (info.model.empty() ? host : info.model);
-                          op->data = json{{"protocol", "onvif"},
-                                          {"name", name},
-                                          {"model", info.model},
-                                          {"brand", info.manufacturer},
-                                          {"mainUrl", first.stream_uri},
-                                          {"subUrl", has_sub ? info.profiles[1].stream_uri : ""},
-                                          {"subEnabled", has_sub},
-                                          {"eventsEnabled", true},
-                                          {"httpPort", port}};
-                          return true;
-                        };
-
-                        const auto try_brand = [&]() {
-                          BrandDeviceInfo info;
-                          if (!ProbeBrandHttp(host, port, resolved_user, resolved_pass,
-                                              preferred_lower, &info, &brand_error))
-                            return false;
-                          op->data = json{{"protocol", info.protocol},
-                                          {"name", info.name.empty() ? info.model : info.name},
-                                          {"model", info.model},
-                                          {"brand", info.brand},
-                                          {"mainUrl", ""},
-                                          {"subUrl", ""},
-                                          {"subEnabled", true},
-                                          {"eventsEnabled", true},
-                                          {"httpPort", port}};
-                          return true;
-                        };
-
-                        const bool brand_first =
-                            preferred_lower == "hikvision" || preferred_lower == "dahua";
-                        if ((brand_first && (try_brand() || try_onvif())) ||
-                            (!brand_first && (try_onvif() || try_brand())))
+                        CameraDetectResult result;
+                        std::string detect_error;
+                        const bool found =
+                            DetectCamera(host, port, resolved_user, resolved_pass, protocol,
+                                         &result, &detect_error);
+                        json attempts = json::array();
+                        for (const auto& attempt : result.tried) {
+                          attempts.push_back(json{{"protocol", attempt.protocol},
+                                                  {"port", attempt.port},
+                                                  {"ok", attempt.ok},
+                                                  {"error", attempt.error}});
+                        }
+                        if (!found || result.detected.empty()) {
+                          // Detection completed but nothing answered. Return a
+                          // normal result so the UI can render every attempt
+                          // instead of a single generic error string.
+                          op->data = json{{"detected", ""},
+                                          {"protocol", ""},
+                                          {"httpPort", result.http_port},
+                                          {"rtspPort", result.rtsp_port},
+                                          {"tried", attempts},
+                                          {"message", detect_error.empty()
+                                                          ? "no supported camera protocol answered"
+                                                          : detect_error}};
                           return;
-
-                        op->ok = false;
-                        op->status = 404;
-                        op->code = "detect_failed";
-                        op->message =
-                            "camera detection failed: " + onvif_error + "; " + brand_error;
+                        }
+                        const std::string main_url =
+                            result.stream_uris.empty() ? "" : result.stream_uris.front();
+                        const std::string sub_url =
+                            result.stream_uris.size() > 1 ? result.stream_uris[1] : "";
+                        const std::string display_name =
+                            !result.device_name.empty()
+                                ? result.device_name
+                                : (!result.model.empty() ? result.model : host);
+                        json uris = json::array();
+                        for (const auto& uri : result.stream_uris)
+                          uris.push_back(uri);
+                        op->data = json{
+                            {"detected", result.detected},
+                            {"protocol", result.detected},
+                            {"httpPort", result.http_port},
+                            {"rtspPort", result.rtsp_port},
+                            {"vendor", result.vendor},
+                            {"brand", result.vendor},
+                            {"model", result.model},
+                            {"firmware", result.firmware},
+                            {"serial", result.serial},
+                            {"deviceName", result.device_name},
+                            {"name", display_name},
+                            {"nameSource", result.name_source},
+                            {"mainUrl", main_url},
+                            {"subUrl", sub_url},
+                            {"subEnabled", result.detected == "onvif" ? !sub_url.empty() : true},
+                            {"eventsEnabled", result.detected == "onvif" ||
+                                                  result.detected == "hikvision" ||
+                                                  result.detected == "dahua"},
+                            {"streamUris", uris},
+                            {"tried", attempts},
+                        };
                       },
                       [op, &resp, next] {
                         SendOp(resp, *op);
@@ -6645,6 +7460,32 @@ void App::RegisterStreamRoutes() {
                   next();
                 },
                 "alert.view"));
+
+  // Channel-state ticket for /ws/status. Any authenticated account may read
+  // the state it can already see on the dashboard, preview and playback pages.
+  web_.post("/api/v1/status/ticket",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  const UserContext user = UserFromRequest(req);
+                  auto op = std::make_shared<OpResult>();
+                  std::string token;
+                  int64_t expires_at = 0;
+                  std::string error;
+                  if (!CreateStatusTicket(user.id, &token, &expires_at, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "ticket_failed";
+                    op->message = error;
+                  } else {
+                    op->data = json{{"ticket", token},
+                                    {"wsPath", "/ws/status?ticket=" + token},
+                                    {"expiresAt", expires_at}};
+                  }
+                  SendOp(resp, *op);
+                  next();
+                },
+                ""));
 
   web_.post("/api/v1/streams/ticket",
             Protected(
@@ -6828,6 +7669,38 @@ void App::RegisterStreamRoutes() {
       hub->clients.erase(client->id);
     });
     const std::string hello = json{{"type", "hello"}, {"version", UVNVR_VERSION}}.dump();
+    connection->send_text(hello.data(), hello.size());
+  });
+
+  web_.websocket("/ws/status", [this](uvcpp::uvcpp_web_ws_request& ws) {
+    const std::string* ticket_value = ws.query("ticket");
+    StreamTicket ticket;
+    if (ticket_value == nullptr || !ValidateStreamTicket(*ticket_value, &ticket) ||
+        !ticket.status) {
+      if (auto* connection = ws.connection()) {
+        const std::string message = R"({"error":"invalid_ticket"})";
+        connection->send_text(message.data(), message.size());
+        connection->close();
+      }
+      return;
+    }
+    auto* connection = ws.connection();
+    if (connection == nullptr)
+      return;
+    const std::shared_ptr<EventHub> hub = status_hub_;
+    auto client = std::make_shared<EventClient>();
+    client->id = hub->next_id++;
+    client->connection = connection;
+    {
+      std::lock_guard<std::mutex> lock(hub->mutex);
+      hub->clients[client->id] = client;
+    }
+    connection->on_close([hub, client](uvcpp::ws_close_code, const std::string&) {
+      client->connection = nullptr;
+      std::lock_guard<std::mutex> lock(hub->mutex);
+      hub->clients.erase(client->id);
+    });
+    const std::string hello = json{{"type", "hello"}, {"interval", 1}}.dump();
     connection->send_text(hello.data(), hello.size());
   });
 
@@ -8032,6 +8905,7 @@ void App::RegisterRecordingRoutes() {
 }
 
 App::~App() {
+  StopStatusPush();
   StopMonitors();
   if (onvif_events_)
     onvif_events_->Stop();

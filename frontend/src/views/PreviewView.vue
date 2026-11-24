@@ -5,11 +5,13 @@ import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import LiveTile, { type LiveChannel } from '@/components/LiveTile.vue'
 import { api } from '@/api/client'
+import { useChannelStatusStore } from '@/stores/channelStatus'
 
 defineOptions({ name: 'PreviewView' })
 
 const { t } = useI18n()
 const router = useRouter()
+const channelStatus = useChannelStatusStore()
 
 interface ChannelGroup {
   id: number
@@ -365,6 +367,21 @@ function reloadAll() {
 let channelTimer: number | undefined
 let channelsFingerprint = ''
 
+// Mutating the existing objects keeps every LiveTile (and its <video>) alive;
+// only the status dot and overlay bindings change.
+function applyLiveStatus() {
+  for (const channel of channels.value) {
+    const item = channelStatus.items[channel.id]
+    if (!item) continue
+    channel.mainState = item.mainState
+    channel.mainError = item.mainError
+    channel.subState = item.subState
+    channel.subError = item.subError
+    if (item.name !== undefined) channel.name = item.name
+    if (item.enabled !== undefined) channel.enabled = item.enabled
+  }
+}
+
 async function loadChannels() {
   error.value = ''
   try {
@@ -381,6 +398,7 @@ async function loadChannels() {
       channels.value = channelRows
     }
     groups.value = groupRows
+    applyLiveStatus()
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   } finally {
@@ -394,10 +412,22 @@ watch(
   { deep: true },
 )
 
+watch(() => channelStatus.seq, applyLiveStatus)
+watch(
+  () => channelStatus.resync,
+  () => {
+    if (channelStatus.resync > 0) void loadChannels()
+  },
+)
+
 onMounted(() => {
   void loadLayouts()
   void loadChannels()
-  channelTimer = window.setInterval(loadChannels, 10_000)
+  // Fallback only. While the status socket is connected the 1 s diff stream
+  // drives the dots without replacing the channel objects.
+  channelTimer = window.setInterval(() => {
+    if (!channelStatus.connected) void loadChannels()
+  }, 30_000)
 })
 
 onBeforeUnmount(() => {

@@ -54,7 +54,7 @@ header for cookie-authenticated mutating requests.
 | PUT/DELETE | `/api/v1/channel-groups/{id}` | channel.manage |
 | GET/POST | `/api/v1/layouts` | preview.view |
 | PUT/DELETE | `/api/v1/layouts/{id}` | preview.view |
-| POST | `/api/v1/channels/discover` | channel.manage |
+| POST | `/api/v1/channels/discover`, `/api/v1/channels/scan` | channel.manage |
 | POST | `/api/v1/channels/onvif/probe` | channel.manage |
 | GET/PUT | `/api/v1/channels/{id}/encoder` | channel.manage |
 | POST | `/api/v1/channels/{id}/reconnect` | channel.manage |
@@ -366,6 +366,43 @@ channel's `media.encoder`.
 Responses normalize `H.264`/`H.265` to `H264`/`H265`. Brand encoders do not
 expose quality (`quality` is 0 and ignored); only the main stream is changed.
 Unsupported protocols return `400 unsupported_protocol`.
+
+## LAN discovery
+
+`POST /api/v1/channels/discover` (alias: `POST /api/v1/channels/scan`) runs three
+read-only probes concurrently and returns when the configured window expires:
+
+| Protocol | Transport |
+|---|---|
+| ONVIF WS-Discovery | UDP multicast `239.255.255.250:3702` |
+| Hikvision SADP | UDP multicast `239.255.255.250:37020`, `255.255.255.255:37020` and each IPv4 interface's directed broadcast |
+| Dahua DHDiscover | UDP multicast `239.255.255.231:37810` (plus the documented `266.0.0.100:22531`, which is skipped because it is not a valid IPv4 address) |
+
+The request body is optional. `windowMs` (default 4000), `onvif`, `sadp` and
+`dahua` override the stored `scan.*` settings for one call; `sadpTargets` and
+`dahuaTargets` accept comma-separated `address:port` lists. `deepScan: true`
+adds the legacy authenticated HTTP sweep of the local `/24`.
+
+```json
+{
+  "windowMs": 4000,
+  "elapsedMs": 4012,
+  "devices": [{
+    "ip": "172.32.228.112", "mac": "44:19:B6:00:00:00", "serial": "DS-2CD...",
+    "protocol": "hikvision", "protocolHint": "hikvision", "source": "sadp",
+    "sources": ["sadp"], "name": "IP CAMERA", "model": "DS-2CD...",
+    "firmware": "V5.7.3", "httpPort": 80, "rtspPort": 554, "xaddr": ""
+  }],
+  "tried": [{"protocol": "onvif", "sent": 6, "responses": 0},
+            {"protocol": "sadp", "sent": 3, "responses": 1}]
+}
+```
+
+Devices seen by more than one protocol are merged by MAC, then serial number,
+then IP; `sources` lists every protocol that answered. **Multicast does not
+cross routers or VLANs**: a camera on another subnet is only found if the
+recorder has an interface on that subnet or the UDP broadcast is relayed.
+Discovery never activates or reprovisions a camera.
 
 ## Brand detection
 

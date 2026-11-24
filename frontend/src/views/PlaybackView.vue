@@ -7,6 +7,7 @@ import PlaybackPlayer from '@/components/PlaybackPlayer.vue'
 import { api, getCsrfToken } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useChannelStatusStore } from '@/stores/channelStatus'
 
 defineOptions({ name: 'PlaybackView' })
 
@@ -50,6 +51,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
+const channelStatus = useChannelStatusStore()
 const canDownload = computed(() => auth.hasPermission('playback.download'))
 const canMaintain = computed(() => app.server?.maintenance === true)
 const channels = ref<Channel[]>([])
@@ -633,10 +635,48 @@ watch(day, () => {
   void loadRecordings()
 })
 
+// The selector only needs name/online state. Status frames mutate the
+// existing channel objects, so the open player and its list are untouched.
+function applyLiveStatus() {
+  for (const channel of channels.value) {
+    const item = channelStatus.items[channel.id]
+    if (!item) continue
+    channel.mainState = item.mainState
+    channel.lastStatus = item.mainState === 'online' ? 'online' : channel.lastStatus
+    if (item.name !== undefined) channel.name = item.name
+  }
+}
+
+async function refreshChannels() {
+  const rows = await api<Channel[]>('/api/v1/channels')
+  const current = new Map(channels.value.map((channel) => [channel.id, channel]))
+  channels.value = rows.map((row) => {
+    const existing = current.get(row.id)
+    if (existing) {
+      Object.assign(existing, row)
+      return existing
+    }
+    return row
+  })
+  applyLiveStatus()
+}
+
+let channelTimer: number | undefined
+watch(() => channelStatus.seq, applyLiveStatus)
+watch(
+  () => channelStatus.resync,
+  () => {
+    if (channelStatus.resync > 0) {
+      void refreshChannels().catch(() => undefined)
+    }
+  },
+)
+
 onBeforeUnmount(() => {
   loadSeq++
   if (reverseTimer !== undefined) window.clearInterval(reverseTimer)
   if (recordingsTimer !== undefined) window.clearInterval(recordingsTimer)
+  if (channelTimer !== undefined) window.clearInterval(channelTimer)
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
   document.removeEventListener('keydown', onDocumentKeydown)
 })
@@ -644,6 +684,7 @@ onBeforeUnmount(() => {
 onMounted(async () => {
   try {
     channels.value = await api<Channel[]>('/api/v1/channels')
+    applyLiveStatus()
     if (channels.value.length > 0) {
       const requested = Number(route.query.channelId)
       const match = channels.value.find((channel) => channel.id === requested)
@@ -657,6 +698,11 @@ onMounted(async () => {
         }
       }, 5000)
     }
+    // Fallback for the channel selector only; recordings keep their own 5 s
+    // refresh. Quiet while the status socket is connected.
+    channelTimer = window.setInterval(() => {
+      if (!channelStatus.connected) void refreshChannels().catch(() => undefined)
+    }, 30_000)
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : t('common.error')
   }

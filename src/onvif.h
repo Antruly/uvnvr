@@ -9,6 +9,12 @@ namespace uvnvr {
 struct OnvifDevice {
   std::string xaddr;
   std::string ip;
+  // Values published in the ProbeMatch: the endpoint reference, the raw
+  // scopes list, and the decoded name/hardware scopes when present.
+  std::string endpoint;
+  std::string scopes;
+  std::string name;
+  std::string hardware;
 };
 
 struct OnvifProfile {
@@ -22,10 +28,23 @@ struct OnvifInfo {
   std::string model;
   std::string firmware;
   std::string serial;
+  // Display name taken from the `name=` scope returned by GetScopes, or the
+  // model when the camera exposes no name scope.
+  std::string device_name;
   std::vector<OnvifProfile> profiles;
 };
 
-bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::string* error);
+// Sends Probe from every local IPv4 interface and collects ProbeMatch replies
+// for the whole window. `probes_sent` and `responses` are optional counters for
+// the scan diagnostics.
+bool DiscoverOnvif(std::vector<OnvifDevice>* devices, int timeout_ms, std::string* error,
+                   int* probes_sent = nullptr, int* responses = nullptr);
+// Reads GetDeviceInformation and GetScopes only. This is the cheap probe used
+// by protocol detection: a camera that answers identity but fails the media
+// service is still identified as ONVIF.
+bool ProbeOnvifIdentity(const std::string& xaddr, const std::string& username,
+                        const std::string& password, OnvifInfo* info, std::string* error,
+                        int timeout_seconds = 2);
 bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std::string& password,
                 OnvifInfo* info, std::string* error);
 

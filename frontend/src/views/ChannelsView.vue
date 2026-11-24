@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/AppIcon.vue'
 import { api, ApiError } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { useChannelStatusStore } from '@/stores/channelStatus'
 
 defineOptions({ name: 'ChannelsView' })
 
@@ -37,6 +38,27 @@ interface Channel {
 interface OnvifDevice {
   xaddr: string
   ip: string
+  protocol?: string
+  protocolHint?: string
+  httpPort?: number
+  rtspPort?: number
+  name?: string
+  model?: string
+  brand?: string
+  source?: string
+  sources?: string[]
+  mac?: string
+  serial?: string
+  firmware?: string
+  endpoint?: string
+  scopes?: string
+}
+
+interface DetectAttempt {
+  protocol: string
+  port: number
+  ok: boolean
+  error: string
 }
 
 interface OnvifProfile {
@@ -51,7 +73,10 @@ interface OnvifProbeResult {
     model: string
     firmware: string
     serial: string
+    deviceName?: string
   }
+  deviceName?: string
+  nameSource?: string
   profiles: OnvifProfile[]
 }
 
@@ -72,6 +97,7 @@ interface ChannelOnboarding {
 
 const { t } = useI18n()
 const auth = useAuthStore()
+const channelStatus = useChannelStatusStore()
 const canSnapshot = computed(() => auth.hasPermission('api.snapshot'))
 const failedThumbs = ref<Set<number>>(new Set())
 const thumbVersion = reactive<Record<number, number>>({})
@@ -122,6 +148,7 @@ const scan = reactive({
   result: null as OnvifProbeResult | null,
 })
 const detecting = ref(false)
+const detectResult = ref<DetectResult | null>(null)
 const saving = ref(false)
 // A plain RTSP URL needs nothing else; ONVIF uses host/HTTP port plus the
 // profile URIs, and Hikvision/Dahua generate the RTSP path from the host.
@@ -320,15 +347,24 @@ async function applyEncoder() {
 }
 
 interface DetectResult {
+  detected: string
   protocol: string
   name: string
   model: string
   brand: string
+  vendor?: string
+  firmware?: string
+  deviceName?: string
+  nameSource?: string
   mainUrl: string
   subUrl: string
   subEnabled: boolean
   eventsEnabled: boolean
   httpPort: number
+  rtspPort?: number
+  streamUris?: string[]
+  tried?: DetectAttempt[]
+  message?: string
 }
 
 function onvifHttpPort(xaddr: string) {
@@ -348,7 +384,7 @@ function applyProbeResult(host: string, httpPort: number, result: OnvifProbeResu
   // Hikvision/Dahua RTSP template.
   Object.assign(modal, {
     groupId: 0,
-    name: profile?.name || result.device.model || host,
+    name: result.deviceName || result.device.deviceName || result.device.model || host,
     protocol: 'onvif',
     host,
     port: httpPort,
@@ -362,36 +398,70 @@ function applyProbeResult(host: string, httpPort: number, result: OnvifProbeResu
   })
 }
 
+function applyDetectResult(result: DetectResult) {
+  Object.assign(modal, {
+    protocol: result.protocol || 'onvif',
+    name: modal.name.trim() || result.deviceName || result.name || modal.host.trim(),
+    brand: result.vendor || result.brand,
+    port: result.rtspPort || 554,
+    httpPort: result.httpPort || (Number(modal.httpPort) || 80),
+    mainUrl: result.mainUrl || (result.protocol === 'rtsp' ? modal.mainUrl : ''),
+    subUrl: result.subUrl || (result.protocol === 'rtsp' ? modal.subUrl : ''),
+    subEnabled: result.subEnabled,
+    eventsEnabled: result.eventsEnabled,
+  })
+}
+
+function deviceKey(device: OnvifDevice) {
+  return device.xaddr || `${device.ip}:${device.httpPort ?? 80}:${device.protocol ?? 'onvif'}`
+}
+
+// The scan's protocol hint decides which transport the add flow uses; the
+// legacy `protocol` field remains for older servers.
+function deviceProtocol(device: OnvifDevice) {
+  return device.protocolHint || device.protocol || 'onvif'
+}
+
+function deviceSources(device: OnvifDevice) {
+  if (device.sources && device.sources.length > 0) return device.sources
+  return [deviceProtocol(device)]
+}
+
+function sourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    onvif: 'ONVIF',
+    sadp: 'SADP',
+    dahua: 'Dahua',
+    hikvision: 'Hikvision',
+  }
+  return labels[source] ?? source.toUpperCase()
+}
+
 async function detectFromModal() {
   if (!modal.host.trim()) return
   detecting.value = true
   error.value = ''
+  detectResult.value = null
   try {
-    const preferred = modal.protocol === 'hikvision' || modal.protocol === 'dahua'
-      ? modal.protocol
-      : ''
     const result = await api<DetectResult>('/api/v1/channels/detect', {
       method: 'POST',
       body: JSON.stringify({
         host: modal.host.trim(),
-        httpPort: Number(modal.httpPort) || 80,
+        // Zero asks the server to probe 80, 8080 and 8000; a value the
+        // operator typed is tried first and then the standard ports.
+        port: Number(modal.httpPort) > 0 ? Number(modal.httpPort) : 0,
         username: modal.username,
         password: modal.password,
-        brand: preferred,
+        protocol: 'auto',
         useDefaultCredentials: formUseSavedCredentials.value,
       }),
     })
-    Object.assign(modal, {
-      protocol: result.protocol,
-      name: result.name || modal.name || result.model,
-      brand: result.brand,
-      port: result.protocol === 'onvif' ? 80 : 554,
-      httpPort: result.httpPort ?? (Number(modal.httpPort) || 80),
-      mainUrl: result.mainUrl,
-      subUrl: result.subUrl,
-      subEnabled: result.subEnabled,
-      eventsEnabled: result.eventsEnabled,
-    })
+    detectResult.value = result
+    if (!result.detected) {
+      error.value = result.message || t('channels.detectNone')
+      return
+    }
+    applyDetectResult(result)
     flash(t('channels.detected'))
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : t('common.error')
@@ -401,53 +471,72 @@ async function detectFromModal() {
 }
 
 async function addDevice(device: OnvifDevice): Promise<boolean> {
-  if (scanStatus[device.xaddr] === 'added' || scanStatus[device.xaddr] === 'adding') return false
+  const key = deviceKey(device)
+  if (scanStatus[key] === 'added' || scanStatus[key] === 'adding') return false
   if (channels.value.some((channel) => channel.host === device.ip)) {
-    scanStatus[device.xaddr] = 'failed'
-    scanErrors[device.xaddr] = t('channels.importDuplicate')
+    scanStatus[key] = 'failed'
+    scanErrors[key] = t('channels.importDuplicate')
     return false
   }
-  scanStatus[device.xaddr] = 'adding'
-  scan.probing = device.xaddr
+  scanStatus[key] = 'adding'
+  scan.probing = key
   try {
-    const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
-      method: 'POST',
-      body: JSON.stringify({
-        xaddr: device.xaddr,
-        username: scan.username,
-        password: scan.password,
-        useDefaultCredentials: useSavedCredentials.value,
-      }),
-    })
-    const profile = result.profiles[0]
-    const subProfile = result.profiles[1]
-    const httpPort = onvifHttpPort(device.xaddr)
+    const isOnvif = Boolean(device.xaddr) && deviceProtocol(device) === 'onvif'
     const payload: Record<string, unknown> = {
-      name: profile?.name || result.device.model || device.ip,
-      protocol: 'onvif',
       host: device.ip,
-      port: httpPort,
-      httpPort,
       username: scan.username,
       password: scan.password,
       useDefaultCredentials: useSavedCredentials.value,
-      mainUrl: profile?.streamUri ?? '',
-      subUrl: subProfile?.streamUri ?? '',
-      subEnabled: Boolean(subProfile),
       enabled: true,
-      brand: result.device.manufacturer,
       eventsEnabled: true,
       watermark: { text: '', position: 'bottom-right' },
     }
+    if (isOnvif) {
+      const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+        method: 'POST',
+        body: JSON.stringify({
+          xaddr: device.xaddr,
+          username: scan.username,
+          password: scan.password,
+          useDefaultCredentials: useSavedCredentials.value,
+        }),
+      })
+      const profile = result.profiles[0]
+      const subProfile = result.profiles[1]
+      const httpPort = onvifHttpPort(device.xaddr)
+      Object.assign(payload, {
+        name: result.deviceName || result.device.deviceName || device.name || result.device.model ||
+          device.ip,
+        protocol: 'onvif',
+        port: httpPort,
+        httpPort,
+        mainUrl: profile?.streamUri ?? '',
+        subUrl: subProfile?.streamUri ?? '',
+        subEnabled: Boolean(subProfile),
+        brand: result.device.manufacturer,
+      })
+    } else {
+      Object.assign(payload, {
+        // Vendor HTTP detection already found the device; the server derives
+        // the vendor RTSP URL from host/port, so no stream URL is sent.
+        name: device.name || device.model || device.ip,
+        protocol: deviceProtocol(device),
+        port: device.rtspPort || 554,
+        httpPort: device.httpPort || 80,
+        mainUrl: '',
+        subUrl: '',
+        subEnabled: true,
+        brand: device.brand || '',
+      })
+    }
     await api('/api/v1/channels', { method: 'POST', body: JSON.stringify(payload) })
-    scanStatus[device.xaddr] = 'added'
-    delete scanErrors[device.xaddr]
-    scanSelection.value = new Set([...scanSelection.value].filter((key) => key !== device.xaddr))
+    scanStatus[key] = 'added'
+    delete scanErrors[key]
+    scanSelection.value = new Set([...scanSelection.value].filter((entry) => entry !== key))
     return true
   } catch (caught) {
-    scanStatus[device.xaddr] = 'failed'
-    scanErrors[device.xaddr] =
-      caught instanceof ApiError ? caught.message : t('common.error')
+    scanStatus[key] = 'failed'
+    scanErrors[key] = caught instanceof ApiError ? caught.message : t('common.error')
     return false
   } finally {
     scan.probing = ''
@@ -460,32 +549,33 @@ async function quickAdd(device: OnvifDevice) {
   if (await addDevice(device)) {
     flash(t('channels.created'))
     await load()
-  } else if (scanErrors[device.xaddr]) {
-    scanError.value = scanErrors[device.xaddr]
+  } else if (scanErrors[deviceKey(device)]) {
+    scanError.value = scanErrors[deviceKey(device)]
   }
 }
 
-function toggleDevice(xaddr: string) {
+function toggleDevice(key: string) {
   const next = new Set(scanSelection.value)
-  if (next.has(xaddr)) next.delete(xaddr)
-  else next.add(xaddr)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   scanSelection.value = next
 }
 
 function allDevicesSelected() {
-  return scan.devices.length > 0 && scan.devices.every((device) => scanSelection.value.has(device.xaddr))
+  return scan.devices.length > 0 && scan.devices.every((device) => scanSelection.value.has(deviceKey(device)))
 }
 
 function toggleAllDevices() {
   scanSelection.value = allDevicesSelected()
     ? new Set()
-    : new Set(scan.devices.map((device) => device.xaddr))
+    : new Set(scan.devices.map(deviceKey))
 }
 
 async function addSelected() {
   if (scanAdding.value) return
   const devices = scan.devices.filter(
-    (device) => scanSelection.value.has(device.xaddr) && scanStatus[device.xaddr] !== 'added',
+    (device) =>
+      scanSelection.value.has(deviceKey(device)) && scanStatus[deviceKey(device)] !== 'added',
   )
   if (devices.length === 0) return
   scanAdding.value = true
@@ -502,7 +592,10 @@ async function addSelected() {
   if (added > 0) scanNotice.value = t('channels.addSelectedDone', { count: added })
   if (failed > 0) {
     const detail = devices
-      .map((device) => (scanErrors[device.xaddr] ? `${device.ip}: ${scanErrors[device.xaddr]}` : ''))
+      .map((device) => {
+        const key = deviceKey(device)
+        return scanErrors[key] ? `${device.ip}: ${scanErrors[key]}` : ''
+      })
       .filter(Boolean)
       .slice(0, 4)
       .join('; ')
@@ -585,6 +678,37 @@ function stateClass(channel: Channel) {
   return 'danger'
 }
 
+// Merge by id so the rows (and their <tr> elements) keep their identity.
+// A status tick only mutates the fields it carries; this path is used for the
+// initial load, the post-reconnect alignment and the 30 s fallback.
+function mergeChannels(rows: Channel[]) {
+  const current = new Map(channels.value.map((channel) => [channel.id, channel]))
+  const merged = rows.map((row) => {
+    const existing = current.get(row.id)
+    if (existing) {
+      Object.assign(existing, row)
+      return existing
+    }
+    return row
+  })
+  channels.value = merged
+}
+
+function applyLiveStatus() {
+  for (const channel of channels.value) {
+    const item = channelStatus.items[channel.id]
+    if (!item) continue
+    channel.mainState = item.mainState
+    channel.mainError = item.mainError
+    channel.subState = item.subState
+    channel.subError = item.subError
+    if (item.name !== undefined) channel.name = item.name
+    if (item.enabled !== undefined) channel.enabled = item.enabled
+    if (item.lastOnlineAt !== undefined) channel.lastOnlineAt = item.lastOnlineAt
+    if (item.lastOfflineAt !== undefined) channel.lastOfflineAt = item.lastOfflineAt
+  }
+}
+
 async function load() {
   error.value = ''
   try {
@@ -592,8 +716,9 @@ async function load() {
       api<Channel[]>('/api/v1/channels'),
       api<ChannelGroup[]>('/api/v1/channel-groups'),
     ])
-    channels.value = channelRows
+    mergeChannels(channelRows)
     groups.value = groupRows
+    applyLiveStatus()
     try {
       onboarding.value = await api<ChannelOnboarding>('/api/v1/channels/onboarding')
     } catch {
@@ -606,8 +731,18 @@ async function load() {
   }
 }
 
+let fallbackTimer: number | undefined
+watch(() => channelStatus.seq, applyLiveStatus)
+watch(
+  () => channelStatus.resync,
+  () => {
+    if (channelStatus.resync > 0) void load()
+  },
+)
+
 function openCreate() {
   error.value = ''
+  detectResult.value = null
   formUseSavedCredentials.value = false
   if (atChannelLimit.value) {
     error.value = t('channels.limitReached', {
@@ -640,6 +775,7 @@ function openCreate() {
 
 function openEdit(channel: Channel) {
   error.value = ''
+  detectResult.value = null
   formUseSavedCredentials.value = false
   Object.assign(modal, {
     open: true,
@@ -691,7 +827,10 @@ async function save() {
     error.value = t('channels.hostRequired')
     return
   }
-  if (!modal.name.trim()) modal.name = defaultChannelName()
+  // ONVIF/Hikvision/Dahua channels are named by the server from the device
+  // (scope, ISAPI deviceName, getMachineName); plain URLs still get a name
+  // derived from the address so the list is never blank.
+  if (!modal.name.trim() && isUrlProtocol.value) modal.name = defaultChannelName()
   saving.value = true
   try {
     const payload: Record<string, unknown> = {
@@ -798,10 +937,15 @@ async function discover() {
   try {
     const result = await api<{ devices: OnvifDevice[] }>('/api/v1/channels/discover', {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify({
+        brandScan: true,
+        username: useSavedCredentials.value ? '' : scan.username,
+        password: useSavedCredentials.value ? '' : scan.password,
+        useDefaultCredentials: useSavedCredentials.value,
+      }),
     })
     scan.devices = result.devices
-    scanSelection.value = new Set(result.devices.map((device) => device.xaddr))
+    scanSelection.value = new Set(result.devices.map(deviceKey))
     Object.keys(scanStatus).forEach((key) => delete scanStatus[key])
     Object.keys(scanErrors).forEach((key) => delete scanErrors[key])
     scanError.value = ''
@@ -816,32 +960,78 @@ async function discover() {
   }
 }
 
+function selectHikvision() {
+  scanSelection.value = new Set(
+    scan.devices
+      .filter((device) => deviceProtocol(device) === 'hikvision' && scanStatus[deviceKey(device)] !== 'added')
+      .map(deviceKey),
+  )
+}
+
 async function probe(device: OnvifDevice) {
-  scan.probing = device.xaddr
+  const key = deviceKey(device)
+  scan.probing = key
   scan.result = null
   scanError.value = ''
   try {
-    scan.result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+    if (device.xaddr) {
+      const result = await api<OnvifProbeResult>('/api/v1/channels/onvif/probe', {
+        method: 'POST',
+        body: JSON.stringify({
+          xaddr: device.xaddr,
+          username: scan.username,
+          password: scan.password,
+          useDefaultCredentials: useSavedCredentials.value,
+        }),
+      })
+      scan.result = result
+      if (result.profiles.length) {
+        Object.assign(modal, {
+          open: true,
+          mode: 'create',
+          password: scan.password,
+          username: scan.username,
+          name: result.deviceName || result.device.deviceName || '',
+          watermarkText: '',
+          watermarkPosition: 'bottom-right',
+        })
+        applyProbeResult(device.ip, onvifHttpPort(device.xaddr), result)
+        scan.open = false
+      }
+      return
+    }
+    // Brand-only hit from the LAN probe: ask detect for the hit details so
+    // the form shows the same vendor/model/name information.
+    const result = await api<DetectResult>('/api/v1/channels/detect', {
       method: 'POST',
       body: JSON.stringify({
-        xaddr: device.xaddr,
+        host: device.ip,
+        port: device.httpPort ?? 80,
         username: scan.username,
         password: scan.password,
+        protocol: device.protocol || 'auto',
         useDefaultCredentials: useSavedCredentials.value,
       }),
     })
-    if (scan.result?.profiles.length) {
-      Object.assign(modal, {
-        open: true,
-        mode: 'create',
-        password: scan.password,
-        username: scan.username,
-        watermarkText: '',
-        watermarkPosition: 'bottom-right',
-      })
-      applyProbeResult(device.ip, onvifHttpPort(device.xaddr), scan.result)
-      scan.open = false
+    detectResult.value = result
+    if (!result.detected) {
+      scanError.value = result.message || t('channels.detectNone')
+      return
     }
+    Object.assign(modal, {
+      open: true,
+      mode: 'create',
+      groupId: 0,
+      host: device.ip,
+      username: scan.username,
+      password: scan.password,
+      name: result.deviceName || device.name || '',
+      watermarkText: '',
+      watermarkPosition: 'bottom-right',
+    })
+    formUseSavedCredentials.value = useSavedCredentials.value
+    applyDetectResult(result)
+    scan.open = false
   } catch (caught) {
     scanError.value = caught instanceof ApiError ? caught.message : t('common.error')
   } finally {
@@ -880,7 +1070,18 @@ async function removeGroup(group: ChannelGroup) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  // Fallback only: while the status socket is healthy the 1 s diff stream
+  // keeps the table current and this timer stays quiet.
+  fallbackTimer = window.setInterval(() => {
+    if (!channelStatus.connected) void load()
+  }, 30_000)
+})
+
+onBeforeUnmount(() => {
+  if (fallbackTimer !== undefined) window.clearInterval(fallbackTimer)
+})
 </script>
 
 <template>
@@ -1099,7 +1300,7 @@ onMounted(load)
               </option>
             </select>
           </label>
-          <label v-if="isOnvif || isBrandProtocol" class="field">
+          <label v-if="!isGeneric" class="field">
             <span>{{ t('channels.autoDetect') }}</span>
             <button
               type="button"
@@ -1111,6 +1312,35 @@ onMounted(load)
               {{ detecting ? t('common.loading') : t('channels.autoDetectAction') }}
             </button>
           </label>
+          <div v-if="detectResult" class="notice detect-result">
+            <template v-if="detectResult.detected">
+              <strong>
+                {{
+                  t('channels.detectHit', {
+                    protocol: detectResult.detected,
+                    port: detectResult.httpPort || detectResult.rtspPort,
+                  })
+                }}
+              </strong>
+              <div class="small-note">
+                {{ t('channels.detectVendor') }}: {{ detectResult.vendor || '—' }} ·
+                {{ t('channels.detectModel') }}: {{ detectResult.model || '—' }} ·
+                {{ t('channels.detectName') }}: {{ detectResult.deviceName || detectResult.name || '—' }}
+              </div>
+              <div v-if="detectResult.mainUrl" class="mono small-note">{{ detectResult.mainUrl }}</div>
+            </template>
+            <div v-else>{{ detectResult.message || t('channels.detectNone') }}</div>
+            <ul class="detect-attempts small-note">
+              <li
+                v-for="(attempt, index) in detectResult.tried || []"
+                :key="`${attempt.protocol}-${attempt.port}-${index}`"
+              >
+                <span :class="attempt.ok ? 'ok' : 'danger'">{{ attempt.ok ? '✓' : '✕' }}</span>
+                {{ attempt.protocol }} :{{ attempt.port }}
+                <span v-if="!attempt.ok && attempt.error"> — {{ attempt.error }}</span>
+              </li>
+            </ul>
+          </div>
           <label
             v-if="(isOnvif || isBrandProtocol) && onboarding?.defaultUsername && onboarding?.hasDefaultPassword"
             class="check-row"
@@ -1311,6 +1541,14 @@ onMounted(load)
             {{ scan.scanning ? t('channels.scanning') : t('channels.startScan') }}
           </button>
           <button
+            v-if="scan.devices.some((device) => deviceProtocol(device) === 'hikvision')"
+            class="button"
+            :disabled="scanAdding || atChannelLimit"
+            @click="selectHikvision"
+          >
+            {{ t('channels.selectHikvision') }}
+          </button>
+          <button
             v-if="scan.devices.length > 0"
             class="button primary"
             :disabled="scanAdding || scanSelection.size === 0 || atChannelLimit"
@@ -1339,46 +1577,68 @@ onMounted(load)
                 />
               </th>
               <th>{{ t('channels.ip') }}</th>
-              <th>XAddr</th>
+              <th>{{ t('channels.protocol') }}</th>
+              <th>{{ t('channels.port') }}</th>
+              <th>{{ t('channels.name') }}</th>
               <th>{{ t('common.actions') }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="device in scan.devices" :key="device.xaddr">
+            <tr v-for="device in scan.devices" :key="deviceKey(device)">
               <td class="check-cell">
                 <input
                   type="checkbox"
-                  :checked="scanSelection.has(device.xaddr)"
-                  :disabled="scanStatus[device.xaddr] === 'added'"
-                  @change="toggleDevice(device.xaddr)"
+                  :checked="scanSelection.has(deviceKey(device))"
+                  :disabled="scanStatus[deviceKey(device)] === 'added'"
+                  @change="toggleDevice(deviceKey(device))"
                 />
               </td>
               <td>{{ device.ip }}</td>
-              <td class="mono">{{ device.xaddr }}</td>
+              <td>
+                <span class="pill">{{ deviceProtocol(device) }}</span>
+                <small v-if="device.brand" class="muted"> {{ device.brand }}</small>
+                <div class="scan-sources">
+                  <span
+                    v-for="source in deviceSources(device)"
+                    :key="source"
+                    class="scan-source"
+                  >{{ sourceLabel(source) }}</span>
+                </div>
+              </td>
+              <td class="mono">{{ device.httpPort ?? 80 }}</td>
+              <td>
+                {{ device.name || device.model || device.ip }}
+                <small v-if="device.mac || device.serial" class="block muted mono">
+                  {{ [device.mac, device.serial].filter(Boolean).join(' · ') }}
+                </small>
+                <small v-if="device.xaddr && deviceProtocol(device) === 'onvif'" class="mono block muted">
+                  {{ device.xaddr }}
+                </small>
+              </td>
               <td>
                 <div class="scan-actions">
-                  <button class="button small" :disabled="scan.probing === device.xaddr || scanStatus[device.xaddr] === 'added'" @click="probe(device)">
-                    {{ scan.probing === device.xaddr ? t('common.loading') : t('channels.probe') }}
+                  <button class="button small" :disabled="scan.probing === deviceKey(device) || scanStatus[deviceKey(device)] === 'added'" @click="probe(device)">
+                    {{ scan.probing === deviceKey(device) ? t('common.loading') : t('channels.probe') }}
                   </button>
                   <button
                     class="button small primary"
-                    :disabled="scan.probing === device.xaddr || scanAdding || scanStatus[device.xaddr] === 'added' || atChannelLimit"
+                    :disabled="scan.probing === deviceKey(device) || scanAdding || scanStatus[deviceKey(device)] === 'added' || atChannelLimit"
                     @click="quickAdd(device)"
                   >
                     {{
-                      scanStatus[device.xaddr] === 'added'
+                      scanStatus[deviceKey(device)] === 'added'
                         ? t('channels.added')
-                        : scan.probing === device.xaddr
+                        : scan.probing === deviceKey(device)
                           ? t('channels.adding')
                           : t('channels.addNow')
                     }}
                   </button>
                 </div>
-                <small v-if="scanErrors[device.xaddr]" class="block error-text">{{ scanErrors[device.xaddr] }}</small>
+                <small v-if="scanErrors[deviceKey(device)]" class="block error-text">{{ scanErrors[deviceKey(device)] }}</small>
               </td>
             </tr>
             <tr v-if="scan.devices.length === 0">
-              <td colspan="4" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
+              <td colspan="6" class="empty-cell">{{ t('channels.noDevicesYet') }}</td>
             </tr>
           </tbody>
         </table>

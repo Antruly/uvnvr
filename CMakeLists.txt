@@ -107,6 +107,8 @@ add_executable(uvnvr
   src/app.cpp
   src/brand_http.cpp
   src/config.cpp
+  src/detect.cpp
+  src/discovery.cpp
   src/exporter.cpp
   src/media.cpp
   src/onvif.cpp
