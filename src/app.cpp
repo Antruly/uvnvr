@@ -307,6 +307,48 @@ bool HashPassword(const std::string& password, std::string* out) {
   return true;
 }
 
+
+// Phones with a Chinese IME can deliver "@" or other ASCII symbols as their
+// full-width variants, and soft keyboards sometimes append a trailing space.
+// The exact password is always tried first; this variant is only a fallback so
+// a correct password is not rejected because of the keyboard.
+std::string NormalizePasswordInput(const std::string& input) {
+  std::string out;
+  out.reserve(input.size());
+  for (size_t i = 0; i < input.size();) {
+    const unsigned char b0 = static_cast<unsigned char>(input[i]);
+    if (b0 < 0x80) {
+      out.push_back(static_cast<char>(b0));
+      ++i;
+      continue;
+    }
+    if (b0 == 0xE3 && i + 2 < input.size() &&
+        static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        static_cast<unsigned char>(input[i + 2]) == 0x80) {
+      out.push_back(' ');  // U+3000 ideographic space
+      i += 3;
+      continue;
+    }
+    if (b0 == 0xEF && i + 2 < input.size()) {
+      const int cp = ((b0 & 0x0F) << 12) |
+                     ((static_cast<unsigned char>(input[i + 1]) & 0x3F) << 6) |
+                     (static_cast<unsigned char>(input[i + 2]) & 0x3F);
+      if (cp >= 0xFF01 && cp <= 0xFF5E) {
+        out.push_back(static_cast<char>(cp - 0xFEE0));
+        i += 3;
+        continue;
+      }
+    }
+    out.push_back(input[i]);
+    ++i;
+  }
+  const size_t begin = out.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos)
+    return std::string();
+  const size_t end = out.find_last_not_of(" \t\r\n");
+  return out.substr(begin, end - begin + 1);
+}
+
 bool VerifyPassword(const std::string& password, const std::string& encoded) {
   std::vector<std::string> parts;
   size_t start = 0;
@@ -1532,14 +1574,21 @@ LoginResult App::Login(const std::string& username, const std::string& password,
     result.message = "this account is disabled";
     return result;
   }
-  if (!VerifyPassword(password, stored_hash)) {
-    const bool locked = RecordLoginFailure(username, ip);
-    Audit("auth", "warning", username, ip, ua, "session", "", "login", "failure",
-          "invalid_credentials", locked ? R"({"locked":true})" : "{}");
-    result.status = 401;
-    result.code = "invalid_credentials";
-    result.message = "invalid username or password";
-    return result;
+  std::string accepted_password = password;
+  if (!VerifyPassword(accepted_password, stored_hash)) {
+    const std::string normalized = NormalizePasswordInput(password);
+    if (normalized != password && !normalized.empty() &&
+        VerifyPassword(normalized, stored_hash)) {
+      accepted_password = normalized;
+    } else {
+      const bool locked = RecordLoginFailure(username, ip);
+      Audit("auth", "warning", username, ip, ua, "session", "", "login", "failure",
+            "invalid_credentials", locked ? R"({"locked":true})" : "{}");
+      result.status = 401;
+      result.code = "invalid_credentials";
+      result.message = "invalid username or password";
+      return result;
+    }
   }
 
   ClearWebFailures();
@@ -1553,7 +1602,7 @@ LoginResult App::Login(const std::string& username, const std::string& password,
   // login, so RTSP Digest works without resetting passwords.
   {
     uvcpp::uvcpp_db_params ha1_update;
-    ha1_update.add(RtspHa1(user.username, password));
+    ha1_update.add(RtspHa1(user.username, accepted_password));
     ha1_update.add(user.id);
     std::string ha1_error;
     Exec("UPDATE users SET rtsp_ha1 = ? WHERE id = ?", ha1_update, nullptr, &ha1_error);

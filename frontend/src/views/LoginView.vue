@@ -17,6 +17,7 @@ const themeOptions = ['auto', 'light', 'dark'] as const
 const { mode: themeMode, apply: applyTheme } = useTheme()
 
 const form = reactive({ username: 'admin', password: '' })
+const showPassword = ref(false)
 const error = ref('')
 const submitting = ref(false)
 const lockedSeconds = ref(0)
@@ -139,6 +140,10 @@ onBeforeUnmount(() => {
             v-model="form.username"
             class="input"
             autocomplete="username"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            inputmode="text"
             required
             autofocus
           />
@@ -146,13 +151,28 @@ onBeforeUnmount(() => {
 
         <label class="field">
           <span>{{ t('auth.password') }}</span>
-          <input
-            v-model="form.password"
-            class="input"
-            type="password"
-            autocomplete="current-password"
-            required
-          />
+          <span class="password-row">
+            <input
+              v-model="form.password"
+              class="input"
+              :type="showPassword ? 'text' : 'password'"
+              autocomplete="current-password"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              required
+            />
+            <button
+              class="button ghost password-toggle"
+              type="button"
+              :aria-label="t('auth.togglePassword')"
+              :title="t('auth.togglePassword')"
+              @click="showPassword = !showPassword"
+            >
+              {{ showPassword ? t('auth.hidePassword') : t('auth.showPassword') }}
+            </button>
+          </span>
+          <small class="field-hint">{{ t('auth.mobilePasswordHint') }}</small>
         </label>
 
         <p v-if="lockedSeconds > 0" class="form-error">
