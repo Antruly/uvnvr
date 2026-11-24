@@ -7102,9 +7102,13 @@ void App::RegisterOnvifRoutes() {
                          {"protocolHint", "hikvision"},
                          {"httpPort", device.http_port},
                          {"rtspPort", device.rtsp_port},
+                         // SADP's DeviceType is a numeric product code; the
+                         // readable model is DeviceDescription.
                          {"name", device.description.empty() ? device.device_type
                                                              : device.description},
-                         {"model", device.device_type},
+                         {"model", device.description.empty() ? device.device_type
+                                                              : device.description},
+                         {"deviceType", device.device_type},
                          {"brand", "Hikvision"},
                          {"mac", device.mac},
                          {"serial", device.serial},
