@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <ctime>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -384,6 +386,23 @@ std::string AuthParam(const std::string& challenge, const std::string& key) {
 // Builds the Authorization header for a camera that answered 401. Digest is
 // what most ONVIF cameras require; Basic is kept for the few that only offer
 // it. Returns an empty string when the challenge is not understood.
+// Some cameras hand out one fixed nonce and reject a replayed nonce count, so
+// the client has to count its own uses per (realm, nonce, user) the way a
+// browser does. Keyed globally because the camera keeps the same nonce across
+// every endpoint and connection.
+std::mutex g_digest_nonce_mutex;
+std::map<std::string, uint32_t> g_digest_nonce_counts;
+
+uint32_t NextNonceCount(const std::string& realm, const std::string& nonce,
+                        const std::string& username) {
+  std::lock_guard<std::mutex> lock(g_digest_nonce_mutex);
+  if (g_digest_nonce_counts.size() > 512)
+    g_digest_nonce_counts.clear();
+  uint32_t& count = g_digest_nonce_counts[realm + "|" + nonce + "|" + username];
+  count += 1;
+  return count;
+}
+
 std::string BuildAuthorization(const std::string& url, const std::string& headers,
                                const std::string& username, const std::string& password) {
   const std::string challenge = HeaderValue(headers, "WWW-Authenticate");
@@ -411,17 +430,21 @@ std::string BuildAuthorization(const std::string& url, const std::string& header
   const std::string ha1 = Md5Hex(username + ":" + realm + ":" + password);
   const std::string ha2 = Md5Hex("POST:" + uri);
   const std::string cnonce = RandomHex(8);
+  char count_text[16];
+  std::snprintf(count_text, sizeof(count_text), "%08x",
+                NextNonceCount(realm, nonce, username));
+  const std::string count = count_text;
   std::string response;
   std::string header = "Authorization: Digest ";
   if (!qop.empty()) {
-    response = Md5Hex(ha1 + ":" + nonce + ":00000001:" + cnonce + ":" + qop + ":" + ha2);
+    response = Md5Hex(ha1 + ":" + nonce + ":" + count + ":" + cnonce + ":" + qop + ":" + ha2);
   } else {
     response = Md5Hex(ha1 + ":" + nonce + ":" + ha2);
   }
   header += "username=\"" + username + "\", realm=\"" + realm + "\", nonce=\"" + nonce +
             "\", uri=\"" + uri + "\", algorithm=" + algorithm + ", response=\"" + response + "\"";
   if (!qop.empty())
-    header += ", qop=" + qop + ", nc=00000001, cnonce=\"" + cnonce + "\"";
+    header += ", qop=" + qop + ", nc=" + count + ", cnonce=\"" + cnonce + "\"";
   if (!opaque.empty())
     header += ", opaque=\"" + opaque + "\"";
   return header;
@@ -440,6 +463,17 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
       if (!HttpExchange(url, body, timeout_seconds, authorization + "\r\n", &retried, error))
         return {};
       response = std::move(retried);
+      // A camera that rotates its nonce answers the first digest attempt with
+      // a new challenge; honour it once instead of failing the whole call.
+      if (response.status == 401) {
+        const std::string second = BuildAuthorization(url, response.headers, username, password);
+        if (!second.empty() && second != authorization) {
+          HttpRawResponse retried_again;
+          if (!HttpExchange(url, body, timeout_seconds, second + "\r\n", &retried_again, error))
+            return {};
+          response = std::move(retried_again);
+        }
+      }
     }
   }
   if (response.status >= 400) {
