@@ -373,9 +373,9 @@ void SendTargets(Socket socket, const std::vector<Target>& targets,
     if (target.multicast && !interfaces.empty()) {
       // Multicast follows the default route otherwise, which hides cameras on
       // a second NIC. Send once per local IPv4 address.
-      for (const LocalInterface& interface : interfaces) {
+      for (const LocalInterface& iface : interfaces) {
         setsockopt(socket, IPPROTO_IP, IP_MULTICAST_IF,
-                   reinterpret_cast<const char*>(&interface.address), sizeof(interface.address));
+                   reinterpret_cast<const char*>(&iface.address), sizeof(iface.address));
         if (::sendto(socket, payload.data(), static_cast<int>(payload.size()), 0,
                      reinterpret_cast<const sockaddr*>(&target.address),
                      sizeof(target.address)) >= 0)
@@ -543,9 +543,9 @@ void ProbeSadp(const std::vector<std::string>& configured_targets,
   std::vector<std::string> targets = configured_targets;
   const std::vector<LocalInterface> interfaces = LocalInterfaces();
   if (add_broadcast) {
-    for (const LocalInterface& interface : interfaces) {
-      if (!interface.broadcast.empty())
-        targets.push_back(interface.broadcast + ":37020");
+    for (const LocalInterface& iface : interfaces) {
+      if (!iface.broadcast.empty())
+        targets.push_back(iface.broadcast + ":37020");
     }
   }
   std::vector<Target> parsed = BuildTargets(targets, 37020, kDefaultSadpTargets, warnings);
