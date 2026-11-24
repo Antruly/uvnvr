@@ -429,11 +429,12 @@ std::string BuildAuthorization(const std::string& url, const std::string& header
   const std::string uri = path_start == std::string::npos ? "/" : url.substr(path_start);
   const std::string ha1 = Md5Hex(username + ":" + realm + ":" + password);
   const std::string ha2 = Md5Hex("POST:" + uri);
-  const std::string cnonce = RandomHex(8);
-  char count_text[16];
-  std::snprintf(count_text, sizeof(count_text), "%08x",
-                NextNonceCount(realm, nonce, username));
-  const std::string count = count_text;
+  // Desk2ONVIF-style devices only honour the first digest they see for a
+  // nonce: a new cnonce or a higher nonce count is answered with 401 until the
+  // next challenge. Deriving both from the nonce makes every request look like
+  // the one the camera already accepted.
+  const std::string cnonce = Md5Hex(nonce).substr(0, 16);
+  const std::string count = "00000001";
   std::string response;
   std::string header = "Authorization: Digest ";
   if (!qop.empty()) {
@@ -1082,20 +1083,46 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   if (profiles_xml.empty())
     return false;
 
+  // Only <trt:Profiles token="..."> elements are media profiles. The nested
+  // VideoSourceConfiguration / VideoEncoderConfiguration elements carry their
+  // own token attributes, and asking GetStreamUri for one of those makes the
+  // camera answer 500.
   std::vector<std::string> tokens;
   size_t pos = 0;
-  while ((pos = profiles_xml.find("Profiles", pos)) != std::string::npos) {
-    const size_t token_pos = profiles_xml.find("token=\"", pos);
-    if (token_pos == std::string::npos)
+  while ((pos = profiles_xml.find('<', pos)) != std::string::npos) {
+    const size_t name_start = pos + 1;
+    if (name_start >= profiles_xml.size() || profiles_xml[name_start] == '/' ||
+        profiles_xml[name_start] == '?' || profiles_xml[name_start] == '!') {
+      pos = name_start;
+      continue;
+    }
+    size_t name_end = name_start;
+    while (name_end < profiles_xml.size() &&
+           (std::isalnum(static_cast<unsigned char>(profiles_xml[name_end])) ||
+            profiles_xml[name_end] == ':' || profiles_xml[name_end] == '_' ||
+            profiles_xml[name_end] == '-')) {
+      ++name_end;
+    }
+    const std::string name = profiles_xml.substr(name_start, name_end - name_start);
+    const size_t colon = name.find(':');
+    const std::string local = colon == std::string::npos ? name : name.substr(colon + 1);
+    const size_t tag_end = profiles_xml.find('>', name_end);
+    if (tag_end == std::string::npos)
       break;
-    const size_t token_start = token_pos + 7;
-    const size_t token_end = profiles_xml.find('"', token_start);
-    if (token_end == std::string::npos)
-      break;
-    const std::string token = profiles_xml.substr(token_start, token_end - token_start);
-    if (std::find(tokens.begin(), tokens.end(), token) == tokens.end())
-      tokens.push_back(token);
-    pos = token_end;
+    if (local == "Profiles") {
+      const std::string attrs = profiles_xml.substr(name_end, tag_end - name_end);
+      const size_t token_pos = attrs.find("token=\"");
+      if (token_pos != std::string::npos) {
+        const size_t token_start = token_pos + 7;
+        const size_t token_stop = attrs.find('"', token_start);
+        if (token_stop != std::string::npos) {
+          const std::string token = attrs.substr(token_start, token_stop - token_start);
+          if (!token.empty() && std::find(tokens.begin(), tokens.end(), token) == tokens.end())
+            tokens.push_back(token);
+        }
+      }
+    }
+    pos = tag_end + 1;
   }
 
   for (const auto& token : tokens) {
