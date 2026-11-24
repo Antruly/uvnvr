@@ -12,6 +12,12 @@ option(UVNVR_EMBED_WEB "Embed the built frontend into the binary" OFF)
 option(UVNVR_BUILD_SDK "Build the private-protocol C SDK" ON)
 option(UVNVR_ENABLE_QUIC "Enable the QUIC listener for the private protocol" ON)
 option(UVNVR_ENABLE_AI "Build the AI recognition pipeline (requires OpenCV)" ON)
+option(UVNVR_ENABLE_HYPERLPR
+       "Build the HyperLPR3 plate engine (requires OpenCV and MNN; falls back to the stub)"
+       OFF)
+option(UVNVR_BUILD_TOOLS "Build developer tools (hlpr_cli)" OFF)
+set(UVNVR_MNN_ROOT "" CACHE PATH
+    "MNN SDK root containing include/MNN and libMNN (built locally or installed)")
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -58,6 +64,63 @@ if(UVNVR_ENABLE_AI)
   endif()
 else()
   message(STATUS "ai: disabled by UVNVR_ENABLE_AI=OFF")
+endif()
+
+# HyperLPR3 is optional and must never make the build fail. When it is asked
+# for but MNN (or OpenCV, or the platform) is unavailable, the plate engine
+# silently stays on the stage-1 stub and the reason is printed here.
+set(UVNVR_HYPERLPR_ENABLED 0)
+if(UVNVR_ENABLE_HYPERLPR)
+  if(NOT UVNVR_AI_ENABLED)
+    message(STATUS
+      "ai: HyperLPR3 requested but AI/OpenCV is unavailable; falling back to the stub plate engine")
+  elseif(WIN32)
+    message(STATUS
+      "ai: HyperLPR3 requested on Windows but MNN is not wired up for MinGW yet; falling back to the stub plate engine")
+  else()
+    set(_uvnvr_mnn_roots)
+    if(UVNVR_MNN_ROOT)
+      list(APPEND _uvnvr_mnn_roots "${UVNVR_MNN_ROOT}")
+    endif()
+    if(DEFINED ENV{MNN_ROOT} AND NOT "$ENV{MNN_ROOT}" STREQUAL "")
+      list(APPEND _uvnvr_mnn_roots "$ENV{MNN_ROOT}")
+    endif()
+    list(APPEND _uvnvr_mnn_roots
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mnn"
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/MNN")
+
+    find_path(UVNVR_MNN_INCLUDE_DIR NAMES MNN/Interpreter.hpp
+              PATHS ${_uvnvr_mnn_roots} PATH_SUFFIXES include NO_DEFAULT_PATH)
+    if(NOT UVNVR_MNN_INCLUDE_DIR)
+      find_path(UVNVR_MNN_INCLUDE_DIR NAMES MNN/Interpreter.hpp)
+    endif()
+    find_library(UVNVR_MNN_LIBRARY NAMES MNN
+                 PATHS ${_uvnvr_mnn_roots} PATH_SUFFIXES build-linux lib build .
+                 NO_DEFAULT_PATH)
+    if(NOT UVNVR_MNN_LIBRARY)
+      find_library(UVNVR_MNN_LIBRARY NAMES MNN)
+    endif()
+
+    if(UVNVR_MNN_INCLUDE_DIR AND UVNVR_MNN_LIBRARY)
+      set(UVNVR_HYPERLPR_ENABLED 1)
+      get_filename_component(UVNVR_MNN_LIBRARY_DIR "${UVNVR_MNN_LIBRARY}" DIRECTORY)
+      get_filename_component(UVNVR_MNN_LIBRARY_NAME "${UVNVR_MNN_LIBRARY}" NAME)
+      message(STATUS "ai: HyperLPR3 enabled (MNN ${UVNVR_MNN_LIBRARY})")
+    else()
+      if(NOT UVNVR_MNN_INCLUDE_DIR)
+        set(_uvnvr_hyperlpr_reason
+            "MNN headers (MNN/Interpreter.hpp) were not found; set UVNVR_MNN_ROOT")
+      else()
+        set(_uvnvr_hyperlpr_reason
+            "libMNN was not found under ${_uvnvr_mnn_roots}; set UVNVR_MNN_ROOT")
+      endif()
+      message(STATUS
+        "ai: HyperLPR3 requested but ${_uvnvr_hyperlpr_reason}; falling back to the stub plate engine")
+    endif()
+  endif()
+else()
+  message(STATUS
+    "ai: HyperLPR3 disabled by UVNVR_ENABLE_HYPERLPR=OFF; the plate engine is the stage-1 stub")
 endif()
 
 if(UVNVR_LIBUVCPP_ROOT)
@@ -173,7 +236,41 @@ if(UVNVR_AI_ENABLED)
   target_link_libraries(uvnvr PRIVATE ${OpenCV_LIBS})
 endif()
 
-target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED})
+if(UVNVR_HYPERLPR_ENABLED)
+  # Vendored HyperLPR3 3.0.1 (Apache-2.0), see third_party/hyperlpr3/README.md.
+  file(GLOB_RECURSE UVNVR_HYPERLPR_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/hyperlpr3/cpp/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/hyperlpr3/cpp/c_api/*.cc")
+  add_library(uvnvr_mnn INTERFACE)
+  target_include_directories(uvnvr_mnn INTERFACE "${UVNVR_MNN_INCLUDE_DIR}")
+  target_link_libraries(uvnvr_mnn INTERFACE "${UVNVR_MNN_LIBRARY}")
+
+  add_library(uvnvr_hyperlpr3 STATIC ${UVNVR_HYPERLPR_SOURCES})
+  target_compile_definitions(uvnvr_hyperlpr3 PRIVATE INFERENCE_HELPER_ENABLE_MNN=1)
+  target_include_directories(uvnvr_hyperlpr3
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/hyperlpr3/cpp/c_api"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/hyperlpr3/cpp/src")
+  target_link_libraries(uvnvr_hyperlpr3 PUBLIC ${OpenCV_LIBS} uvnvr_mnn)
+  if(UNIX)
+    target_link_libraries(uvnvr_hyperlpr3 PUBLIC pthread m ${CMAKE_DL_LIBS})
+  endif()
+  set_target_properties(uvnvr_hyperlpr3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+  target_sources(uvnvr PRIVATE src/ai/engine_hyperlpr.cpp)
+  target_link_libraries(uvnvr PRIVATE uvnvr_hyperlpr3)
+  set_property(TARGET uvnvr APPEND PROPERTY BUILD_RPATH "${UVNVR_MNN_LIBRARY_DIR}")
+
+  # Ship the MNN runtime next to the binary: the installed RPATH already
+  # points at <prefix>/lib.
+  if(UVNVR_MNN_LIBRARY_NAME MATCHES "\\.(so|dylib)(\\..*)?$" OR
+     UVNVR_MNN_LIBRARY_NAME MATCHES "\\.dll$")
+    install(FILES "${UVNVR_MNN_LIBRARY}" DESTINATION lib)
+  endif()
+endif()
+
+target_compile_definitions(uvnvr PRIVATE
+  UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED}
+  UVNVR_ENABLE_HYPERLPR=${UVNVR_HYPERLPR_ENABLED})
 
 if(WIN32)
   # The icon resource is what Explorer and shortcuts display; SetupIconFile
@@ -257,6 +354,27 @@ endif()
 
 install(TARGETS uvnvr RUNTIME DESTINATION bin)
 install(DIRECTORY frontend/dist/ DESTINATION share/uvnvr/frontend/dist OPTIONAL)
+
+if(UVNVR_BUILD_TOOLS)
+  if(UVNVR_HYPERLPR_ENABLED)
+    add_executable(hlpr_cli
+      tools/hlpr_cli/main.cpp
+      src/ai/engine_hyperlpr.cpp
+      src/ai/plate_post.cpp
+    )
+    target_include_directories(hlpr_cli PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/ai"
+      ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(hlpr_cli PRIVATE UVNVR_ENABLE_HYPERLPR=1)
+    target_link_libraries(hlpr_cli PRIVATE uvnvr_hyperlpr3)
+    set_target_properties(hlpr_cli PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set_property(TARGET hlpr_cli APPEND PROPERTY BUILD_RPATH "${UVNVR_MNN_LIBRARY_DIR}")
+  else()
+    message(STATUS "tools: hlpr_cli skipped because HyperLPR3 is not enabled")
+  endif()
+endif()
 
 if(UVNVR_BUILD_SDK)
   add_subdirectory(sdk)

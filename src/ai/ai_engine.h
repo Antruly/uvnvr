@@ -13,6 +13,12 @@ struct AiConfig {
   // end-to-end checks use.
   bool stub = false;
   std::string model_dir;
+  // HyperLPR3 detector level: 0 = low (320x), 1 = high (640x, slower but
+  // slightly better recall). Ignored by the stub and face engines.
+  int plate_det_level = 0;
+  // Frames narrower than this are upsampled before plate detection; the
+  // detector letterboxes to 320/640 px, so plates need pixels, not sensors.
+  int plate_min_width = 0;
 };
 
 struct AiPlateResult {

@@ -20,6 +20,11 @@ struct AiSettings {
   int snapshot_retention_days = 30;
   int dedup_seconds = 10;
   bool stub = false;
+  // Frames narrower than this are upsampled before plate detection (0 keeps
+  // the engine default). HyperLPR3 resizes its input to 320/640 px, so a plate
+  // needs roughly 100 px in the captured frame to survive that.
+  int plate_min_width = 0;
+  std::string plate_model_dir;
   std::string plate_watchlist;
   std::string face_watchlist;
 };
@@ -50,8 +55,10 @@ struct AiRuntimeConfig {
   double min_face_quality = 0.3;
   double face_match_threshold = 0.75;
   int dedup_seconds = 10;
+  std::string plate_model_dir;
   std::string plate_watchlist;
   std::string face_watchlist;
+  int plate_min_width = 0;
 };
 
 } // namespace uvnvr

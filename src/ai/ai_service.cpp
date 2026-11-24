@@ -409,8 +409,27 @@ struct AiService::Impl {
   std::atomic<uint64_t> plate_total_ms{0};
   std::atomic<uint64_t> face_total_ms{0};
 
+  struct PlateDedupEntry {
+    int64_t ts = 0;
+    float confidence = 0.0f;
+    int64_t event_id = 0;
+    std::string full_path;
+    std::string crop_path;
+  };
+
+  enum class PlateDedupDecision {
+    kNew,
+    kDrop,
+    kReplace,
+  };
+
+  using PlateDedupKey = std::pair<int64_t, std::string>;
+
   std::mutex dedup_mutex;
-  std::map<std::pair<int64_t, std::string>, int64_t> plate_dedup;
+  // Serializes the read-modify-write of an existing event when a stronger
+  // detection for the same plate arrives inside the dedup window.
+  std::mutex plate_update_mutex;
+  std::map<PlateDedupKey, PlateDedupEntry> plate_dedup;
 
   mutable std::mutex faces_mutex;
   std::vector<FaceRecord> faces;
@@ -497,6 +516,18 @@ struct AiService::Impl {
     settings.dedup_seconds = static_cast<int>(
         std::max<int64_t>(0, std::min<int64_t>(3600, SettingInt("ai.dedupSeconds", 10))));
     settings.stub = SettingBool("ai.stub", false);
+    settings.plate_min_width = static_cast<int>(
+        std::max<int64_t>(0, std::min<int64_t>(4096, SettingInt("ai.plate.minDetectWidth", 1600))));
+    settings.plate_model_dir = Setting("ai.plate.modelDir", "");
+    if (settings.plate_model_dir.empty()) {
+      settings.plate_model_dir =
+          (std::filesystem::path(opts.data_dir) / "models" / "hyperlpr3").string();
+    } else {
+      std::filesystem::path model_path(settings.plate_model_dir);
+      if (model_path.is_relative())
+        model_path = std::filesystem::path(opts.data_dir) / model_path;
+      settings.plate_model_dir = model_path.lexically_normal().string();
+    }
     settings.plate_watchlist = Setting("ai.plate.watchlist", "");
     settings.face_watchlist = Setting("ai.face.watchlist", "");
   }
@@ -564,6 +595,8 @@ struct AiService::Impl {
     config.min_face_quality = settings.min_face_quality;
     config.face_match_threshold = settings.face_match_threshold;
     config.dedup_seconds = settings.dedup_seconds;
+    config.plate_model_dir = settings.plate_model_dir;
+    config.plate_min_width = settings.plate_min_width;
     config.plate_watchlist = settings.plate_watchlist;
     config.face_watchlist = settings.face_watchlist;
     return config;
@@ -801,6 +834,8 @@ struct AiService::Impl {
     NameCurrentThread("ai-plate");
     AiConfig engine_config;
     engine_config.stub = runtime.stub;
+    engine_config.model_dir = runtime.plate_model_dir;
+    engine_config.plate_min_width = runtime.plate_min_width;
     std::string error;
     std::unique_ptr<AiEngine> engine = CreatePlateEngine(engine_config, &error);
     if (!engine) {
@@ -967,30 +1002,167 @@ struct AiService::Impl {
     }
   }
 
+  bool UpdatePlateEvent(int64_t event_id, const AiPlateResult& result, const std::string& engine,
+                        const std::string& full, const std::string& crop) {
+    if (opts.db == nullptr || event_id <= 0)
+      return false;
+    uvcpp::uvcpp_db_params params;
+    params.add(static_cast<double>(result.confidence));
+    params.add(result.color);
+    params.add(result.x);
+    params.add(result.y);
+    params.add(result.w);
+    params.add(result.h);
+    params.add(full);
+    params.add(crop);
+    params.add(engine);
+    params.add(event_id);
+    if (!uvcpp::uvcpp_db_ok(opts.db->execute(
+            "UPDATE ai_plate_events SET confidence = ?, color = ?, x = ?, y = ?, w = ?, h = ?, "
+            "image_path = ?, crop_path = ?, engine = ? WHERE id = ?",
+            params))) {
+      std::fprintf(stderr, "ai: plate event update failed: %s\n",
+                   opts.db->last_error().c_str());
+      return false;
+    }
+    return true;
+  }
+
   // Uses the capture timestamp rather than processing time: with a backlog a
   // frame can reach a worker long after it was grabbed, and the dedup window is
   // about how far apart the frames are, not when the model got to them.
-  bool PlateIsDuplicate(int64_t channel_id, const std::string& normalized, int dedup_seconds,
-                        int64_t frame_ts) {
+  //
+  // The first detection inside the window is retained; a later detection of the
+  // same plate on the same channel replaces it only when its confidence is
+  // higher. The event keeps the first timestamp, so the window is anchored.
+  PlateDedupDecision CheckPlateDedup(const PlateDedupKey& key, int dedup_seconds,
+                                     int64_t frame_ts, float confidence,
+                                     PlateDedupEntry* previous) {
+    if (previous != nullptr)
+      *previous = PlateDedupEntry{};
     if (dedup_seconds <= 0)
-      return false;
+      return PlateDedupDecision::kNew;
     std::lock_guard<std::mutex> lock(dedup_mutex);
-    const auto key = std::make_pair(channel_id, normalized);
     const auto it = plate_dedup.find(key);
-    if (it != plate_dedup.end() && std::llabs(frame_ts - it->second) < dedup_seconds)
-      return true;
-    plate_dedup[key] = frame_ts;
+    if (it != plate_dedup.end() && std::llabs(frame_ts - it->second.ts) < dedup_seconds) {
+      if (confidence <= it->second.confidence)
+        return PlateDedupDecision::kDrop;
+      if (previous != nullptr)
+        *previous = it->second;
+      return PlateDedupDecision::kReplace;
+    }
+    PlateDedupEntry entry;
+    entry.ts = frame_ts;
+    entry.confidence = confidence;
+    plate_dedup[key] = std::move(entry);
     // Bound the map so a busy camera cannot grow it without limit.
     if (plate_dedup.size() > 4096) {
       const int64_t now = NowSeconds();
       for (auto entry = plate_dedup.begin(); entry != plate_dedup.end();) {
-        if (now - entry->second > static_cast<int64_t>(dedup_seconds) * 4)
+        if (now - entry->second.ts > static_cast<int64_t>(dedup_seconds) * 4)
           entry = plate_dedup.erase(entry);
         else
           ++entry;
       }
     }
-    return false;
+    return PlateDedupDecision::kNew;
+  }
+
+  // Re-validates under the replacement lock and reserves the new confidence so
+  // a concurrent worker cannot slip a weaker update in after this one.
+  bool ReservePlateReplacement(const PlateDedupKey& key, int dedup_seconds, int64_t frame_ts,
+                               float confidence, PlateDedupEntry* previous) {
+    std::lock_guard<std::mutex> lock(dedup_mutex);
+    const auto it = plate_dedup.find(key);
+    if (it == plate_dedup.end() || it->second.event_id <= 0 ||
+        std::llabs(frame_ts - it->second.ts) >= dedup_seconds ||
+        confidence <= it->second.confidence) {
+      return false;
+    }
+    if (previous != nullptr)
+      *previous = it->second;
+    it->second.confidence = confidence;
+    return true;
+  }
+
+  void FinishPlateReplacement(const PlateDedupKey& key, int64_t first_ts, float confidence,
+                              const std::string& full, const std::string& crop) {
+    std::lock_guard<std::mutex> lock(dedup_mutex);
+    const auto it = plate_dedup.find(key);
+    if (it == plate_dedup.end() || it->second.ts != first_ts ||
+        confidence < it->second.confidence) {
+      return;
+    }
+    it->second.confidence = confidence;
+    it->second.full_path = full;
+    it->second.crop_path = crop;
+  }
+
+  void AttachPlateDedupEvent(const PlateDedupKey& key, int64_t first_ts, int64_t event_id,
+                             float confidence, const std::string& full,
+                             const std::string& crop) {
+    std::lock_guard<std::mutex> lock(dedup_mutex);
+    const auto it = plate_dedup.find(key);
+    if (it == plate_dedup.end() || it->second.ts != first_ts)
+      return;
+    if (it->second.event_id == 0)
+      it->second.event_id = event_id;
+    // A replacement may already have reserved a higher confidence; keep its
+    // snapshot paths in that case.
+    if (confidence >= it->second.confidence) {
+      it->second.confidence = confidence;
+      it->second.full_path = full;
+      it->second.crop_path = crop;
+    }
+  }
+
+  void ForgetPlateDedup(const PlateDedupKey& key, int64_t first_ts) {
+    std::lock_guard<std::mutex> lock(dedup_mutex);
+    const auto it = plate_dedup.find(key);
+    if (it != plate_dedup.end() && it->second.ts == first_ts && it->second.event_id == 0)
+      plate_dedup.erase(it);
+  }
+
+  static void RemoveSnapshotFiles(const std::string& full, const std::string& crop,
+                                  const std::string& keep_full, const std::string& keep_crop) {
+    const std::string* paths[] = {&full, &crop};
+    const std::string* keep[] = {&keep_full, &keep_crop};
+    for (size_t i = 0; i < 2; ++i) {
+      if (paths[i]->empty() || *paths[i] == *keep[i])
+        continue;
+      std::error_code ec;
+      std::filesystem::remove(*paths[i], ec);
+    }
+  }
+
+  void ReplacePlateEvent(const PlateDedupKey& key, const Frame& frame, const cv::Rect& box,
+                         const AiPlateResult& result, const AiRuntimeConfig& runtime,
+                         const char* engine_name) {
+    // Updates are rare and must not interleave with another update for the same
+    // (or any other) plate, because the row and both snapshots change together.
+    std::lock_guard<std::mutex> update_lock(plate_update_mutex);
+    const int64_t frame_ts = frame.ts_ms / 1000;
+    PlateDedupEntry previous;
+    if (!ReservePlateReplacement(key, runtime.dedup_seconds, frame_ts, result.confidence,
+                                 &previous)) {
+      return;
+    }
+
+    std::string full_path;
+    std::string crop_path;
+    SaveImages(frame, box, "_plate", ImageDirectory(frame.ts_ms, frame.channel_id), &full_path,
+               &crop_path);
+    // Keep the previous snapshot when a new one could not be written.
+    if (full_path.empty())
+      full_path = previous.full_path;
+    if (crop_path.empty())
+      crop_path = previous.crop_path;
+    if (!UpdatePlateEvent(previous.event_id, result, engine_name, full_path, crop_path)) {
+      RemoveSnapshotFiles(full_path, crop_path, previous.full_path, previous.crop_path);
+      return;
+    }
+    RemoveSnapshotFiles(previous.full_path, previous.crop_path, full_path, crop_path);
+    FinishPlateReplacement(key, previous.ts, result.confidence, full_path, crop_path);
   }
 
   void HandlePlate(const Frame& frame, const AiPlateResult& raw, int offset_x, int offset_y,
@@ -999,8 +1171,6 @@ struct AiService::Impl {
       return;
     const std::string normalized = NormalizePlate(raw.text);
     if (normalized.empty() || !IsValidPlate(normalized))
-      return;
-    if (PlateIsDuplicate(frame.channel_id, normalized, runtime.dedup_seconds, frame.ts_ms / 1000))
       return;
 
     AiPlateResult result = raw;
@@ -1015,16 +1185,29 @@ struct AiService::Impl {
     result.w = box.width;
     result.h = box.height;
 
-    int64_t event_id = 0;
+    const PlateDedupKey key = std::make_pair(frame.channel_id, normalized);
     const int64_t ts = frame.ts_ms / 1000;
-    if (!InsertPlateEvent(frame.channel_id, ts, result, normalized, engine_name, &event_id))
+    const PlateDedupDecision decision =
+        CheckPlateDedup(key, runtime.dedup_seconds, ts, result.confidence, nullptr);
+    if (decision == PlateDedupDecision::kDrop)
       return;
+    if (decision == PlateDedupDecision::kReplace) {
+      ReplacePlateEvent(key, frame, box, result, runtime, engine_name);
+      return;
+    }
+
+    int64_t event_id = 0;
+    if (!InsertPlateEvent(frame.channel_id, ts, result, normalized, engine_name, &event_id)) {
+      ForgetPlateDedup(key, ts);
+      return;
+    }
 
     std::string full_path;
     std::string crop_path;
     SaveImages(frame, box, "_plate", ImageDirectory(frame.ts_ms, frame.channel_id), &full_path,
                &crop_path);
     UpdatePlatePaths(event_id, full_path, crop_path);
+    AttachPlateDedupEvent(key, ts, event_id, result.confidence, full_path, crop_path);
 
     const bool alert = PlateWatchlist(runtime.plate_watchlist).count(normalized) > 0;
 
@@ -1487,6 +1670,7 @@ json AiService::ConfigJson() const {
               {"minFaceQuality", s.min_face_quality},
               {"snapshotRetentionDays", s.snapshot_retention_days},
               {"stub", s.stub},
+              {"plateModelDir", s.plate_model_dir},
               {"plateWatchlist", s.plate_watchlist},
               {"faceWatchlist", s.face_watchlist},
               {"faceMatchThreshold", s.face_match_threshold},
@@ -1569,6 +1753,7 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   double match_threshold = 0.75;
   std::string plate_watchlist;
   std::string face_watchlist;
+  std::string plate_model_dir;
   if (!read_bool("enabled", &enabled) || !read_bool("plateEnabled", &plate) ||
       !read_bool("faceEnabled", &face) || !read_bool("stub", &stub) ||
       !read_int("intervalMs", 250, 10000, &interval) ||
@@ -1580,7 +1765,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
       !read_double("minPlateConfidence", &min_plate) || !read_double("minFaceQuality", &min_face) ||
       !read_double("faceMatchThreshold", &match_threshold) ||
       !read_text("plateWatchlist", &plate_watchlist) ||
-      !read_text("faceWatchlist", &face_watchlist)) {
+      !read_text("faceWatchlist", &face_watchlist) ||
+      !read_text("plateModelDir", &plate_model_dir)) {
     return false;
   }
 
@@ -1619,6 +1805,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     add_double("ai.face.matchThreshold", match_threshold);
   if (body.contains("dedupSeconds"))
     updates.push_back({"ai.dedupSeconds", std::to_string(dedup)});
+  if (body.contains("plateModelDir"))
+    updates.push_back({"ai.plate.modelDir", plate_model_dir});
 
   for (const auto& update : updates) {
     if (!impl_->WriteSetting(update.key, update.value, error))
@@ -1998,6 +2186,8 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
 
   AiConfig engine_config;
   engine_config.stub = runtime.stub;
+  engine_config.model_dir = runtime.plate_model_dir;
+  engine_config.plate_min_width = runtime.plate_min_width;
   json result{
       {"channelId", channel_id}, {"width", image.cols}, {"height", image.rows}, {"engine", "stub"}};
   if (normalized_type == "plate" || normalized_type == "both") {
@@ -2005,6 +2195,7 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
     std::unique_ptr<AiEngine> engine = CreatePlateEngine(engine_config, error);
     if (!engine)
       return json();
+    result["engine"] = engine->Name();
     std::vector<AiPlateResult> results;
     if (!engine->DetectPlates(image, &results, error))
       return json();
@@ -2026,6 +2217,8 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
     std::unique_ptr<AiEngine> engine = CreateFaceEngine(engine_config, error);
     if (!engine)
       return json();
+    if (normalized_type == "face")
+      result["engine"] = engine->Name();
     std::vector<AiFaceResult> results;
     if (!engine->DetectFaces(image, &results, error))
       return json();
