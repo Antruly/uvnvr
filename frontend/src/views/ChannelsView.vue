@@ -39,12 +39,19 @@ interface OnvifDevice {
   xaddr: string
   ip: string
   protocol?: string
+  protocolHint?: string
   httpPort?: number
   rtspPort?: number
   name?: string
   model?: string
   brand?: string
   source?: string
+  sources?: string[]
+  mac?: string
+  serial?: string
+  firmware?: string
+  endpoint?: string
+  scopes?: string
 }
 
 interface DetectAttempt {
@@ -409,6 +416,27 @@ function deviceKey(device: OnvifDevice) {
   return device.xaddr || `${device.ip}:${device.httpPort ?? 80}:${device.protocol ?? 'onvif'}`
 }
 
+// The scan's protocol hint decides which transport the add flow uses; the
+// legacy `protocol` field remains for older servers.
+function deviceProtocol(device: OnvifDevice) {
+  return device.protocolHint || device.protocol || 'onvif'
+}
+
+function deviceSources(device: OnvifDevice) {
+  if (device.sources && device.sources.length > 0) return device.sources
+  return [deviceProtocol(device)]
+}
+
+function sourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    onvif: 'ONVIF',
+    sadp: 'SADP',
+    dahua: 'Dahua',
+    hikvision: 'Hikvision',
+  }
+  return labels[source] ?? source.toUpperCase()
+}
+
 async function detectFromModal() {
   if (!modal.host.trim()) return
   detecting.value = true
@@ -453,7 +481,7 @@ async function addDevice(device: OnvifDevice): Promise<boolean> {
   scanStatus[key] = 'adding'
   scan.probing = key
   try {
-    const isOnvif = Boolean(device.xaddr) && (!device.protocol || device.protocol === 'onvif')
+    const isOnvif = Boolean(device.xaddr) && deviceProtocol(device) === 'onvif'
     const payload: Record<string, unknown> = {
       host: device.ip,
       username: scan.username,
@@ -492,7 +520,7 @@ async function addDevice(device: OnvifDevice): Promise<boolean> {
         // Vendor HTTP detection already found the device; the server derives
         // the vendor RTSP URL from host/port, so no stream URL is sent.
         name: device.name || device.model || device.ip,
-        protocol: device.protocol || 'onvif',
+        protocol: deviceProtocol(device),
         port: device.rtspPort || 554,
         httpPort: device.httpPort || 80,
         mainUrl: '',
@@ -935,7 +963,7 @@ async function discover() {
 function selectHikvision() {
   scanSelection.value = new Set(
     scan.devices
-      .filter((device) => device.protocol === 'hikvision' && scanStatus[deviceKey(device)] !== 'added')
+      .filter((device) => deviceProtocol(device) === 'hikvision' && scanStatus[deviceKey(device)] !== 'added')
       .map(deviceKey),
   )
 }
@@ -1513,7 +1541,7 @@ onBeforeUnmount(() => {
             {{ scan.scanning ? t('channels.scanning') : t('channels.startScan') }}
           </button>
           <button
-            v-if="scan.devices.some((device) => device.protocol === 'hikvision')"
+            v-if="scan.devices.some((device) => deviceProtocol(device) === 'hikvision')"
             class="button"
             :disabled="scanAdding || atChannelLimit"
             @click="selectHikvision"
@@ -1567,13 +1595,23 @@ onBeforeUnmount(() => {
               </td>
               <td>{{ device.ip }}</td>
               <td>
-                <span class="pill">{{ device.protocol || 'onvif' }}</span>
+                <span class="pill">{{ deviceProtocol(device) }}</span>
                 <small v-if="device.brand" class="muted"> {{ device.brand }}</small>
+                <div class="scan-sources">
+                  <span
+                    v-for="source in deviceSources(device)"
+                    :key="source"
+                    class="scan-source"
+                  >{{ sourceLabel(source) }}</span>
+                </div>
               </td>
               <td class="mono">{{ device.httpPort ?? 80 }}</td>
               <td>
                 {{ device.name || device.model || device.ip }}
-                <small v-if="device.xaddr && (device.protocol === 'onvif' || !device.protocol)" class="mono block muted">
+                <small v-if="device.mac || device.serial" class="block muted mono">
+                  {{ [device.mac, device.serial].filter(Boolean).join(' · ') }}
+                </small>
+                <small v-if="device.xaddr && deviceProtocol(device) === 'onvif'" class="mono block muted">
                   {{ device.xaddr }}
                 </small>
               </td>

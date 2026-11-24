@@ -4494,6 +4494,23 @@ select.input {
   flex-wrap: wrap;
 }
 
+.scan-sources {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+
+.scan-source {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 3px 6px;
+}
+
 
 .auth-features {
   display: flex;

@@ -89,15 +89,28 @@ replayed after it succeeds.
 Open **Channels**. The list shows state, protocol, stream URLs, last error and the
 last online/offline times.
 
-### ONVIF discovery
+### LAN discovery (ONVIF, Hikvision SADP, Dahua)
 
-1. Click **Scan ONVIF**. Enter the camera user name and password used by the probe.
-2. Select a discovered device. UvNVR calls `GetDeviceInformation`, `GetProfiles` and
-   `GetStreamUri`, and shows the manufacturer, model, firmware and profiles.
-3. Click **Add** to create a channel from the selected profile.
+1. Click **Scan ONVIF**. The recorder sends ONVIF WS-Discovery, Hikvision SADP
+   and Dahua DHDiscover probes at the same time and collects answers for about
+   four seconds.
+2. Results show the protocol UvNVR will use, a source badge (ONVIF, SADP or
+   Dahua), MAC and serial number. A camera that answers several protocols is
+   listed once and its `sources` are merged.
+3. Select a device and click **Add**, or **Select Hikvision** to add every
+   Hikvision camera in one pass. ONVIF adds read `GetDeviceInformation`,
+   `GetProfiles` and `GetStreamUri`; Hikvision/Dahua adds generate the vendor
+   RTSP path.
 
-0.1.0 probes `http://` ONVIF device services only. If discovery is blocked by the
-network, add the channel manually with the protocol **ONVIF** and the device host.
+Discovery is read-only: it never activates or changes a camera's IP address.
+Multicast and broadcast do not cross routers, VLANs or the recorder's other
+subnets. If a camera is on a different network segment, add it manually with
+its protocol and host. The UDP ports are 3702 (ONVIF), 37020 (SADP) and 37810
+(Dahua); allow them through host firewalls.
+
+The scan window and protocol switches live in Settings (`scan.windowMs`,
+`scan.onvif`, `scan.sadp`, `scan.dahua`) and can be overridden per request. The
+legacy authenticated HTTP sweep remains available with `deepScan: true`.
 
 ### Manual RTSP
 

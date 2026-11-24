@@ -4,6 +4,21 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Parallel LAN discovery.** The scan endpoint now sends ONVIF
+  WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
+  collects replies for one configurable window (default 4 s). Results carry
+  MAC, serial number, firmware and a `sources` list; devices seen by several
+  protocols are merged by MAC, serial and IP. The scan also probes each local
+  IPv4 interface, so cameras on a second NIC are found. The legacy
+  authenticated `/24` HTTP sweep is now opt-in with `deepScan: true`.
+- `scan.windowMs`, `scan.onvif`, `scan.sadp`, `scan.dahua` and the multicast
+  target lists are stored settings and can be overridden per scan request.
+- `POST /api/v1/channels/scan` is an alias of `/api/v1/channels/discover`.
+
 ## [0.19.0] - 2026-11-23
 
 ### Added
