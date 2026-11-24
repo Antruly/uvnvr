@@ -26,6 +26,10 @@
 
 namespace uvnvr {
 
+#if UVNVR_ENABLE_AI
+class AiService;
+#endif
+
 using json = nlohmann::json;
 
 struct ChannelRow {
@@ -144,6 +148,9 @@ private:
   void RegisterRecordingRoutes();
   void RegisterStorageRoutes();
   void RegisterPlanRoutes();
+#if UVNVR_ENABLE_AI
+  void RegisterAiRoutes();
+#endif
   bool CreateStreamTicket(int64_t user_id, int64_t channel_id, const std::string& stream,
                           std::string* token, int64_t* expires_at, std::string* error);
   bool CreateEventsTicket(int64_t user_id, std::string* token, int64_t* expires_at,
@@ -264,6 +271,9 @@ private:
   std::unique_ptr<PlaybackService> playback_;
   std::unique_ptr<RtspServer> rtsp_;
   std::unique_ptr<proto::ProtoServer> proto_;
+#if UVNVR_ENABLE_AI
+  std::unique_ptr<AiService> ai_;
+#endif
   struct ProtoLiveSubscription {
     int64_t channel_id = 0;
     std::string stream;

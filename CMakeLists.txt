@@ -11,6 +11,7 @@ option(UVNVR_BUILD_TESTS "Build UvNVR unit tests" OFF)
 option(UVNVR_EMBED_WEB "Embed the built frontend into the binary" OFF)
 option(UVNVR_BUILD_SDK "Build the private-protocol C SDK" ON)
 option(UVNVR_ENABLE_QUIC "Enable the QUIC listener for the private protocol" ON)
+option(UVNVR_ENABLE_AI "Build the AI recognition pipeline (requires OpenCV)" ON)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -21,6 +22,43 @@ set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
 # reproducible developer setup use. Without it, find_package() is tried first.
 find_package(PkgConfig QUIET)
 find_package(OpenSSL REQUIRED)
+
+# AI recognition needs OpenCV core/imgproc/imgcodecs. It is optional: when the
+# headers are missing the module is not compiled and the rest of the service
+# builds and runs normally. Windows builds look in the local MinGW prefix used
+# by the developer setup; CI has no OpenCV, so AI is compiled out there.
+set(UVNVR_AI_ENABLED 0)
+if(UVNVR_ENABLE_AI)
+  if(WIN32)
+    foreach(_uvnvr_opencv_hint
+            "$ENV{HOME}/.local/opencv4-mingw"
+            "/home/zwy/.local/opencv4-mingw")
+      if(EXISTS "${_uvnvr_opencv_hint}")
+        list(APPEND CMAKE_PREFIX_PATH "${_uvnvr_opencv_hint}")
+      endif()
+    endforeach()
+  elseif(PkgConfig_FOUND)
+    # A MinGW OpenCV installed under ~/.local can otherwise win the default
+    # search (CMake scans <prefix>/<name>*). Pin the native package instead.
+    pkg_check_modules(UVNVR_OPENCV_PC QUIET opencv4)
+    if(UVNVR_OPENCV_PC_FOUND)
+      set(_uvnvr_opencv_config "${UVNVR_OPENCV_PC_LIBDIR}/cmake/opencv4")
+      if(EXISTS "${_uvnvr_opencv_config}/OpenCVConfig.cmake")
+        set(OpenCV_DIR "${_uvnvr_opencv_config}" CACHE PATH "OpenCV config" FORCE)
+      endif()
+    endif()
+  endif()
+  find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs)
+  if(OpenCV_FOUND)
+    set(UVNVR_AI_ENABLED 1)
+    message(STATUS "ai: OpenCV ${OpenCV_VERSION} (${OpenCV_DIR})")
+  else()
+    message(STATUS
+      "ai: OpenCV not found; UVNVR_ENABLE_AI is forced OFF and the AI module will not be compiled")
+  endif()
+else()
+  message(STATUS "ai: disabled by UVNVR_ENABLE_AI=OFF")
+endif()
 
 if(UVNVR_LIBUVCPP_ROOT)
   if(MSVC)
@@ -123,7 +161,19 @@ add_executable(uvnvr
   src/service.cpp
   src/proto/proto_protocol.cpp
   src/proto/proto_server.cpp
+  src/ai/plate_post.cpp
 )
+
+if(UVNVR_AI_ENABLED)
+  target_sources(uvnvr PRIVATE
+    src/ai/ai_engine.cpp
+    src/ai/ai_service.cpp
+  )
+  target_include_directories(uvnvr PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(uvnvr PRIVATE ${OpenCV_LIBS})
+endif()
+
+target_compile_definitions(uvnvr PRIVATE UVNVR_ENABLE_AI=${UVNVR_AI_ENABLED})
 
 if(WIN32)
   # The icon resource is what Explorer and shortcuts display; SetupIconFile

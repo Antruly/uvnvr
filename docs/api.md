@@ -563,6 +563,40 @@ frame. The performance tier caps simultaneous motion sampling (low 2, medium 4,
 high 8 channels). The `system.gpuEnabled` switch makes snapshots and motion
 samples try hardware decoding first and fall back to software.
 
+## AI recognition
+
+Full design, thread model and storage layout: [ai-recognition.md](ai-recognition.md).
+Reading uses `alert.view`; changing configuration uses `channel.manage`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/ai/config` | Global AI settings plus `running`. |
+| `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `stub`, `plateWatchlist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
+| `GET /api/v1/channels/{id}/ai` | Per-channel switches, interval override, ROI and the effective state. |
+| `PUT /api/v1/channels/{id}/ai` | Partial update of `{plateEnabled, faceEnabled, intervalMs}`; `intervalMs=0` inherits the global value. Hot-reloads. |
+| `PUT /api/v1/ai/channels` | `{channelIds:[...], plateEnabled, faceEnabled}` bulk switch. |
+| `GET /api/v1/ai/events` | `type=plate\|face` (default `plate`), `channelId`, `from`, `to`, `plate`, `limit` (1–500, default 50), `offset`. Returns `{total,items}` newest first. |
+| `GET /api/v1/ai/events/{id}` | One event; add `?type=face`. |
+| `GET /api/v1/ai/events/{id}/snapshot` | `type=plate\|face`, `kind=full\|crop`; returns `image/jpeg` after authentication. |
+| `GET /api/v1/ai/plates` | `plate`, optional `from`/`to`; at most 200 trajectory rows with channel names. |
+| `GET /api/v1/ai/stats` | `{enabled,running,plate:{workers,processed,failed,dropped,avgMs,fps},face:{...},channels:[{id,name,plate,face}]}`. |
+| `POST /api/v1/ai/test` | `{channelId, type?}` grabs one current frame and runs the configured engines; returns boxes, normalised text and elapsed milliseconds. |
+| `GET /api/v1/ai/faces`, `POST /api/v1/ai/faces`, `PUT/DELETE /api/v1/ai/faces/{id}` | Local face library CRUD (`name`, `note`, optional `feature` number array and `imagePath`). |
+
+Times in these endpoints are epoch **seconds**. Example event item:
+
+```json
+{"id":4,"type":"plate","channelId":1,"channelName":"LabCam","ts":1795515031,
+ "plate":"京A12345","plateNorm":"京A12345","confidence":0.93,"color":"蓝",
+ "box":{"x":128,"y":240,"w":160,"h":48},"engine":"stub",
+ "imageUrl":"/api/v1/ai/events/4/snapshot?type=plate&kind=full",
+ "cropUrl":"/api/v1/ai/events/4/snapshot?type=plate&kind=crop","createdAt":1795515031}
+```
+
+The same recognition results are pushed on the existing `/ws/events` socket as
+`ai.plate` and `ai.face` messages (samples in the design document). Watchlist
+hits also insert an `alerts` row with `type='ai_plate'` or `type='ai_face'`.
+
 ## Audit export
 
 `GET /api/v1/audit/export` accepts the same `category`, `level`, `q`, `from` and

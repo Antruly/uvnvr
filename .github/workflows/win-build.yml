@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - tmp/win-build-audio
+      - feat/ai-pipeline
 
 permissions:
   contents: read

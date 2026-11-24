@@ -1,5 +1,9 @@
 #include "app.h"
 
+#if UVNVR_ENABLE_AI
+#include "ai/ai_service.h"
+#endif
+
 #include "brand_http.h"
 #include "detect.h"
 #include "discovery.h"
@@ -1086,6 +1090,59 @@ bool App::Migrate(std::string* error) {
       "snapshot_path TEXT NOT NULL DEFAULT '',"
       "acknowledged INTEGER NOT NULL DEFAULT 0,"
       "created_at INTEGER NOT NULL)",
+      // AI recognition (docs/ai-recognition.md). Settings and events live in
+      // the same SQLite database as the rest of the service.
+      "CREATE TABLE IF NOT EXISTS ai_channel_settings ("
+      "channel_id INTEGER PRIMARY KEY,"
+      "plate_enabled INTEGER NOT NULL DEFAULT 0,"
+      "face_enabled INTEGER NOT NULL DEFAULT 0,"
+      "interval_ms INTEGER NOT NULL DEFAULT 0,"
+      "plate_roi TEXT NOT NULL DEFAULT '',"
+      "face_roi TEXT NOT NULL DEFAULT '',"
+      "updated_at INTEGER NOT NULL DEFAULT 0)",
+      "CREATE TABLE IF NOT EXISTS ai_plate_events ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL,"
+      "ts INTEGER NOT NULL,"
+      "plate TEXT NOT NULL,"
+      "plate_norm TEXT NOT NULL,"
+      "confidence REAL,"
+      "color TEXT,"
+      "x INTEGER,"
+      "y INTEGER,"
+      "w INTEGER,"
+      "h INTEGER,"
+      "image_path TEXT,"
+      "crop_path TEXT,"
+      "engine TEXT,"
+      "created_at INTEGER)",
+      "CREATE INDEX IF NOT EXISTS idx_ai_plate_ts ON ai_plate_events(ts)",
+      "CREATE INDEX IF NOT EXISTS idx_ai_plate_norm ON ai_plate_events(plate_norm)",
+      "CREATE TABLE IF NOT EXISTS ai_face_events ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "channel_id INTEGER NOT NULL,"
+      "ts INTEGER NOT NULL,"
+      "quality REAL,"
+      "confidence REAL,"
+      "x INTEGER,"
+      "y INTEGER,"
+      "w INTEGER,"
+      "h INTEGER,"
+      "image_path TEXT,"
+      "crop_path TEXT,"
+      "feature_blob BLOB,"
+      "engine TEXT,"
+      "matched_face_id INTEGER,"
+      "matched_score REAL,"
+      "created_at INTEGER)",
+      "CREATE INDEX IF NOT EXISTS idx_ai_face_ts ON ai_face_events(ts)",
+      "CREATE TABLE IF NOT EXISTS ai_faces ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "name TEXT NOT NULL,"
+      "note TEXT,"
+      "feature_blob BLOB,"
+      "image_path TEXT,"
+      "created_at INTEGER)",
       "CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at)",
       "CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged, created_at)",
       "CREATE INDEX IF NOT EXISTS idx_channels_enabled ON channels(enabled)",
@@ -1201,6 +1258,21 @@ bool App::Migrate(std::string* error) {
       {"scan.dahua", "1"},
       {"scan.sadp_targets", "239.255.255.250:37020,255.255.255.255:37020"},
       {"scan.dahua_targets", "239.255.255.231:37810,266.0.0.100:22531"},
+      {"ai.enabled", "0"},
+      {"ai.plate.enabled", "1"},
+      {"ai.face.enabled", "1"},
+      {"ai.intervalMs", "1000"},
+      {"ai.queueDepth", "8"},
+      {"ai.plateWorkers", "2"},
+      {"ai.faceWorkers", "2"},
+      {"ai.minPlateConfidence", "0.6"},
+      {"ai.minFaceQuality", "0.3"},
+      {"ai.snapshotRetentionDays", "30"},
+      {"ai.stub", "0"},
+      {"ai.plate.watchlist", ""},
+      {"ai.face.watchlist", ""},
+      {"ai.face.matchThreshold", "0.75"},
+      {"ai.dedupSeconds", "10"},
   };
   for (const auto& [key, value] : settings) {
     uvcpp::uvcpp_db_params params;
@@ -2259,6 +2331,22 @@ int App::Run() {
     std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
   }
   StartPrivateProtocol();
+#if UVNVR_ENABLE_AI
+  {
+    AiService::Options options;
+    options.db = &db_;
+    options.media = media_.get();
+    options.data_dir = config_.data_dir;
+    options.broadcast = [this](const json& event) { BroadcastEvent(event); };
+    options.raise_alert =
+        [this](int64_t channel_id, const std::string& type, const std::string& level,
+               const std::string& message, const std::string& snapshot_path) {
+          RaiseAlert(channel_id, type, level, message, snapshot_path);
+        };
+    ai_ = std::make_unique<AiService>(std::move(options));
+    ai_->Start();
+  }
+#endif
   StartMonitors();
   StartStatusPush();
 
@@ -2281,6 +2369,10 @@ int App::Run() {
   }
   web_.join();
   StopPrivateProtocol();
+#if UVNVR_ENABLE_AI
+  if (ai_)
+    ai_->Stop();
+#endif
   if (recording_)
     recording_->Stop();
   media_.reset();
@@ -3472,6 +3564,9 @@ void App::RegisterProtectedRoutes() {
   RegisterStorageRoutes();
   RegisterPlanRoutes();
   RegisterAlertRoutes();
+#if UVNVR_ENABLE_AI
+  RegisterAiRoutes();
+#endif
   RegisterSystemRoutes();
 
   // Users -----------------------------------------------------------------
@@ -8911,6 +9006,10 @@ void App::RegisterRecordingRoutes() {
 App::~App() {
   StopStatusPush();
   StopMonitors();
+#if UVNVR_ENABLE_AI
+  if (ai_)
+    ai_->Stop();
+#endif
   if (onvif_events_)
     onvif_events_->Stop();
 }
@@ -9353,6 +9452,547 @@ void App::RegisterAlertRoutes() {
                },
                "alert.view"));
 }
+
+#if UVNVR_ENABLE_AI
+void App::RegisterAiRoutes() {
+  // Global configuration -------------------------------------------------
+  web_.get("/api/v1/ai/config",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 auto config = std::make_shared<json>();
+                 RunWork([this, config] { *config = ai_->ConfigJson(); },
+                         [config, &resp, next] {
+                           SendJson(resp, 200, *config);
+                           next();
+                         });
+               },
+               "alert.view"));
+
+  web_.put("/api/v1/ai/config",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork(
+                     [this, body, result, error, ok] { *ok = ai_->UpdateConfig(body, result.get(), error.get()); },
+                     [ok, result, error, &resp, next] {
+                       if (!*ok) {
+                         SendError(resp, 400, "invalid_ai_config", *error);
+                       } else {
+                         SendJson(resp, 200, *result);
+                       }
+                       next();
+                     });
+               },
+               "channel.manage"));
+
+  // Per-channel switches --------------------------------------------------
+  web_.get("/api/v1/channels/:id/ai",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(req.param("id"), &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, channel_id, result, error, ok] {
+                   *ok = ai_->GetChannelSettings(channel_id, result.get(), error.get());
+                 }, [ok, result, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 404, "channel_not_found", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.put("/api/v1/channels/:id/ai",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t channel_id = 0;
+                 if (!ParseIntParam(req.param("id"), &channel_id) || channel_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid channel id");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 auto result = std::make_shared<json>();
+                 RunWork([this, channel_id, body, error, ok, result] {
+                   *ok = ai_->UpdateChannelSettings(channel_id, body, error.get());
+                   if (*ok)
+                     *ok = ai_->GetChannelSettings(channel_id, result.get(), error.get());
+                 }, [ok, error, result, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 400, "invalid_channel_ai", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "channel.manage"));
+
+  web_.put("/api/v1/ai/channels",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object() || !body.contains("channelIds") ||
+                     !body["channelIds"].is_array()) {
+                   SendError(resp, 400, "invalid_json",
+                             "request body must contain a channelIds array");
+                   next();
+                   return;
+                 }
+                 if (!body.contains("plateEnabled") || !body["plateEnabled"].is_boolean() ||
+                     !body.contains("faceEnabled") || !body["faceEnabled"].is_boolean()) {
+                   SendError(resp, 400, "invalid_json",
+                             "plateEnabled and faceEnabled must be booleans");
+                   next();
+                   return;
+                 }
+                 auto channel_ids = std::make_shared<std::vector<int64_t>>();
+                 for (const auto& item : body["channelIds"]) {
+                   if (!item.is_number_integer()) {
+                     SendError(resp, 400, "invalid_json", "channelIds must contain integers");
+                     next();
+                     return;
+                   }
+                   channel_ids->push_back(item.get<int64_t>());
+                 }
+                 const bool plate = body["plateEnabled"].get<bool>();
+                 const bool face = body["faceEnabled"].get<bool>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, channel_ids, plate, face, error, ok] {
+                   *ok = ai_->UpdateChannels(*channel_ids, plate, face, error.get());
+                 }, [ok, error, channel_ids, plate, face, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 400, "invalid_channel_ai", *error);
+                   } else {
+                     SendJson(resp, 200, json{{"ok", true},
+                                              {"updated", channel_ids->size()},
+                                              {"plateEnabled", plate},
+                                              {"faceEnabled", face}});
+                   }
+                   next();
+                 });
+               },
+               "channel.manage"));
+
+  // Events ----------------------------------------------------------------
+  web_.get("/api/v1/ai/events",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 const std::string type = req.query("type") ? *req.query("type") : "plate";
+                 int64_t channel_id = 0;
+                 int64_t from = 0;
+                 int64_t to = 0;
+                 int64_t limit = 50;
+                 int64_t offset = 0;
+                 if (const std::string* value = req.query("channelId")) {
+                   if (!ParseIntParam(value, &channel_id) || channel_id <= 0) {
+                     SendError(resp, 400, "invalid_channel", "invalid channelId");
+                     next();
+                     return;
+                   }
+                 }
+                 if (const std::string* value = req.query("from")) {
+                   if (!ParseIntParam(value, &from) || from < 0) {
+                     SendError(resp, 400, "invalid_time", "from must be epoch seconds");
+                     next();
+                     return;
+                   }
+                 }
+                 if (const std::string* value = req.query("to")) {
+                   if (!ParseIntParam(value, &to) || to < 0) {
+                     SendError(resp, 400, "invalid_time", "to must be epoch seconds");
+                     next();
+                     return;
+                   }
+                 }
+                 if (const std::string* value = req.query("limit")) {
+                   if (!ParseIntParam(value, &limit) || limit <= 0 || limit > 500) {
+                     SendError(resp, 400, "invalid_limit", "limit must be between 1 and 500");
+                     next();
+                     return;
+                   }
+                 }
+                 if (const std::string* value = req.query("offset")) {
+                   if (!ParseIntParam(value, &offset) || offset < 0) {
+                     SendError(resp, 400, "invalid_offset", "offset must not be negative");
+                     next();
+                     return;
+                   }
+                 }
+                 const std::string plate = req.query("plate") ? *req.query("plate") : "";
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, type, channel_id, from, to, plate, limit, offset, result, error,
+                          ok] {
+                   *result = ai_->QueryEvents(type, channel_id, from, to, plate,
+                                              static_cast<int>(limit),
+                                              static_cast<int>(offset), error.get());
+                   *ok = !result->is_null();
+                 }, [ok, result, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 400, "invalid_query", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.get("/api/v1/ai/events/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t event_id = 0;
+                 if (!ParseIntParam(req.param("id"), &event_id) || event_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid event id");
+                   next();
+                   return;
+                 }
+                 const std::string type = req.query("type") ? *req.query("type") : "plate";
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, type, event_id, result, error, ok] {
+                   *result = ai_->GetEvent(type, event_id, error.get());
+                   *ok = !result->is_null();
+                 }, [ok, error, result, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 404, "event_not_found", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.get("/api/v1/ai/events/:id/snapshot",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t event_id = 0;
+                 if (!ParseIntParam(req.param("id"), &event_id) || event_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid event id");
+                   next();
+                   return;
+                 }
+                 const std::string type = req.query("type") ? *req.query("type") : "plate";
+                 const std::string kind = req.query("kind") ? *req.query("kind") : "full";
+                 auto bytes = std::make_shared<std::string>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, type, event_id, kind, bytes, error, ok] {
+                   *ok = ai_->ReadSnapshot(type, event_id, kind, bytes.get(), error.get());
+                 }, [ok, bytes, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 404, "snapshot_not_found", *error);
+                   } else {
+                     resp.set_header("Content-Type", "image/jpeg");
+                     resp.status(200).body(*bytes, "image/jpeg");
+                     resp.end();
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.get("/api/v1/ai/plates",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 const std::string plate = req.query("plate") ? *req.query("plate") : "";
+                 if (plate.empty()) {
+                   SendError(resp, 400, "invalid_plate", "plate is required");
+                   next();
+                   return;
+                 }
+                 int64_t from = 0;
+                 int64_t to = 0;
+                 if (const std::string* value = req.query("from")) {
+                   if (!ParseIntParam(value, &from) || from < 0) {
+                     SendError(resp, 400, "invalid_time", "from must be epoch seconds");
+                     next();
+                     return;
+                   }
+                 }
+                 if (const std::string* value = req.query("to")) {
+                   if (!ParseIntParam(value, &to) || to < 0) {
+                     SendError(resp, 400, "invalid_time", "to must be epoch seconds");
+                     next();
+                     return;
+                   }
+                 }
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, plate, from, to, result, error, ok] {
+                   *result = ai_->PlateTrail(plate, from, to, error.get());
+                   *ok = !result->is_null();
+                 }, [ok, result, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 400, "invalid_query", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.get("/api/v1/ai/stats",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 auto stats = std::make_shared<json>();
+                 RunWork([this, stats] { *stats = ai_->Stats(); },
+                         [stats, &resp, next] {
+                           SendJson(resp, 200, *stats);
+                           next();
+                         });
+               },
+               "alert.view"));
+
+  web_.post("/api/v1/ai/test",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  if (!ai_) {
+                    SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                    next();
+                    return;
+                  }
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object() || !body.contains("channelId") ||
+                      !body["channelId"].is_number_integer()) {
+                    SendError(resp, 400, "invalid_json", "channelId is required");
+                    next();
+                    return;
+                  }
+                  const int64_t channel_id = body["channelId"].get<int64_t>();
+                  const std::string type = body.value("type", std::string("both"));
+                  auto result = std::make_shared<json>();
+                  auto error = std::make_shared<std::string>();
+                  auto ok = std::make_shared<bool>(false);
+                  RunWork([this, channel_id, type, result, error, ok] {
+                    *result = ai_->TestDetect(channel_id, type, error.get());
+                    *ok = !result->is_null();
+                  }, [ok, result, error, &resp, next] {
+                    if (!*ok) {
+                      SendError(resp, 400, "ai_test_failed", *error);
+                    } else {
+                      SendJson(resp, 200, *result);
+                    }
+                    next();
+                  });
+                },
+                "channel.manage"));
+
+  // Local face library ----------------------------------------------------
+  web_.get("/api/v1/ai/faces",
+           Protected(
+               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 auto result = std::make_shared<json>();
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, result, error, ok] {
+                   *result = ai_->ListFaces(error.get());
+                   *ok = !result->is_null();
+                 }, [ok, result, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 500, "database_error", *error);
+                   } else {
+                     SendJson(resp, 200, *result);
+                   }
+                   next();
+                 });
+               },
+               "alert.view"));
+
+  web_.post("/api/v1/ai/faces",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  if (!ai_) {
+                    SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                    next();
+                    return;
+                  }
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  auto id = std::make_shared<int64_t>(0);
+                  auto error = std::make_shared<std::string>();
+                  auto ok = std::make_shared<bool>(false);
+                  RunWork([this, body, id, error, ok] { *ok = ai_->CreateFace(body, id.get(), error.get()); },
+                          [ok, id, error, &resp, next] {
+                            if (!*ok) {
+                              SendError(resp, 400, "invalid_face", *error);
+                            } else {
+                              SendJson(resp, 201, json{{"id", *id}});
+                            }
+                            next();
+                          });
+                },
+                "channel.manage"));
+
+  web_.put("/api/v1/ai/faces/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t face_id = 0;
+                 if (!ParseIntParam(req.param("id"), &face_id) || face_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid face id");
+                   next();
+                   return;
+                 }
+                 const json body = json::parse(req.body_str(), nullptr, false);
+                 if (body.is_discarded() || !body.is_object()) {
+                   SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                   next();
+                   return;
+                 }
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, face_id, body, error, ok] {
+                   *ok = ai_->UpdateFace(face_id, body, error.get());
+                 }, [ok, error, &resp, next] {
+                   if (!*ok) {
+                     SendError(resp, 400, "invalid_face", *error);
+                   } else {
+                     SendJson(resp, 200, json{{"ok", true}});
+                   }
+                   next();
+                 });
+               },
+               "channel.manage"));
+
+  web_.del("/api/v1/ai/faces/:id",
+           Protected(
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next next) {
+                 if (!ai_) {
+                   SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                   next();
+                   return;
+                 }
+                 int64_t face_id = 0;
+                 if (!ParseIntParam(req.param("id"), &face_id) || face_id <= 0) {
+                   SendError(resp, 400, "invalid_id", "invalid face id");
+                   next();
+                   return;
+                 }
+                 auto error = std::make_shared<std::string>();
+                 auto ok = std::make_shared<bool>(false);
+                 RunWork([this, face_id, error, ok] { *ok = ai_->DeleteFace(face_id, error.get()); },
+                         [ok, error, &resp, next] {
+                           if (!*ok) {
+                             SendError(resp, 400, "invalid_face", *error);
+                           } else {
+                             SendJson(resp, 200, json{{"ok", true}});
+                           }
+                           next();
+                         });
+               },
+               "channel.manage"));
+}
+#endif
 
 void App::RegisterSystemRoutes() {
   web_.get("/api/v1/system/config",
