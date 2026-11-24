@@ -1088,6 +1088,11 @@ bool ProbeOnvif(const std::string& xaddr, const std::string& username, const std
   std::string media_error;
   const std::string media_service =
       ResolveMediaService(service, security, username, password, &media_error);
+  if (media_service.empty()) {
+    if (error != nullptr && error->empty())
+      *error = "camera did not answer GetCapabilities and has no media service";
+    return false;
+  }
   const std::string profiles_xml = SoapCall(
       media_service, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>",
       username, password, error);
@@ -1176,7 +1181,32 @@ std::string ResolveMediaService(const std::string& device, const std::string& se
     if (!xaddr.empty())
       return xaddr;
   }
-  return device;
+  // Some encoders answer GetDeviceInformation but refuse or mis-answer
+  // GetCapabilities (Desk2ONVIF replies 401 to the digest there). ONVIF puts the
+  // media service next to the device service, so try the conventional paths
+  // before giving up: calling GetProfiles on the device endpoint only earns a
+  // ter:NoSuchService fault.
+  std::string derived = device;
+  const size_t device_service = derived.find("/onvif/device_service");
+  if (device_service != std::string::npos)
+    derived.replace(device_service, std::string("/onvif/device_service").size(),
+                    "/onvif/media_service");
+  else if (!derived.empty() && derived.back() == '/')
+    derived += "media_service";
+  else if (!derived.empty())
+    derived += "/onvif/media_service";
+  if (derived != device) {
+    std::string probe_error;
+    const std::string profiles =
+        SoapCall(derived, security, "<GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/>",
+                 username, password, &probe_error);
+    if (!profiles.empty()) {
+      if (error != nullptr && !probe_error.empty())
+        error->clear();
+      return derived;
+    }
+  }
+  return {};
 }
 
 bool GetOnvifEncoderConfig(const std::string& host, int port, const std::string& username,
