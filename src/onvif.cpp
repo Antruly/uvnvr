@@ -460,37 +460,51 @@ std::map<std::string, std::string> g_auth_cache;
 std::string HttpPostTimeout(const std::string& url, const std::string& body, int timeout_seconds,
                             const std::string& username, const std::string& password,
                             std::string* error) {
-  HttpRawResponse response;
   const std::string cache_key = username + "@" + url;
+
+  // Embedded cameras occasionally accept a connection and drop it while they
+  // are still busy with the previous request, so a single exchange gets one
+  // short retry.
+  auto exchange = [&](const std::string& headers, HttpRawResponse* out) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      if (HttpExchange(url, body, timeout_seconds, headers, out, error))
+        return true;
+      const bool closed =
+          error != nullptr && error->find("closed the connection without a response") != std::string::npos;
+      if (!closed || attempt == 2)
+        return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 200 : 500));
+    }
+    return false;
+  };
+
+  // Replay the digest a camera already accepted: some devices hand out a single
+  // nonce and refuse every later nonce count.
   if (!username.empty()) {
-    std::lock_guard<std::mutex> lock(g_auth_cache_mutex);
-    auto cached = g_auth_cache.find(cache_key);
-    if (cached != g_auth_cache.end()) {
+    std::string cached;
+    {
+      std::lock_guard<std::mutex> lock(g_auth_cache_mutex);
+      auto found = g_auth_cache.find(cache_key);
+      if (found != g_auth_cache.end())
+        cached = found->second;
+    }
+    if (!cached.empty()) {
       HttpRawResponse reused;
-      if (!HttpExchange(url, body, timeout_seconds, cached->second + "\r\n", &reused, error))
-        return {};
-      if (reused.status < 400)
+      if (exchange(cached + "\r\n", &reused) && reused.status < 400)
         return reused.body;
-      g_auth_cache.erase(cached);
+      std::lock_guard<std::mutex> lock(g_auth_cache_mutex);
+      g_auth_cache.erase(cache_key);
     }
   }
-  // Simple embedded HTTP servers sometimes accept a connection and drop it
-  // when they are still busy with the previous request. One short retry is
-  // enough for those devices and keeps a genuine failure fast.
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    if (HttpExchange(url, body, timeout_seconds, "", &response, error))
-      break;
-    const bool closed = error != nullptr &&
-                        error->find("closed the connection without a response") != std::string::npos;
-    if (!closed || attempt == 1)
-      return {};
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-  }
+
+  HttpRawResponse response;
+  if (!exchange("", &response))
+    return {};
   if (response.status == 401 && !username.empty()) {
     const std::string authorization = BuildAuthorization(url, response.headers, username, password);
     if (!authorization.empty()) {
       HttpRawResponse retried;
-      if (!HttpExchange(url, body, timeout_seconds, authorization + "\r\n", &retried, error))
+      if (!exchange(authorization + "\r\n", &retried))
         return {};
       response = std::move(retried);
       if (response.status < 400) {
@@ -498,14 +512,13 @@ std::string HttpPostTimeout(const std::string& url, const std::string& body, int
         if (g_auth_cache.size() > 128)
           g_auth_cache.clear();
         g_auth_cache[cache_key] = authorization;
-      }
-      // A camera that rotates its nonce answers the first digest attempt with
-      // a new challenge; honour it once instead of failing the whole call.
-      if (response.status == 401) {
+      } else if (response.status == 401) {
+        // A camera that rotates its nonce answers the first digest attempt
+        // with a fresh challenge; honour it once.
         const std::string second = BuildAuthorization(url, response.headers, username, password);
         if (!second.empty() && second != authorization) {
           HttpRawResponse retried_again;
-          if (!HttpExchange(url, body, timeout_seconds, second + "\r\n", &retried_again, error))
+          if (!exchange(second + "\r\n", &retried_again))
             return {};
           response = std::move(retried_again);
         }
