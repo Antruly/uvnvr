@@ -4,6 +4,7 @@
 #include "ai_engine.h"
 #include "media.h"
 #include "plate_post.h"
+#include "snapshot_quota.h"
 
 #include <algorithm>
 #include <atomic>
@@ -250,6 +251,14 @@ bool WriteJpeg(const cv::Mat& image, const std::string& path, const SnapshotSeal
   return out.good();
 }
 
+int64_t FileSize(const std::string& path) {
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error)
+    return 0;
+  return static_cast<int64_t>(size);
+}
+
 // Parses "x,y,w,h" percentages. Returns the full frame for empty/invalid input.
 cv::Rect PercentRect(const cv::Mat& image, const std::string& roi) {
   const cv::Rect full(0, 0, image.cols, image.rows);
@@ -302,6 +311,24 @@ cv::Rect ExpandedBox(const cv::Mat& image, const cv::Rect& box) {
   const int padding = std::max(4, std::max(box.width, box.height) / 2);
   return ClampBox(image, cv::Rect(box.x - padding, box.y - padding, box.width + 2 * padding,
                                   box.height + 2 * padding));
+}
+
+// Intersection over union of two detection boxes; 0 for empty or disjoint
+// boxes. Used by the face dedup window.
+double BoxIou(const cv::Rect& a, const cv::Rect& b) {
+  if (a.width <= 0 || a.height <= 0 || b.width <= 0 || b.height <= 0)
+    return 0.0;
+  const int left = std::max(a.x, b.x);
+  const int top = std::max(a.y, b.y);
+  const int right = std::min(a.x + a.width, b.x + b.width);
+  const int bottom = std::min(a.y + a.height, b.y + b.height);
+  if (right <= left || bottom <= top)
+    return 0.0;
+  const double intersection =
+      static_cast<double>(right - left) * static_cast<double>(bottom - top);
+  const double area_a = static_cast<double>(a.width) * static_cast<double>(a.height);
+  const double area_b = static_cast<double>(b.width) * static_cast<double>(b.height);
+  return intersection / (area_a + area_b - intersection);
 }
 
 struct Frame {
@@ -424,6 +451,21 @@ struct AiService::Impl {
   std::mutex dedup_mutex;
   std::map<std::pair<int64_t, std::string>, int64_t> plate_dedup;
 
+  // Face dedup keeps the boxes that produced events, per channel. A still face
+  // matches one of them while its box overlaps and the window has not elapsed.
+  struct FaceDedupEntry {
+    cv::Rect box;
+    int64_t ts_seconds = 0;
+  };
+  std::mutex face_dedup_mutex;
+  std::map<int64_t, std::vector<FaceDedupEntry>> face_dedup;
+  std::atomic<uint64_t> face_deduped{0};
+
+  // Quota gate shared by the plate and face workers.
+  SnapshotQuota snapshot_quota;
+  std::mutex snapshot_log_mutex;
+  int64_t snapshot_log_last_ms = 0;
+
   mutable std::mutex faces_mutex;
   std::vector<FaceRecord> faces;
 
@@ -486,6 +528,52 @@ struct AiService::Impl {
 
   // ---- loading ----------------------------------------------------------
 
+  std::string MetaValue(const std::string& key) {
+    if (opts.db == nullptr)
+      return "";
+    uvcpp::uvcpp_db_params params;
+    params.add(key);
+    uvcpp::uvcpp_db_table table;
+    if (!uvcpp::uvcpp_db_ok(
+            opts.db->query("SELECT value FROM system_meta WHERE key = ?", params, &table)) ||
+        table.empty()) {
+      return "";
+    }
+    return SqlColumn(table, 0, "value");
+  }
+
+  void WriteMetaValue(const std::string& key, const std::string& value) {
+    if (opts.db == nullptr)
+      return;
+    uvcpp::uvcpp_db_params params;
+    params.add(key);
+    params.add(value);
+    if (!uvcpp::uvcpp_db_ok(opts.db->execute(
+            "INSERT INTO system_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params))) {
+      std::fprintf(stderr, "ai: cannot persist %s: %s\n", key.c_str(),
+                   opts.db->last_error().c_str());
+    }
+  }
+
+  // Binds the quota gate to the current settings. The daily counter is seeded
+  // from system_meta once per process so a restart resumes where it left off.
+  void ConfigureSnapshotQuotaLocked() {
+    SnapshotQuotaLimits limits;
+    limits.max_per_day = settings.snapshot_max_per_day;
+    limits.max_total_mb = settings.snapshot_max_total_mb;
+    limits.min_free_mb = settings.snapshot_min_free_mb;
+    const std::string root = (std::filesystem::path(opts.data_dir) / "ai").string();
+    snapshot_quota.SetPersist([this](int64_t day, int64_t count) {
+      WriteMetaValue("ai.snapshot.day", std::to_string(day));
+      WriteMetaValue("ai.snapshot.count", std::to_string(count));
+    });
+    snapshot_quota.Configure(root, limits, NowMs());
+    snapshot_quota.Seed(ParseIntText(MetaValue("ai.snapshot.day"), 0),
+                        ParseIntText(MetaValue("ai.snapshot.count"), 0), NowMs());
+  }
+
   void LoadSettingsLocked() {
     settings.enabled = SettingBool("ai.enabled", false);
     settings.plate_enabled = SettingBool("ai.plate.enabled", true);
@@ -507,8 +595,16 @@ struct AiService::Impl {
     settings.snapshot_retention_days = static_cast<int>(
         std::max<int64_t>(1, std::min<int64_t>(3650, SettingInt("ai.snapshotRetentionDays", 30))));
     settings.snapshot_encrypt = SettingBool("ai.snapshot.encrypt", false);
+    settings.snapshot_max_per_day = std::max<int64_t>(
+        0, std::min<int64_t>(1000000, SettingInt("ai.snapshotMaxPerDay", 20000)));
+    settings.snapshot_max_total_mb = std::max<int64_t>(
+        0, std::min<int64_t>(10000000, SettingInt("ai.snapshotMaxTotalMb", 2048)));
+    settings.snapshot_min_free_mb = std::max<int64_t>(
+        0, std::min<int64_t>(10000000, SettingInt("ai.snapshotMinFreeMb", 2048)));
     settings.dedup_seconds = static_cast<int>(
         std::max<int64_t>(0, std::min<int64_t>(3600, SettingInt("ai.dedupSeconds", 10))));
+    settings.face_dedup_seconds = static_cast<int>(
+        std::max<int64_t>(0, std::min<int64_t>(3600, SettingInt("ai.faceDedupSeconds", 10))));
     settings.stub = SettingBool("ai.stub", false);
     std::string face_model_dir = Setting("ai.face.modelDir", "");
     if (face_model_dir.empty()) {
@@ -587,6 +683,7 @@ struct AiService::Impl {
     config.min_face_quality = settings.min_face_quality;
     config.face_match_threshold = settings.face_match_threshold;
     config.dedup_seconds = settings.dedup_seconds;
+    config.face_dedup_seconds = settings.face_dedup_seconds;
     config.face_model_dir = settings.face_model_dir;
     config.face_pixel_level = settings.face_pixel_level;
     config.plate_watchlist = settings.plate_watchlist;
@@ -608,6 +705,7 @@ struct AiService::Impl {
       LoadSettingsLocked();
       LoadChannelsLocked();
       LoadFaces();
+      ConfigureSnapshotQuotaLocked();
       stop.store(false);
       // Counters stay cumulative across Reload() so callers can compare
       // before/after values; they start at zero for the service lifetime.
@@ -728,6 +826,8 @@ struct AiService::Impl {
     }
     if (maintenance.joinable())
       maintenance.join();
+    // Workers are joined, so the day counter can be flushed safely.
+    snapshot_quota.Flush();
     if (was_running) {
       std::printf("ai: pipeline stopped\n");
       std::fflush(stdout);
@@ -927,22 +1027,63 @@ struct AiService::Impl {
     return std::to_string(ts_ms) + suffix;
   }
 
+  void WarnSnapshotBlocked(SnapshotBlockReason reason, int64_t now_ms) {
+    {
+      std::lock_guard<std::mutex> lock(snapshot_log_mutex);
+      if (snapshot_log_last_ms != 0 && now_ms - snapshot_log_last_ms < 60000)
+        return;
+      snapshot_log_last_ms = now_ms;
+    }
+    const int64_t free_bytes = snapshot_quota.FreeBytes();
+    const std::string free_text =
+        free_bytes < 0 ? "free space unknown"
+                       : std::to_string(free_bytes / (1024 * 1024)) + " MB free";
+    std::fprintf(stderr,
+                 "ai: warning: snapshot write suppressed by %s (today %lld image(s), %lld MB in "
+                 "the snapshot directory, %s); events are kept without images\n",
+                 SnapshotBlockReasonName(reason),
+                 static_cast<long long>(snapshot_quota.Today()),
+                 static_cast<long long>(snapshot_quota.DirectoryBytes() / (1024 * 1024)),
+                 free_text.c_str());
+    std::fflush(stderr);
+  }
+
   void SaveImages(const Frame& frame, const cv::Rect& box, const std::string& suffix,
                   const std::string& directory, std::string* full_path, std::string* crop_path) {
     full_path->clear();
     crop_path->clear();
     if (directory.empty())
       return;
+    const int64_t now = NowMs();
     const std::string base = UniqueBase(directory, frame.ts_ms, suffix);
     const std::filesystem::path full = std::filesystem::path(directory) / (base + "_full.jpg");
     const std::filesystem::path crop = std::filesystem::path(directory) / (base + "_crop.jpg");
-    if (WriteJpeg(frame.bgr, full.string(), opts.seal_snapshot))
+
+    SnapshotBlockReason blocked = SnapshotBlockReason::kNone;
+    if (!snapshot_quota.Acquire(now, &blocked)) {
+      WarnSnapshotBlocked(blocked, now);
+      return;
+    }
+    if (WriteJpeg(frame.bgr, full.string(), opts.seal_snapshot)) {
       *full_path = full.string();
+      snapshot_quota.Commit(FileSize(full.string()), now);
+    } else {
+      snapshot_quota.Abort();
+    }
+
     const cv::Rect expanded = ExpandedBox(frame.bgr, box);
     if (expanded.width > 0 && expanded.height > 0) {
+      if (!snapshot_quota.Acquire(now, &blocked)) {
+        WarnSnapshotBlocked(blocked, now);
+        return;
+      }
       const cv::Mat cropped = frame.bgr(expanded);
-      if (WriteJpeg(cropped, crop.string(), opts.seal_snapshot))
+      if (WriteJpeg(cropped, crop.string(), opts.seal_snapshot)) {
         *crop_path = crop.string();
+        snapshot_quota.Commit(FileSize(crop.string()), now);
+      } else {
+        snapshot_quota.Abort();
+      }
     }
   }
 
@@ -1017,6 +1158,43 @@ struct AiService::Impl {
           ++entry;
       }
     }
+    return false;
+  }
+
+  // A still face keeps producing detections: the same channel plus an
+  // overlapping box (IoU > 0.5, centres within half a box width) inside the
+  // window is the same face, not a new arrival. Suppressed detections do not
+  // refresh the window, so an immobile face still yields one event per
+  // ai.faceDedupSeconds instead of one per capture interval.
+  bool FaceIsDuplicate(int64_t channel_id, const cv::Rect& box, int dedup_seconds,
+                       int64_t frame_ts) {
+    if (dedup_seconds <= 0)
+      return false;
+    std::lock_guard<std::mutex> lock(face_dedup_mutex);
+    std::vector<FaceDedupEntry>& entries = face_dedup[channel_id];
+    const int64_t window = dedup_seconds;
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [&](const FaceDedupEntry& entry) {
+                                   return std::llabs(frame_ts - entry.ts_seconds) >= window;
+                                 }),
+                  entries.end());
+    for (const FaceDedupEntry& entry : entries) {
+      if (BoxIou(box, entry.box) <= 0.5)
+        continue;
+      const double center_x = box.x + box.width / 2.0;
+      const double center_y = box.y + box.height / 2.0;
+      const double other_x = entry.box.x + entry.box.width / 2.0;
+      const double other_y = entry.box.y + entry.box.height / 2.0;
+      const double distance = std::hypot(center_x - other_x, center_y - other_y);
+      const double reach = std::max(box.width, entry.box.width) * 0.5;
+      if (distance < reach)
+        return true;
+    }
+    entries.push_back(FaceDedupEntry{box, frame_ts});
+    // Bound the per-channel table; a busy frame with dozens of faces must not
+    // grow it without limit.
+    if (entries.size() > 256)
+      entries.erase(entries.begin(), entries.end() - 256);
     return false;
   }
 
@@ -1159,11 +1337,16 @@ struct AiService::Impl {
     result.w = box.width;
     result.h = box.height;
 
+    const int64_t ts = frame.ts_ms / 1000;
+    if (FaceIsDuplicate(frame.channel_id, box, runtime.face_dedup_seconds, ts)) {
+      face_deduped.fetch_add(1);
+      return;
+    }
+
     const FaceMatch match = MatchFace(result.feature, runtime.face_match_threshold);
     const bool alert = match.found && IdWatchlist(runtime.face_watchlist).count(match.id) > 0;
 
     int64_t event_id = 0;
-    const int64_t ts = frame.ts_ms / 1000;
     if (!InsertFaceEvent(frame.channel_id, ts, result, engine_name, match, &event_id))
       return;
 
@@ -1233,19 +1416,59 @@ struct AiService::Impl {
                      opts.db->last_error().c_str());
       }
     }
+    PruneEmptySnapshotDirectories();
+  }
+
+  // Retention removes files but leaves the <day>/<channel> directories behind.
+  // Walk them bottom-up and reclaim the ones that are now empty.
+  void PruneEmptySnapshotDirectories() {
+    const std::filesystem::path root = std::filesystem::path(opts.data_dir) / "ai";
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error))
+      return;
+    std::vector<std::filesystem::path> directories;
+    std::filesystem::recursive_directory_iterator it(
+        root, std::filesystem::directory_options::skip_permission_denied, error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && it != end) {
+      std::error_code entry_error;
+      if (it->is_directory(entry_error))
+        directories.push_back(it->path());
+      it.increment(error);
+    }
+    // Deepest first: a day directory can only become empty after its channel
+    // directories have been removed.
+    std::sort(directories.begin(), directories.end(),
+              [](const std::filesystem::path& a, const std::filesystem::path& b) {
+                return a.native().size() > b.native().size();
+              });
+    for (const auto& directory : directories) {
+      std::error_code remove_error;
+      if (!std::filesystem::is_empty(directory, remove_error) || remove_error)
+        continue;
+      std::filesystem::remove(directory, remove_error);
+    }
+    std::error_code root_error;
+    if (std::filesystem::is_empty(root, root_error) && !root_error)
+      std::filesystem::remove(root, root_error);
   }
 
   void MaintenanceLoop() {
     NameCurrentThread("ai-maint");
-    int64_t last_run = 0;
+    // Clean once at startup (on this thread, so startup is not blocked), then
+    // once per day.
+    RunRetention();
+    int64_t last_run = NowSeconds();
     while (!stop.load()) {
+      for (int i = 0; i < 600 && !stop.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (stop.load())
+        break;
       const int64_t now = NowSeconds();
-      if (last_run == 0 || now - last_run >= 86400) {
+      if (now - last_run >= 86400) {
         RunRetention();
         last_run = now;
       }
-      for (int i = 0; i < 600 && !stop.load(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }
 
@@ -1524,6 +1747,9 @@ json AiService::ConfigJson() const {
               {"minFaceQuality", s.min_face_quality},
               {"snapshotRetentionDays", s.snapshot_retention_days},
               {"snapshotEncrypt", s.snapshot_encrypt},
+              {"snapshotMaxPerDay", s.snapshot_max_per_day},
+              {"snapshotMaxTotalMb", s.snapshot_max_total_mb},
+              {"snapshotMinFreeMb", s.snapshot_min_free_mb},
               {"stub", s.stub},
               {"faceModelDir", s.face_model_dir},
               {"facePixelLevel", s.face_pixel_level},
@@ -1531,6 +1757,7 @@ json AiService::ConfigJson() const {
               {"faceWatchlist", s.face_watchlist},
               {"faceMatchThreshold", s.face_match_threshold},
               {"dedupSeconds", s.dedup_seconds},
+              {"faceDedupSeconds", s.face_dedup_seconds},
               {"running", impl_->running}};
 }
 
@@ -1605,6 +1832,10 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   int64_t face_workers = 2;
   int64_t retention = 30;
   int64_t dedup = 10;
+  int64_t face_dedup = 10;
+  int64_t snapshot_max_per_day = 20000;
+  int64_t snapshot_max_total_mb = 2048;
+  int64_t snapshot_min_free_mb = 2048;
   double min_plate = 0.6;
   double min_face = 0.3;
   double match_threshold = 0.75;
@@ -1621,6 +1852,10 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
       !read_int("faceWorkers", 1, 16, &face_workers) ||
       !read_int("snapshotRetentionDays", 1, 3650, &retention) ||
       !read_int("dedupSeconds", 0, 3600, &dedup) ||
+      !read_int("faceDedupSeconds", 0, 3600, &face_dedup) ||
+      !read_int("snapshotMaxPerDay", 0, 1000000, &snapshot_max_per_day) ||
+      !read_int("snapshotMaxTotalMb", 0, 10000000, &snapshot_max_total_mb) ||
+      !read_int("snapshotMinFreeMb", 0, 10000000, &snapshot_min_free_mb) ||
       !read_int("facePixelLevel", -1, 1280, &face_pixel_level) ||
       !read_double("minPlateConfidence", &min_plate) || !read_double("minFaceQuality", &min_face) ||
       !read_double("faceMatchThreshold", &match_threshold) ||
@@ -1671,6 +1906,14 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     add_double("ai.face.matchThreshold", match_threshold);
   if (body.contains("dedupSeconds"))
     updates.push_back({"ai.dedupSeconds", std::to_string(dedup)});
+  if (body.contains("faceDedupSeconds"))
+    updates.push_back({"ai.faceDedupSeconds", std::to_string(face_dedup)});
+  if (body.contains("snapshotMaxPerDay"))
+    updates.push_back({"ai.snapshotMaxPerDay", std::to_string(snapshot_max_per_day)});
+  if (body.contains("snapshotMaxTotalMb"))
+    updates.push_back({"ai.snapshotMaxTotalMb", std::to_string(snapshot_max_total_mb)});
+  if (body.contains("snapshotMinFreeMb"))
+    updates.push_back({"ai.snapshotMinFreeMb", std::to_string(snapshot_min_free_mb)});
 
   for (const auto& update : updates) {
     if (!impl_->WriteSetting(update.key, update.value, error))
@@ -1904,6 +2147,8 @@ json AiService::Stats() {
                                               : static_cast<double>(impl_->face_total_ms.load()) /
                                                     static_cast<double>(face_processed);
 
+  impl_->snapshot_quota.Refresh(now);
+
   return json{{"enabled", snapshot.enabled},
               {"running", running},
               {"plate", json{{"workers", active_plate_workers},
@@ -1917,7 +2162,12 @@ json AiService::Stats() {
                             {"failed", impl_->face_failed.load()},
                             {"dropped", face_dropped},
                             {"avgMs", face_avg},
-                            {"fps", face_fps}}},
+                            {"fps", face_fps},
+                            {"deduped", impl_->face_deduped.load()}}},
+              {"snapshots", json{{"today", impl_->snapshot_quota.Today()},
+                                 {"bytes", impl_->snapshot_quota.DirectoryBytes()},
+                                 {"skipped", impl_->snapshot_quota.Skipped()},
+                                 {"blocked", impl_->snapshot_quota.Blocked()}}},
               {"channels", channel_items}};
 }
 

@@ -32,6 +32,7 @@ const primaryNav = [
   { key: 'plans', to: '/plans', icon: 'dashboard', permission: 'plan.view' },
   { key: 'storage', to: '/storage', icon: 'storage', permission: 'storage.view' },
   { key: 'alerts', to: '/alerts', icon: 'bell', permission: 'alert.view' },
+  { key: 'aiEvents', to: '/ai-events', icon: 'camera', permission: 'alert.view' },
 ]
 
 const adminNav = [

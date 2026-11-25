@@ -41,7 +41,7 @@ thread-safe `uvcpp_db_pool`.
 | capture timer | one per AI-enabled channel | sleep to `intervalMs`, call `MediaService::CaptureJpegFromStream`, decode with `cv::imdecode`, enqueue copies |
 | plate worker | `ai.plateWorkers` (default 2) | owns its own `AiEngine`; detect, normalise, dedup, write DB/JPEG, broadcast |
 | face worker | `ai.faceWorkers` (default 2) | owns its own `AiEngine`; detect, quality filter, face match, write DB/JPEG, broadcast |
-| maintenance | 1 while AI is enabled | once per day, delete events older than `ai.snapshotRetentionDays` and their JPEGs |
+| maintenance | 1 while AI is enabled | immediately at startup and then once per day: delete events older than `ai.snapshotRetentionDays`, their JPEGs and any directories left empty |
 
 Rules:
 
@@ -78,6 +78,10 @@ Global settings live in the existing `settings` table and are managed through
 | `faceWatchlist` | `ai.face.watchlist` | empty | comma separated `ai_faces.id` |
 | `faceMatchThreshold` | `ai.face.matchThreshold` | `0.75` | 0–1 |
 | `dedupSeconds` | `ai.dedupSeconds` | `10` | 0–3600 |
+| `faceDedupSeconds` | `ai.faceDedupSeconds` | `10` | 0–3600 |
+| `snapshotMaxPerDay` | `ai.snapshotMaxPerDay` | `20000` | 0–1000000, 0 = unlimited |
+| `snapshotMaxTotalMb` | `ai.snapshotMaxTotalMb` | `2048` | 0–10000000, 0 = unlimited |
+| `snapshotMinFreeMb` | `ai.snapshotMinFreeMb` | `2048` | 0–10000000, 0 = disabled |
 
 Per-channel overrides live in `ai_channel_settings`:
 
@@ -165,8 +169,25 @@ Snapshots are written to:
 
 JPEG quality is 85. The crop expands the detected box by half of its longest
 side on each edge (at least four times the box area) and clamps to the frame.
-The date directory uses local time. Retention runs once per day and removes
-both the rows and the files.
+The date directory uses local time. Retention runs once at startup (on the
+maintenance thread, so startup is not blocked) and then once per day; it removes
+the rows, their files and any directories left empty.
+
+### Snapshot quota
+
+AI snapshots are capped before every write. The checks run in this order and a
+zero value disables the individual check:
+
+1. `ai.snapshotMaxPerDay` — images written since local midnight.
+2. `ai.snapshotMaxTotalMb` — current size of `<data_dir>/ai`.
+3. `ai.snapshotMinFreeMb` — free space reported by `statvfs` (`GetDiskFreeSpaceEx`
+   on Windows) for the snapshot volume.
+
+When a check fails the image is skipped, the event row is still inserted and
+broadcast with empty `imageUrl`/`cropUrl`, and `snapshots.skipped` increments.
+A warning is written to the log at most once per 60 seconds. The daily counter
+is kept in memory and mirrored to `system_meta` (`ai.snapshot.day`,
+`ai.snapshot.count`) so a restart resumes the same budget.
 
 ### Plate normalisation
 
@@ -176,6 +197,16 @@ folds full-width ASCII, removes spaces/`·`/`-`, upper-cases letters, maps `I→
 and `O→0` **in the serial segment only** (the authority letter keeps `O`, e.g.
 `京O`). Duplicate hits with the same `plate_norm` on the same channel inside
 `ai.dedupSeconds` are dropped before anything is written.
+
+### Face dedup
+
+A face that stays in view would otherwise produce one event per capture
+interval. A detection is treated as the same face when all of the following
+hold: same channel, IOU with the previous event box greater than 0.5, centre
+distance below half the box width, and less than `ai.faceDedupSeconds` since
+that event. Suppressed detections are not persisted, do not write snapshots and
+increment `face.deduped`. They do not refresh the window, so an immobile face
+still yields one event per `ai.faceDedupSeconds` rather than never again.
 
 ## Alerts
 

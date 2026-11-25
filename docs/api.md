@@ -571,7 +571,7 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/ai/config` | Global AI settings plus `running`. |
-| `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `stub`, `plateWatchlist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
+| `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `snapshotMaxPerDay`, `snapshotMaxTotalMb`, `snapshotMinFreeMb`, `stub`, `plateWatchlist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`, `faceDedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
 | `GET /api/v1/channels/{id}/ai` | Per-channel switches, interval override, ROI and the effective state. |
 | `PUT /api/v1/channels/{id}/ai` | Partial update of `{plateEnabled, faceEnabled, intervalMs}`; `intervalMs=0` inherits the global value. Hot-reloads. |
 | `PUT /api/v1/ai/channels` | `{channelIds:[...], plateEnabled, faceEnabled}` bulk switch. |
@@ -579,7 +579,7 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 | `GET /api/v1/ai/events/{id}` | One event; add `?type=face`. |
 | `GET /api/v1/ai/events/{id}/snapshot` | `type=plate\|face`, `kind=full\|crop`; returns `image/jpeg` after authentication. |
 | `GET /api/v1/ai/plates` | `plate`, optional `from`/`to`; at most 200 trajectory rows with channel names. |
-| `GET /api/v1/ai/stats` | `{enabled,running,plate:{workers,processed,failed,dropped,avgMs,fps},face:{...},channels:[{id,name,plate,face}]}`. |
+| `GET /api/v1/ai/stats` | `{enabled,running,plate:{workers,processed,failed,dropped,avgMs,fps},face:{...,deduped},snapshots:{today,bytes,skipped,blocked},channels:[{id,name,plate,face}]}`. |
 | `POST /api/v1/ai/test` | `{channelId, type?}` grabs one current frame and runs the configured engines; returns boxes, normalised text and elapsed milliseconds. |
 | `GET /api/v1/ai/faces`, `POST /api/v1/ai/faces`, `PUT/DELETE /api/v1/ai/faces/{id}` | Local face library CRUD (`name`, `note`, optional `feature` number array and `imagePath`). |
 

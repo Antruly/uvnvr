@@ -19,7 +19,12 @@ struct AiSettings {
   double face_match_threshold = 0.75;
   int snapshot_retention_days = 30;
   bool snapshot_encrypt = false;
+  // Hard caps for snapshot writes. Zero disables the individual check.
+  int64_t snapshot_max_per_day = 20000;
+  int64_t snapshot_max_total_mb = 2048;
+  int64_t snapshot_min_free_mb = 2048;
   int dedup_seconds = 10;
+  int face_dedup_seconds = 10;
   bool stub = false;
   // InspireFace resource-pack directory (relative paths resolve under data_dir)
   // and detector input level; -1 keeps the SDK default.
@@ -55,6 +60,7 @@ struct AiRuntimeConfig {
   double min_face_quality = 0.3;
   double face_match_threshold = 0.75;
   int dedup_seconds = 10;
+  int face_dedup_seconds = 10;
   std::string face_model_dir;
   int face_pixel_level = -1;
   std::string plate_watchlist;

@@ -60,6 +60,12 @@ const router = createRouter({
       meta: { titleKey: 'nav.alerts', permission: 'alert.view' },
     },
     {
+      path: '/ai-events',
+      name: 'AiEventsView',
+      component: () => import('@/views/AiEventsView.vue'),
+      meta: { titleKey: 'nav.aiEvents', permission: 'alert.view' },
+    },
+    {
       path: '/users',
       name: 'UsersView',
       component: () => import('@/views/UsersView.vue'),

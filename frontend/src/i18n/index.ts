@@ -22,6 +22,7 @@ const messages = {
       plans: 'Recording plans',
       storage: 'Storage',
       alerts: 'Alerts',
+      aiEvents: 'AI events',
       users: 'Users & roles',
       logs: 'Audit log',
       settings: 'System',
@@ -375,6 +376,17 @@ const messages = {
         channel_offline: 'Camera offline',
         channel_online: 'Camera online',
         storage_full: 'Storage almost full',
+      },
+    },
+    ai: {
+      title: 'AI events',
+      subtitle: 'Licence-plate and face detections, newest first.',
+      empty: 'No AI events yet.',
+      snapshotSuppressed: 'Snapshot suppressed (quota)',
+      faceSummary: 'Face · confidence {confidence}%',
+      types: {
+        plate: 'Licence plate',
+        face: 'Face',
       },
     },
     plans: {
@@ -761,6 +773,7 @@ const messages = {
       plans: '录像计划',
       storage: '存储管理',
       alerts: '预警中心',
+      aiEvents: 'AI 事件',
       users: '用户与角色',
       logs: '审计日志',
       settings: '系统设置',
@@ -1103,6 +1116,17 @@ const messages = {
         channel_offline: '摄像头离线',
         channel_online: '摄像头恢复',
         storage_full: '存储将满',
+      },
+    },
+    ai: {
+      title: 'AI 事件',
+      subtitle: '车牌与人脸识别事件，按时间倒序。',
+      empty: '暂无 AI 事件。',
+      snapshotSuppressed: '已抑制抓图（配额）',
+      faceSummary: '人脸 · 置信度 {confidence}%',
+      types: {
+        plate: '车牌',
+        face: '人脸',
       },
     },
     plans: {
