@@ -14,6 +14,28 @@ add_executable(ai_snapshot_quota_test
 target_include_directories(ai_snapshot_quota_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME ai_snapshot_quota COMMAND ai_snapshot_quota_test)
 
+if(NOT WIN32)
+  # The fake camera uses POSIX sockets; the ONVIF code itself is portable.
+  find_package(Threads REQUIRED)
+  add_executable(onvif_ptz_test
+    onvif_ptz_test.cpp
+    "${CMAKE_SOURCE_DIR}/src/onvif.cpp"
+  )
+  target_include_directories(onvif_ptz_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(onvif_ptz_test PRIVATE OpenSSL::Crypto Threads::Threads
+                                               ${UVP_UVCPP_TARGET})
+  # onvif.cpp calls uv_interface_addresses() during ONVIF discovery.
+  if(TARGET PkgConfig::LIBUV)
+    target_link_libraries(onvif_ptz_test PRIVATE PkgConfig::LIBUV)
+  else()
+    find_library(UVNVR_TEST_UV_LIBRARY NAMES uv libuv)
+    if(UVNVR_TEST_UV_LIBRARY)
+      target_link_libraries(onvif_ptz_test PRIVATE "${UVNVR_TEST_UV_LIBRARY}")
+    endif()
+  endif()
+  add_test(NAME onvif_ptz COMMAND onvif_ptz_test)
+endif()
+
 if(UVNVR_GM_CRYPTO_ENABLED)
   add_executable(gm_crypto_test gm_crypto_test.cpp)
   target_link_libraries(gm_crypto_test PRIVATE uvnvr_gm_crypto)

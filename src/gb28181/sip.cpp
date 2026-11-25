@@ -2261,6 +2261,19 @@ struct SipUserAgent::Impl {
         callbacks.on_info(message);
       else
         SendSimpleResponse(message, 501, "Not Implemented");
+    } else if (message.method == SipMethod::kSubscribe) {
+      // The callback owns the 200 OK because it must also select the Event
+      // package and the Expires value. It can use SendResponse() with the
+      // To tag from SipDialogTag().
+      if (callbacks.on_subscribe)
+        callbacks.on_subscribe(message);
+      else
+        SendSimpleResponse(message, 501, "Not Implemented");
+    } else if (message.method == SipMethod::kNotify) {
+      SendSimpleResponse(message, 200, "OK");
+      Event("answered inbound NOTIFY with 200 OK");
+      if (callbacks.on_notify)
+        callbacks.on_notify(message);
     } else if (message.method == SipMethod::kCancel) {
       SendSimpleResponse(message, 481, "Call/Transaction Does Not Exist");
       Event("answered inbound CANCEL with 481");
@@ -2272,15 +2285,7 @@ struct SipUserAgent::Impl {
   }
 
   static std::string StableDialogTag(const std::string& call_id) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const char c : call_id) {
-      hash ^= static_cast<unsigned char>(c);
-      hash *= 1099511628211ULL;
-    }
-    char text[17];
-    std::snprintf(text, sizeof(text), "%016llx",
-                  static_cast<unsigned long long>(hash));
-    return text;
+    return SipDialogTag(call_id);
   }
 
   bool SendResponse(const SipMessage& request, int status_code,
@@ -2299,7 +2304,8 @@ struct SipUserAgent::Impl {
     if (to.empty())
       to = request.GetHeader("t");
     const bool dialog_response =
-        request.method == SipMethod::kInvite && status_code >= 200;
+        (request.method == SipMethod::kInvite || request.method == SipMethod::kSubscribe) &&
+        status_code >= 200;
     if (dialog_response && request.ToTag().empty()) {
       const std::string tag =
           to_tag.empty() ? StableDialogTag(request.CallId()) : to_tag;
@@ -2653,6 +2659,85 @@ struct SipUserAgent::Impl {
     return true;
   }
 
+  bool SendNotify(const SipNotifyRequest& notify, std::string* error) {
+    if (!running) {
+      if (error != nullptr)
+        *error = "SIP user agent is stopped";
+      return false;
+    }
+    if (!transport || !transport->connected()) {
+      if (error != nullptr)
+        *error = "cannot send NOTIFY: transport is not connected";
+      return false;
+    }
+    if (notify.call_id.empty() || notify.from.empty() || notify.to.empty()) {
+      if (error != nullptr)
+        *error = "NOTIFY dialog is missing Call-ID, From or To";
+      return false;
+    }
+    UpdateLocalAddress();
+    EnsureIdentity();
+
+    SipUri target;
+    std::string target_text = notify.request_uri;
+    if (target_text.empty())
+      target_text = registrar;
+    // A Contact header arrives as <sip:...>; strip the angle brackets before
+    // the URI parser sees it.
+    if (target_text.size() >= 2 && target_text.front() == '<' && target_text.back() == '>')
+      target_text = target_text.substr(1, target_text.size() - 2);
+    std::string parse_error;
+    if (!ParseSipUri(target_text, &target, &parse_error)) {
+      if (error != nullptr)
+        *error = "invalid NOTIFY target URI: " + parse_error;
+      return false;
+    }
+
+    std::uint32_t& dialog_cseq = notify_cseq[notify.call_id];
+    ++dialog_cseq;
+
+    SipMessage request;
+    request.is_request = true;
+    request.method = SipMethod::kNotify;
+    request.request_uri = target;
+    request.AddHeader("Via", "SIP/2.0/" + TransportName() + " " +
+                                 FormatHostPort(local_ip, local_port) + ";rport;branch=z9hG4bK" +
+                                 RandomHex(16));
+    request.AddHeader("From", notify.from);
+    request.AddHeader("To", notify.to);
+    request.AddHeader("Call-ID", notify.call_id);
+    request.AddHeader("CSeq", std::to_string(dialog_cseq) + " NOTIFY");
+    request.AddHeader("Max-Forwards", "70");
+    request.AddHeader("User-Agent", "UvNVR-GB28181/0.1");
+    if (!config.username.empty() && !local_ip.empty())
+      request.AddHeader("Contact", "<" + ContactUri() + ">");
+    if (!notify.event.empty())
+      request.AddHeader("Event", notify.event);
+    std::string state = notify.subscription_state.empty() ? "active" : notify.subscription_state;
+    if ((state == "active" || state == "pending") && notify.expires_seconds > 0)
+      state += ";expires=" + std::to_string(notify.expires_seconds);
+    request.AddHeader("Subscription-State", state);
+    if (!notify.body.empty()) {
+      request.AddHeader("Content-Type", notify.content_type.empty()
+                                             ? std::string("Application/MANSCDP+xml")
+                                             : notify.content_type);
+      request.body = notify.body;
+    }
+    if (have_challenge && !config.password.empty()) {
+      std::string auth_error;
+      if (!AddAuthorization(&request, "NOTIFY", FormatSipUri(target), &auth_error)) {
+        if (error != nullptr)
+          *error = "cannot build NOTIFY Digest Authorization: " + auth_error;
+        return false;
+      }
+    }
+    if (!Emit(request.Serialize(), error))
+      return false;
+    Event("NOTIFY sent (" + notify.event + ", " + state + ", " +
+          std::to_string(request.body.size()) + " body bytes)");
+    return true;
+  }
+
   bool Emit(std::string raw, std::string* error) {
     ++sent_messages;
     if (callbacks.on_outbound)
@@ -2887,6 +2972,7 @@ struct SipUserAgent::Impl {
   std::string from_tag;
   std::uint32_t cseq = 0;
   std::uint32_t keepalive_sn = 0;
+  std::map<std::string, std::uint32_t> notify_cseq;
 
   SipDigestChallenge challenge;
   bool have_challenge = false;
@@ -2905,6 +2991,17 @@ struct SipUserAgent::Impl {
   std::uint64_t received_messages = 0;
   std::mt19937_64 rng;
 };
+
+std::string SipDialogTag(std::string_view call_id) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const char c : call_id) {
+    hash ^= static_cast<unsigned char>(c);
+    hash *= 1099511628211ULL;
+  }
+  char text[17];
+  std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+  return text;
+}
 
 SipUserAgent::SipUserAgent(uvcpp::uvcpp_loop* loop, SipUaConfig config)
     : impl_(std::make_unique<Impl>(loop, std::move(config))) {}
@@ -2926,6 +3023,10 @@ void SipUserAgent::Stop() {
 bool SipUserAgent::SendMessage(std::string body, std::string content_type,
                                std::string* error) {
   return impl_->SendMessage(std::move(body), content_type, error);
+}
+
+bool SipUserAgent::SendNotify(const SipNotifyRequest& notify, std::string* error) {
+  return impl_->SendNotify(notify, error);
 }
 
 bool SipUserAgent::SendResponse(

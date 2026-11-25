@@ -639,6 +639,7 @@ std::string Envelope(const std::string& security, const std::string& body) {
          "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" "
          "xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\" "
          "xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" "
+         "xmlns:tptz=\"http://www.onvif.org/ver20/ptz/wsdl\" "
          "xmlns:tt=\"http://www.onvif.org/ver10/schema\" "
          "xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\" "
          "xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\" "
@@ -1544,6 +1545,140 @@ bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string&
                            "</trt:Configuration><trt:ForcePersistence>true</trt:ForcePersistence>"
                            "</trt:SetVideoEncoderConfiguration>";
   const std::string response = SoapCall(media, security, body, username, password, error);
+  return !response.empty();
+}
+
+namespace {
+
+std::string ResolvePtzService(const std::string& device, const std::string& security,
+                              const std::string& username, const std::string& password,
+                              std::string* error) {
+  const std::string capabilities = SoapCall(
+      device, security,
+      "<tds:GetCapabilities><tds:Category>PTZ</tds:Category></tds:GetCapabilities>", username,
+      password, error);
+  if (!capabilities.empty()) {
+    const std::string ptz = ExtractTag(capabilities, "PTZ");
+    const std::string xaddr = Trim(ExtractTag(ptz, "XAddr"));
+    if (!xaddr.empty())
+      return xaddr;
+  }
+  // Some encoders omit the PTZ capability block even though the service is
+  // present next to the other ONVIF services. Try the conventional path.
+  std::string derived = device;
+  const size_t device_service = derived.find("/onvif/device_service");
+  if (device_service != std::string::npos)
+    derived.replace(device_service, std::string("/onvif/device_service").size(),
+                    "/onvif/ptz_service");
+  else if (!derived.empty() && derived.back() == '/')
+    derived += "ptz_service";
+  else if (!derived.empty())
+    derived += "/onvif/ptz_service";
+  if (derived == device)
+    return {};
+  std::string probe_error;
+  const std::string configs =
+      SoapCall(derived, security, "<tptz:GetConfigurations/>", username, password, &probe_error);
+  if (configs.empty())
+    return {};
+  if (error != nullptr)
+    error->clear();
+  return derived;
+}
+
+std::string FirstProfileToken(const std::string& device, const std::string& security,
+                              const std::string& username, const std::string& password,
+                              std::string* error) {
+  const std::string media = ResolveMediaService(device, security, username, password, error);
+  if (media.empty())
+    return {};
+  const std::string profiles =
+      SoapCall(media, security, "<trt:GetProfiles/>", username, password, error);
+  XmlBlock block;
+  if (profiles.empty() || !ExtractFirstBlock(profiles, "Profiles", &block))
+    return {};
+  return AttributeValue(block.open_tag, "token");
+}
+
+std::string PtzVelocity(double value) {
+  const double clamped = std::max(-1.0, std::min(1.0, value));
+  char text[32];
+  std::snprintf(text, sizeof(text), "%.4f", clamped);
+  return text;
+}
+
+} // namespace
+
+bool OnvifPtzControl(const OnvifPtzRequest& request, std::string* error) {
+  if (!EnsureWinsock(error))
+    return false;
+  if (request.host.empty()) {
+    if (error)
+      *error = "missing ONVIF host";
+    return false;
+  }
+  const std::string device =
+      "http://" + request.host + ":" + std::to_string(request.port) + "/onvif/device_service";
+  const std::string security = SecurityHeader(request.username, request.password);
+  const std::string ptz =
+      ResolvePtzService(device, security, request.username, request.password, error);
+  if (ptz.empty()) {
+    if (error != nullptr && error->empty())
+      *error = "the camera does not expose an ONVIF PTZ service";
+    return false;
+  }
+  std::string token = request.profile_token;
+  if (token.empty())
+    token = FirstProfileToken(device, security, request.username, request.password, error);
+  if (token.empty()) {
+    if (error != nullptr && error->empty())
+      *error = "the camera has no ONVIF media profile for PTZ";
+    return false;
+  }
+
+  std::string body;
+  switch (request.operation) {
+  case OnvifPtzOperation::kContinuousMove:
+    body = "<tptz:ContinuousMove><tptz:ProfileToken>" + XmlEscape(token) +
+           "</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x=\"" + PtzVelocity(request.pan) +
+           "\" y=\"" + PtzVelocity(request.tilt) +
+           "\"/><tt:Zoom x=\"" + PtzVelocity(request.zoom) +
+           "\"/></tptz:Velocity></tptz:ContinuousMove>";
+    break;
+  case OnvifPtzOperation::kStop:
+    body = "<tptz:Stop><tptz:ProfileToken>" + XmlEscape(token) +
+           "</tptz:ProfileToken><tptz:PanTilt>" +
+           (request.stop_pan_tilt ? "true" : "false") + "</tptz:PanTilt><tptz:Zoom>" +
+           (request.stop_zoom ? "true" : "false") + "</tptz:Zoom></tptz:Stop>";
+    break;
+  case OnvifPtzOperation::kSetPreset:
+  case OnvifPtzOperation::kGotoPreset:
+  case OnvifPtzOperation::kRemovePreset: {
+    if (request.preset <= 0) {
+      if (error)
+        *error = "ONVIF preset operations need a positive preset number";
+      return false;
+    }
+    const std::string preset = std::to_string(request.preset);
+    if (request.operation == OnvifPtzOperation::kSetPreset) {
+      body = "<tptz:SetPreset><tptz:ProfileToken>" + XmlEscape(token) +
+             "</tptz:ProfileToken><tptz:PresetName>Preset " + preset +
+             "</tptz:PresetName><tptz:PresetToken>" + preset +
+             "</tptz:PresetToken></tptz:SetPreset>";
+    } else if (request.operation == OnvifPtzOperation::kGotoPreset) {
+      body = "<tptz:GotoPreset><tptz:ProfileToken>" + XmlEscape(token) +
+             "</tptz:ProfileToken><tptz:PresetToken>" + preset +
+             "</tptz:PresetToken></tptz:GotoPreset>";
+    } else {
+      body = "<tptz:RemovePreset><tptz:ProfileToken>" + XmlEscape(token) +
+             "</tptz:ProfileToken><tptz:PresetToken>" + preset +
+             "</tptz:PresetToken></tptz:RemovePreset>";
+    }
+    break;
+  }
+  }
+  const std::string response = SoapCall(ptz, security, body, request.username, request.password,
+                                        error);
   return !response.empty();
 }
 

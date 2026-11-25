@@ -76,8 +76,27 @@ struct Gb28181Config {
   PlaybackControllerConfig playback;
 };
 
+// One alarm to publish to the platform. `channel_id` is the local channel
+// primary key; 0 means the NVR itself (for example a service error). The
+// service maps it to the 20-digit device/channel identifier.
+struct GbAlarm {
+  std::int64_t channel_id = 0;
+  int priority = 2; // GB/T 28181 1..4, 1 is the most severe
+  int method = 5;   // 5 = video alarm
+  std::string alarm_type = "1";
+  std::string alarm_type_param;
+  std::string description;
+  std::int64_t time_ms = 0; // 0 = now
+};
+
 struct Gb28181Callbacks {
   using ChannelSource = std::function<std::vector<GbChannel>()>;
+  // Dispatches a parsed PTZ command to the camera backend (ONVIF or the
+  // private protocol). It is called on the GB28181 loop thread and must not
+  // block: App queues the network call on a worker and returns true when the
+  // command was accepted for dispatch.
+  using PtzSink = std::function<bool(std::int64_t channel_id, const PtzControl& command,
+                                     std::string* error)>;
   // Implemented by App: bounded SQLite query; channel_id 0 means all channels,
   // an empty stream means all streams. Active (unindexed) segments may be
   // appended for RecordInfo; playback should return finalized rows only.
@@ -99,6 +118,7 @@ struct Gb28181Callbacks {
   RecordSource records;
   LiveOpenFn live_open;
   LiveCloseFn live_close;
+  PtzSink ptz_control;
 };
 
 class Gb28181Service {
@@ -123,10 +143,19 @@ public:
     std::uint16_t local_port = 0;
     std::size_t live_sessions = 0;
     std::size_t playback_sessions = 0;
+    std::size_t alarm_subscriptions = 0;
+    std::uint64_t alarms_sent = 0;
     std::uint64_t messages_in = 0;
     std::uint64_t messages_out = 0;
   };
   Status GetStatus() const;
+
+  // Publishes one alarm to the platform. Safe to call from any thread: the
+  // report is queued to the GB28181 loop, sent as an Alarm MESSAGE and
+  // fanned out to every active Alarm subscriber as a NOTIFY. Returns false
+  // only when the service has been stopped (the queue is still accepted
+  // while registration is in progress).
+  bool ReportAlarm(const GbAlarm& alarm);
 
   // Parses a playback SDP offer. Exposed so the CLI and tests can validate the
   // `s=Playback` / `u=<channel>:<start>:<end>` convention without a socket.

@@ -5309,6 +5309,68 @@ std::string App::BuildChannelUrl(const ChannelRow& channel, bool sub, std::strin
   return url;
 }
 
+bool App::QueuePtz(int64_t channel_id, int operation, double pan, double tilt, double zoom,
+                   int preset, std::function<void(bool, const std::string&)> done) {
+  if (channel_id <= 0) {
+    if (done)
+      done(false, "PTZ needs a valid channel id");
+    return false;
+  }
+  if (operation < static_cast<int>(OnvifPtzOperation::kContinuousMove) ||
+      operation > static_cast<int>(OnvifPtzOperation::kRemovePreset)) {
+    if (done)
+      done(false, "unsupported PTZ operation");
+    return false;
+  }
+
+  struct PtzOutcome {
+    bool ok = false;
+    std::string error;
+  };
+  auto outcome = std::make_shared<PtzOutcome>();
+  auto request = std::make_shared<OnvifPtzRequest>();
+  request->operation = static_cast<OnvifPtzOperation>(operation);
+  request->pan = pan;
+  request->tilt = tilt;
+  request->zoom = zoom;
+  request->preset = preset;
+
+  RunWork(
+      [this, channel_id, request, outcome] {
+        ChannelRow channel;
+        std::string error;
+        if (!LoadChannel(channel_id, &channel, &error)) {
+          outcome->error = error.empty() ? "channel not found" : error;
+          return;
+        }
+        if (!channel.enabled) {
+          outcome->error = "channel is disabled";
+          return;
+        }
+        if (channel.host.empty()) {
+          outcome->error = "channel has no camera address for PTZ";
+          return;
+        }
+        request->host = channel.host;
+        request->port = ChannelHttpPort(channel);
+        request->username = channel.username;
+        if (!channel.password_enc.empty()) {
+          std::string decrypt_error;
+          request->password = DecryptSecret(channel.password_enc, &decrypt_error);
+          if (request->password.empty() && !decrypt_error.empty()) {
+            outcome->error = "cannot decrypt the camera password: " + decrypt_error;
+            return;
+          }
+        }
+        outcome->ok = OnvifPtzControl(*request, &outcome->error);
+      },
+      [outcome, done] {
+        if (done)
+          done(outcome->ok, outcome->error);
+      });
+  return true;
+}
+
 void App::SyncMediaChannel(int64_t id) {
   ChannelRow channel;
   std::string error;
@@ -9310,7 +9372,8 @@ void App::RegisterRecordingRoutes() {
 }
 
 App::~App() {
-  StopGb28181();
+  // Stop every alarm source before the GB bridge: the AI workers and the
+  // monitor thread call RaiseAlert(), which forwards into the GB service.
   StopStatusPush();
   StopMonitors();
 #if UVNVR_ENABLE_AI
@@ -9319,6 +9382,7 @@ App::~App() {
 #endif
   if (onvif_events_)
     onvif_events_->Stop();
+  StopGb28181();
 }
 
 void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
@@ -9367,6 +9431,53 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
       }).detach();
     }
   }
+
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  // Every alert that reaches this function is also a GB/T 28181 Alarm. The AI
+  // plate/face detectors call RaiseAlert with type ai_plate/ai_face, so their
+  // events travel to the platform through the same path as motion and device
+  // alarms. ReportAlarm is thread-safe (the AI workers call this function).
+  {
+    std::lock_guard<std::mutex> lock(gb28181_mutex_);
+    if (gb28181_) {
+      gb28181::GbAlarm alarm;
+      alarm.channel_id = channel_id;
+      alarm.priority = level == "error" ? 1 : (level == "warning" ? 2 : 3);
+      alarm.method = 5;
+      alarm.alarm_type = "1";
+      alarm.description = message;
+      alarm.time_ms = NowSeconds() * 1000;
+      if (type == "ai_plate") {
+        alarm.alarm_type_param = "AI-PLATE";
+      } else if (type == "ai_face") {
+        alarm.alarm_type_param = "AI-FACE";
+      } else if (type == "motion") {
+        alarm.alarm_type_param = "MOTION";
+      } else if (type == "person") {
+        alarm.alarm_type_param = "PERSON";
+      } else if (type == "intrusion") {
+        alarm.alarm_type_param = "INTRUSION";
+      } else if (type == "tamper") {
+        alarm.alarm_type_param = "TAMPER";
+      } else if (type == "channel_offline" || type == "channel_online" ||
+                 type == "disk_error" || type == "storage_full") {
+        // Device-level conditions use AlarmMethod 6 (device fault) and the
+        // device alarm type (2) rather than a video alarm.
+        alarm.method = 6;
+        alarm.alarm_type = "2";
+        alarm.alarm_type_param = type == "channel_offline" ? "OFFLINE"
+                                : type == "channel_online" ? "ONLINE"
+                                : type == "disk_error"    ? "DISK-ERROR"
+                                                          : "STORAGE-FULL";
+        if (type == "channel_online")
+          alarm.priority = 4;
+      } else {
+        alarm.alarm_type_param = "NVR-ALERT";
+      }
+      gb28181_->ReportAlarm(alarm);
+    }
+  }
+#endif
 }
 
 void App::StartMonitors() {
@@ -10805,6 +10916,45 @@ void App::StartGb28181() {
   callbacks.log = [](const std::string& text) {
     std::fprintf(stderr, "[gb28181] %s\n", text.c_str());
   };
+  callbacks.ptz_control = [this](std::int64_t channel_id,
+                                 const gb28181::PtzControl& control, std::string* error) {
+    const gb28181::PtzVelocity velocity = gb28181::PtzVelocityFromCmd(control.command);
+    int operation = static_cast<int>(OnvifPtzOperation::kContinuousMove);
+    switch (velocity.action) {
+    case gb28181::PtzAction::kStop:
+      operation = static_cast<int>(OnvifPtzOperation::kStop);
+      break;
+    case gb28181::PtzAction::kSetPreset:
+      operation = static_cast<int>(OnvifPtzOperation::kSetPreset);
+      break;
+    case gb28181::PtzAction::kGotoPreset:
+      operation = static_cast<int>(OnvifPtzOperation::kGotoPreset);
+      break;
+    case gb28181::PtzAction::kRemovePreset:
+      operation = static_cast<int>(OnvifPtzOperation::kRemovePreset);
+      break;
+    case gb28181::PtzAction::kFocusNear:
+    case gb28181::PtzAction::kFocusFar:
+    case gb28181::PtzAction::kIrisOpen:
+    case gb28181::PtzAction::kIrisClose:
+      if (error != nullptr)
+        *error = "ONVIF PTZ does not expose focus/iris in ContinuousMove";
+      return false;
+    default:
+      // Pan/tilt/zoom are all ContinuousMove.
+      break;
+    }
+    const int preset = velocity.preset;
+    QueuePtz(channel_id, operation, velocity.pan, velocity.tilt, velocity.zoom, preset,
+             [channel_id, action = velocity.action](bool ok, const std::string& message) {
+               if (!ok) {
+                 std::fprintf(stderr, "[gb28181] PTZ %s for channel %lld failed: %s\n",
+                              std::string(gb28181::PtzActionName(action)).c_str(),
+                              static_cast<long long>(channel_id), message.c_str());
+               }
+             });
+    return true;
+  };
   callbacks.channels = [this] {
     std::vector<gb28181::GbChannel> channels;
     uvcpp::uvcpp_db_table table;
@@ -10949,10 +11099,13 @@ void App::StartGb28181() {
 
 void App::StopGb28181() {
 #if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
-  if (gb28181_) {
-    gb28181_->Stop();
-    gb28181_.reset();
+  std::unique_ptr<gb28181::Gb28181Service> service;
+  {
+    std::lock_guard<std::mutex> lock(gb28181_mutex_);
+    service = std::move(gb28181_);
   }
+  if (service)
+    service->Stop();
 #endif
 }
 
@@ -11293,6 +11446,83 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     proto::ProtoReply reply;
     reply.data = json{{"streamId", stream_id}, {"ok", true}};
     complete(reply);
+    return;
+  }
+
+  case proto::kOpPtzControl: {
+    if (!HasPermission(user, "channel.manage")) {
+      complete(ProtoFailure(403, "forbidden", "channel.manage permission is required"));
+      return;
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const std::string action = JsonString(fields, "action");
+    const int speed = static_cast<int>(std::clamp<int64_t>(JsonInt(fields, "speed", 255), 0, 255));
+    const int preset = static_cast<int>(std::clamp<int64_t>(JsonInt(fields, "preset", 0), 0, 65535));
+    if (channel_id <= 0 || action.empty()) {
+      complete(ProtoFailure(400, "invalid_ptz", "channelId and action are required"));
+      return;
+    }
+
+    const double magnitude = static_cast<double>(speed) / 255.0;
+    int operation = static_cast<int>(OnvifPtzOperation::kContinuousMove);
+    double pan = 0.0;
+    double tilt = 0.0;
+    double zoom = 0.0;
+    if (action == "stop") {
+      operation = static_cast<int>(OnvifPtzOperation::kStop);
+    } else if (action == "right") {
+      pan = magnitude;
+    } else if (action == "left") {
+      pan = -magnitude;
+    } else if (action == "up") {
+      tilt = magnitude;
+    } else if (action == "down") {
+      tilt = -magnitude;
+    } else if (action == "up-right") {
+      pan = magnitude;
+      tilt = magnitude;
+    } else if (action == "up-left") {
+      pan = -magnitude;
+      tilt = magnitude;
+    } else if (action == "down-right") {
+      pan = magnitude;
+      tilt = -magnitude;
+    } else if (action == "down-left") {
+      pan = -magnitude;
+      tilt = -magnitude;
+    } else if (action == "zoom-in") {
+      zoom = magnitude > 0.0 ? magnitude : 0.5;
+    } else if (action == "zoom-out") {
+      zoom = -(magnitude > 0.0 ? magnitude : 0.5);
+    } else if (action == "set-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kSetPreset);
+    } else if (action == "goto-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kGotoPreset);
+    } else if (action == "remove-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kRemovePreset);
+    } else {
+      complete(ProtoFailure(400, "invalid_ptz", "unknown action"));
+      return;
+    }
+    if (operation != static_cast<int>(OnvifPtzOperation::kContinuousMove) &&
+        operation != static_cast<int>(OnvifPtzOperation::kStop) && preset <= 0) {
+      complete(ProtoFailure(400, "invalid_ptz", "preset is required for preset actions"));
+      return;
+    }
+
+    QueuePtz(channel_id, operation, pan, tilt, zoom, preset,
+             [complete, channel_id, action](bool ok, const std::string& error) {
+               if (!ok) {
+                 complete(ProtoFailure(502, "ptz_failed",
+                                       error.empty() ? "the camera rejected the PTZ command"
+                                                     : error));
+                 return;
+               }
+               proto::ProtoReply reply;
+               reply.status = 200;
+               reply.data = json{{"channelId", channel_id}, {"action", action}, {"ok", true}};
+               complete(reply);
+             });
     return;
   }
 

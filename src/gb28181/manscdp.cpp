@@ -9,11 +9,13 @@
 #include "gb28181/manscdp.h"
 #include "gb28181/time.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <limits>
 #include <unordered_map>
@@ -693,6 +695,8 @@ std::string_view ManscdpCommandName(ManscdpCommand command) {
     return "Keepalive";
   case ManscdpCommand::kAlarm:
     return "Alarm";
+  case ManscdpCommand::kDeviceControl:
+    return "DeviceControl";
   case ManscdpCommand::kPlayback:
     return "Playback";
   case ManscdpCommand::kUnknown:
@@ -715,6 +719,8 @@ ManscdpCommand ParseManscdpCommand(std::string_view name) {
     return ManscdpCommand::kKeepalive;
   if (EqualIgnoreCase(trimmed, "Alarm"))
     return ManscdpCommand::kAlarm;
+  if (EqualIgnoreCase(trimmed, "DeviceControl"))
+    return ManscdpCommand::kDeviceControl;
   if (EqualIgnoreCase(trimmed, "Playback"))
     return ManscdpCommand::kPlayback;
   return ManscdpCommand::kUnknown;
@@ -728,6 +734,8 @@ ManscdpDocumentKind ManscdpDocumentKindOf(std::string_view root_name) {
     return ManscdpDocumentKind::kResponse;
   if (EqualIgnoreCase(trimmed, "Notify"))
     return ManscdpDocumentKind::kNotify;
+  if (EqualIgnoreCase(trimmed, "Control"))
+    return ManscdpDocumentKind::kControl;
   return ManscdpDocumentKind::kUnknown;
 }
 
@@ -1270,6 +1278,440 @@ bool ParsePlaybackControl(std::string_view xml, PlaybackControl* control, std::s
 }
 
 // ---------------------------------------------------------------------------
+// DeviceControl / PTZCmd
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int HexNibble(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+bool ParseHexBytes(std::string_view text, std::uint8_t* out, std::size_t count) {
+  if (text.size() != count * 2)
+    return false;
+  for (std::size_t i = 0; i < count; ++i) {
+    const int high = HexNibble(text[i * 2]);
+    const int low = HexNibble(text[i * 2 + 1]);
+    if (high < 0 || low < 0)
+      return false;
+    out[i] = static_cast<std::uint8_t>((high << 4) | low);
+  }
+  return true;
+}
+
+char HexDigit(std::uint8_t value) {
+  return static_cast<char>(value < 10 ? '0' + value : 'A' + (value - 10));
+}
+
+std::string FormatHexBytes(const std::uint8_t* data, std::size_t count) {
+  std::string out;
+  out.reserve(count * 2);
+  for (std::size_t i = 0; i < count; ++i) {
+    out.push_back(HexDigit(static_cast<std::uint8_t>(data[i] >> 4)));
+    out.push_back(HexDigit(static_cast<std::uint8_t>(data[i] & 0x0F)));
+  }
+  return out;
+}
+
+std::uint8_t PtzChecksum(const std::uint8_t* bytes) {
+  unsigned sum = 0;
+  for (std::size_t i = 0; i < 7; ++i)
+    sum += bytes[i];
+  return static_cast<std::uint8_t>(sum & 0xFF);
+}
+
+PtzAction PtzActionFromCode(std::uint8_t code) {
+  switch (code) {
+  case 0x00:
+    return PtzAction::kStop;
+  case 0x01:
+    return PtzAction::kRight;
+  case 0x02:
+    return PtzAction::kLeft;
+  case 0x03:
+    return PtzAction::kUp;
+  case 0x04:
+    return PtzAction::kDown;
+  case 0x05:
+    return PtzAction::kUpRight;
+  case 0x06:
+    return PtzAction::kUpLeft;
+  case 0x07:
+    return PtzAction::kDownRight;
+  case 0x08:
+    return PtzAction::kDownLeft;
+  case 0x09:
+    return PtzAction::kZoomIn;
+  case 0x0A:
+    return PtzAction::kZoomOut;
+  case 0x0B:
+    return PtzAction::kFocusNear;
+  case 0x0C:
+    return PtzAction::kFocusFar;
+  case 0x0D:
+    return PtzAction::kIrisOpen;
+  case 0x0E:
+    return PtzAction::kIrisClose;
+  case 0x0F:
+  case 0x81: // common vendor spelling of "set preset"
+    return PtzAction::kSetPreset;
+  case 0x10:
+  case 0x82: // common vendor spelling of "call preset"
+    return PtzAction::kGotoPreset;
+  case 0x11:
+  case 0x83: // common vendor spelling of "delete preset"
+    return PtzAction::kRemovePreset;
+  default:
+    return PtzAction::kUnknown;
+  }
+}
+
+std::uint8_t PtzCodeFromAction(PtzAction action) {
+  switch (action) {
+  case PtzAction::kStop:
+    return 0x00;
+  case PtzAction::kRight:
+    return 0x01;
+  case PtzAction::kLeft:
+    return 0x02;
+  case PtzAction::kUp:
+    return 0x03;
+  case PtzAction::kDown:
+    return 0x04;
+  case PtzAction::kUpRight:
+    return 0x05;
+  case PtzAction::kUpLeft:
+    return 0x06;
+  case PtzAction::kDownRight:
+    return 0x07;
+  case PtzAction::kDownLeft:
+    return 0x08;
+  case PtzAction::kZoomIn:
+    return 0x09;
+  case PtzAction::kZoomOut:
+    return 0x0A;
+  case PtzAction::kFocusNear:
+    return 0x0B;
+  case PtzAction::kFocusFar:
+    return 0x0C;
+  case PtzAction::kIrisOpen:
+    return 0x0D;
+  case PtzAction::kIrisClose:
+    return 0x0E;
+  case PtzAction::kSetPreset:
+    return 0x0F;
+  case PtzAction::kGotoPreset:
+    return 0x10;
+  case PtzAction::kRemovePreset:
+    return 0x11;
+  case PtzAction::kUnknown:
+    break;
+  }
+  return 0xA5; // not a valid action; the builder rejects it
+}
+
+bool IsPresetAction(PtzAction action) {
+  return action == PtzAction::kSetPreset || action == PtzAction::kGotoPreset ||
+         action == PtzAction::kRemovePreset;
+}
+
+} // namespace
+
+std::string_view PtzActionName(PtzAction action) {
+  switch (action) {
+  case PtzAction::kStop:
+    return "stop";
+  case PtzAction::kRight:
+    return "right";
+  case PtzAction::kLeft:
+    return "left";
+  case PtzAction::kUp:
+    return "up";
+  case PtzAction::kDown:
+    return "down";
+  case PtzAction::kUpRight:
+    return "up-right";
+  case PtzAction::kUpLeft:
+    return "up-left";
+  case PtzAction::kDownRight:
+    return "down-right";
+  case PtzAction::kDownLeft:
+    return "down-left";
+  case PtzAction::kZoomIn:
+    return "zoom-in";
+  case PtzAction::kZoomOut:
+    return "zoom-out";
+  case PtzAction::kFocusNear:
+    return "focus-near";
+  case PtzAction::kFocusFar:
+    return "focus-far";
+  case PtzAction::kIrisOpen:
+    return "iris-open";
+  case PtzAction::kIrisClose:
+    return "iris-close";
+  case PtzAction::kSetPreset:
+    return "set-preset";
+  case PtzAction::kGotoPreset:
+    return "goto-preset";
+  case PtzAction::kRemovePreset:
+    return "remove-preset";
+  case PtzAction::kUnknown:
+    break;
+  }
+  return "unknown";
+}
+
+bool DecodePtzCmd(std::string_view hex, PtzCmd* command, std::string* error) {
+  const std::string_view trimmed = TrimAscii(hex);
+  std::uint8_t bytes[8] = {};
+  if (!ParseHexBytes(trimmed, bytes, 8)) {
+    if (error != nullptr)
+      *error = "PTZCmd must be exactly 16 hexadecimal digits";
+    return false;
+  }
+  if (bytes[0] != 0xA5) {
+    if (error != nullptr)
+      *error = "PTZCmd must start with 0xA5";
+    return false;
+  }
+  if (PtzChecksum(bytes) != bytes[7]) {
+    if (error != nullptr)
+      *error = "PTZCmd checksum mismatch";
+    return false;
+  }
+  PtzAction action = PtzActionFromCode(bytes[1]);
+  if (action == PtzAction::kUnknown) {
+    if (error != nullptr)
+      *error = "unsupported PTZCmd action 0x" + FormatHexBytes(&bytes[1], 1);
+    return false;
+  }
+
+  PtzCmd parsed;
+  parsed.action = action;
+  parsed.action_code = bytes[1];
+  parsed.horizontal_speed = bytes[2];
+  parsed.vertical_speed = bytes[3];
+  parsed.zoom_speed = bytes[4];
+  parsed.preset = static_cast<std::uint16_t>((static_cast<std::uint16_t>(bytes[5]) << 8) | bytes[6]);
+  std::memcpy(parsed.bytes.data(), bytes, sizeof(bytes));
+  if (IsPresetAction(action) && parsed.preset == 0) {
+    if (error != nullptr)
+      *error = "PTZCmd preset action has preset number 0";
+    return false;
+  }
+  if (command != nullptr)
+    *command = parsed;
+  return true;
+}
+
+std::string EncodePtzCmd(const PtzCmd& command) {
+  if (command.action == PtzAction::kUnknown)
+    return {};
+  std::uint8_t bytes[8] = {};
+  bytes[0] = 0xA5;
+  bytes[1] = PtzCodeFromAction(command.action);
+  if (bytes[1] == 0xA5)
+    return {};
+  bytes[2] = command.horizontal_speed;
+  bytes[3] = command.vertical_speed;
+  bytes[4] = command.zoom_speed;
+  if (IsPresetAction(command.action)) {
+    if (command.preset == 0)
+      return {};
+    bytes[5] = static_cast<std::uint8_t>((command.preset >> 8) & 0xFF);
+    bytes[6] = static_cast<std::uint8_t>(command.preset & 0xFF);
+  }
+  bytes[7] = PtzChecksum(bytes);
+  return FormatHexBytes(bytes, 8);
+}
+
+PtzVelocity PtzVelocityFromCmd(const PtzCmd& command) {
+  PtzVelocity velocity;
+  velocity.action = command.action;
+  velocity.preset = command.preset;
+  const double pan_speed = static_cast<double>(command.horizontal_speed) / 255.0;
+  const double tilt_speed = static_cast<double>(command.vertical_speed) / 255.0;
+  double zoom_speed = static_cast<double>(command.zoom_speed) / 255.0;
+  switch (command.action) {
+  case PtzAction::kRight:
+    velocity.pan = pan_speed;
+    break;
+  case PtzAction::kLeft:
+    velocity.pan = -pan_speed;
+    break;
+  case PtzAction::kUp:
+    velocity.tilt = tilt_speed;
+    break;
+  case PtzAction::kDown:
+    velocity.tilt = -tilt_speed;
+    break;
+  case PtzAction::kUpRight:
+    velocity.pan = pan_speed;
+    velocity.tilt = tilt_speed;
+    break;
+  case PtzAction::kUpLeft:
+    velocity.pan = -pan_speed;
+    velocity.tilt = tilt_speed;
+    break;
+  case PtzAction::kDownRight:
+    velocity.pan = pan_speed;
+    velocity.tilt = -tilt_speed;
+    break;
+  case PtzAction::kDownLeft:
+    velocity.pan = -pan_speed;
+    velocity.tilt = -tilt_speed;
+    break;
+  case PtzAction::kZoomIn:
+    // Platforms occasionally leave the zoom-speed byte at zero while still
+    // asking for zoom; a zero velocity would be a no-op on ONVIF cameras.
+    velocity.zoom = zoom_speed > 0.0 ? zoom_speed : 0.5;
+    break;
+  case PtzAction::kZoomOut:
+    velocity.zoom = -(zoom_speed > 0.0 ? zoom_speed : 0.5);
+    break;
+  case PtzAction::kStop:
+  case PtzAction::kFocusNear:
+  case PtzAction::kFocusFar:
+  case PtzAction::kIrisOpen:
+  case PtzAction::kIrisClose:
+  case PtzAction::kSetPreset:
+  case PtzAction::kGotoPreset:
+  case PtzAction::kRemovePreset:
+  case PtzAction::kUnknown:
+    break;
+  }
+  return velocity;
+}
+
+std::string BuildDeviceControl(const PtzControl& control) {
+  const std::string ptz_cmd = EncodePtzCmd(control.command);
+  if (ptz_cmd.empty())
+    return {};
+  std::string out(kXmlHeader);
+  out += "<Control>\r\n";
+  AppendElement(&out, "  ", "CmdType", "DeviceControl");
+  AppendUintElement(&out, "  ", "SN", control.sn);
+  AppendElement(&out, "  ", "DeviceID", control.device_id);
+  AppendElement(&out, "  ", "PTZCmd", ptz_cmd);
+  out += "  <Info>\r\n";
+  AppendUintElement(&out, "    ", "ControlPriority",
+                    static_cast<std::uint64_t>(std::max(1, std::min(control.control_priority, 5))));
+  out += "  </Info>\r\n";
+  out += "</Control>\r\n";
+  return out;
+}
+
+bool ParseDeviceControl(std::string_view xml, PtzControl* control, std::string* error) {
+  XmlNode root;
+  if (!ParseXmlDocument(xml, &root, error))
+    return false;
+  if (!RequireRoot(root, "Control", error))
+    return false;
+  if (!RequireCmdType(root, ManscdpCommand::kDeviceControl, error))
+    return false;
+
+  PtzControl parsed;
+  if (!ParseRequiredUint(root, "SN", &parsed.sn, error))
+    return false;
+  parsed.device_id = root.ChildText("DeviceID");
+  if (parsed.device_id.empty()) {
+    if (error != nullptr)
+      *error = "DeviceControl has no <DeviceID>";
+    return false;
+  }
+  const XmlNode* ptz = root.Child("PTZCmd");
+  if (ptz == nullptr) {
+    if (error != nullptr)
+      *error = "DeviceControl has no <PTZCmd>";
+    return false;
+  }
+  if (!DecodePtzCmd(ptz->text, &parsed.command, error))
+    return false;
+  if (const XmlNode* info = root.Child("Info")) {
+    if (!ParseOptionalInt(*info, "ControlPriority", 1, &parsed.control_priority, error))
+      return false;
+  }
+  if (control != nullptr)
+    *control = std::move(parsed);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Alarm notification
+// ---------------------------------------------------------------------------
+
+std::string BuildAlarmNotify(const AlarmNotify& alarm) {
+  std::string out(kXmlHeader);
+  out += "<Notify>\r\n";
+  AppendElement(&out, "  ", "CmdType", "Alarm");
+  AppendUintElement(&out, "  ", "SN", alarm.sn);
+  AppendElement(&out, "  ", "DeviceID", alarm.device_id);
+  AppendUintElement(&out, "  ", "AlarmPriority",
+                    static_cast<std::uint64_t>(std::max(1, std::min(alarm.priority, 4))));
+  AppendUintElement(&out, "  ", "AlarmMethod",
+                    static_cast<std::uint64_t>(std::max(1, std::min(alarm.method, 9))));
+  AppendElement(&out, "  ", "AlarmTime",
+                alarm.time.empty() ? CurrentLocalIso8601() : alarm.time);
+  AppendElement(&out, "  ", "AlarmDescription", alarm.description);
+  out += "  <AlarmInfo>\r\n";
+  AppendElement(&out, "    ", "AlarmType", alarm.alarm_type.empty() ? "1" : alarm.alarm_type);
+  if (!alarm.alarm_type_param.empty())
+    AppendElement(&out, "    ", "AlarmTypeParam", alarm.alarm_type_param);
+  out += "  </AlarmInfo>\r\n";
+  out += "</Notify>\r\n";
+  return out;
+}
+
+bool ParseAlarmNotify(std::string_view xml, AlarmNotify* alarm, std::string* error) {
+  XmlNode root;
+  if (!ParseXmlDocument(xml, &root, error))
+    return false;
+  if (root.name != "Notify" && root.name != "Response") {
+    if (error != nullptr)
+      *error = "expected <Notify> for an Alarm, got <" + root.name + ">";
+    return false;
+  }
+  if (!RequireCmdType(root, ManscdpCommand::kAlarm, error))
+    return false;
+
+  AlarmNotify parsed;
+  if (!ParseRequiredUint(root, "SN", &parsed.sn, error))
+    return false;
+  parsed.device_id = root.ChildText("DeviceID");
+  if (!ParseOptionalInt(root, "AlarmPriority", 2, &parsed.priority, error))
+    return false;
+  if (!ParseOptionalInt(root, "AlarmMethod", 5, &parsed.method, error))
+    return false;
+  if (parsed.priority < 1 || parsed.priority > 4) {
+    if (error != nullptr)
+      *error = "<AlarmPriority> must be 1..4";
+    return false;
+  }
+  parsed.time = root.ChildText("AlarmTime");
+  parsed.description = root.ChildText("AlarmDescription");
+  if (const XmlNode* info = root.Child("AlarmInfo")) {
+    parsed.alarm_type = info->ChildText("AlarmType");
+    if (const XmlNode* param = info->Child("AlarmTypeParam")) {
+      parsed.alarm_type_param = param->ChildText("AlarmType");
+      if (parsed.alarm_type_param.empty())
+        parsed.alarm_type_param = std::string(TrimAscii(param->text));
+    }
+  }
+  if (parsed.alarm_type.empty())
+    parsed.alarm_type = "1";
+  if (alarm != nullptr)
+    *alarm = std::move(parsed);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Keepalive
 // ---------------------------------------------------------------------------
 
@@ -1506,6 +1948,10 @@ void ManscdpResponder::set_record_source(RecordSource source) {
   record_source_ = std::move(source);
 }
 
+void ManscdpResponder::set_ptz_handler(PtzHandler handler) {
+  ptz_handler_ = std::move(handler);
+}
+
 bool ManscdpResponder::BuildRecordInfo(const RecordInfoQuery& query,
                                        std::string* response_body,
                                        std::string* error) const {
@@ -1543,6 +1989,10 @@ CatalogMapResult ManscdpResponder::BuildCatalog() const {
   if (channel_source_)
     channels = channel_source_();
   return MapChannelsToCatalog(config, groups, channels);
+}
+
+CatalogMapResult ManscdpResponder::CatalogSnapshot() const {
+  return BuildCatalog();
 }
 
 std::vector<CatalogItem> ManscdpResponder::FilterCatalog(const std::vector<CatalogItem>& items,
@@ -1677,6 +2127,20 @@ bool ManscdpResponder::Handle(std::string_view body, std::string* response_body,
     if (!ParseRecordInfoQuery(body, &query, error))
       return false;
     return BuildRecordInfo(query, response_body, error);
+  }
+  case ManscdpCommand::kDeviceControl: {
+    PtzControl control;
+    if (!ParseDeviceControl(body, &control, error))
+      return false;
+    if (!ptz_handler_) {
+      if (error != nullptr)
+        *error = "DeviceControl received but no PTZ backend is configured";
+      return false;
+    }
+    // PTZ answers are not MANSCDP documents; the 200 OK sent for the inbound
+    // MESSAGE is the acknowledgement. The handler only reports whether the
+    // command was accepted by the dispatcher.
+    return ptz_handler_(control, error);
   }
   case ManscdpCommand::kKeepalive:
     // A keepalive travels device -> platform; the device does not answer it.

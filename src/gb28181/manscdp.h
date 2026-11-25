@@ -21,6 +21,7 @@
 // The standard text uses GB2312 in some examples; UTF-8 is accepted by the
 // common platforms and avoids lossy transcoding of channel names.
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -91,14 +92,15 @@ enum class ManscdpCommand {
   kRecordInfo,
   kKeepalive,
   kAlarm,
-  kPlayback, // <Control><CmdType>Playback</CmdType> sent in a SIP INFO
+  kDeviceControl, // <Control><CmdType>DeviceControl</CmdType> (PTZCmd)
+  kPlayback,      // <Control><CmdType>Playback</CmdType> sent in a SIP INFO
 };
 
 std::string_view ManscdpCommandName(ManscdpCommand command);
 ManscdpCommand ParseManscdpCommand(std::string_view name);
 
 // Root element of a document (MANSCDP uses Query, Response and Notify).
-enum class ManscdpDocumentKind { kUnknown, kQuery, kResponse, kNotify };
+enum class ManscdpDocumentKind { kUnknown, kQuery, kResponse, kNotify, kControl };
 ManscdpDocumentKind ManscdpDocumentKindOf(std::string_view root_name);
 
 // Minimal command envelope shared by control requests and notifications.
@@ -286,6 +288,118 @@ bool ParsePlaybackControl(std::string_view xml, PlaybackControl* control,
                           std::string* error = nullptr);
 
 // ---------------------------------------------------------------------------
+// DeviceControl / PTZCmd (云台控制)
+// ---------------------------------------------------------------------------
+
+// The eight-byte PTZ command defined in GB/T 28181 Annex A. The wire form is
+// 16 hex digits:
+//
+//   byte 0  0xA5
+//   byte 1  action code (see PtzAction)
+//   byte 2  horizontal speed, 0x00..0xFF
+//   byte 3  vertical speed, 0x00..0xFF
+//   byte 4  zoom speed, 0x00..0xFF
+//   byte 5  preset number, high byte
+//   byte 6  preset number, low byte
+//   byte 7  checksum: sum of bytes 0..6 modulo 256
+//
+// Byte 5 is treated as the zoom speed by the standard; the preset number is
+// only meaningful for the set/call/delete actions. Some encoders emit the
+// preset actions as 0x81/0x82/0x83 instead of 0x0F/0x10/0x11; the decoder
+// accepts both spellings, the encoder always emits the standard one.
+enum class PtzAction {
+  kStop,
+  kRight,
+  kLeft,
+  kUp,
+  kDown,
+  kUpRight,
+  kUpLeft,
+  kDownRight,
+  kDownLeft,
+  kZoomIn,
+  kZoomOut,
+  kFocusNear,
+  kFocusFar,
+  kIrisOpen,
+  kIrisClose,
+  kSetPreset,
+  kGotoPreset,
+  kRemovePreset,
+  kUnknown,
+};
+
+std::string_view PtzActionName(PtzAction action);
+
+struct PtzCmd {
+  PtzAction action = PtzAction::kUnknown;
+  std::uint8_t action_code = 0;
+  std::uint8_t horizontal_speed = 0;
+  std::uint8_t vertical_speed = 0;
+  std::uint8_t zoom_speed = 0;
+  std::uint16_t preset = 0;
+  std::array<std::uint8_t, 8> bytes{};
+};
+
+// Decodes one 8-byte command. The first byte and the checksum are validated;
+// a command that names a preset without a preset number is rejected.
+bool DecodePtzCmd(std::string_view hex, PtzCmd* command, std::string* error = nullptr);
+
+// Encodes a command, filling the checksum. Returns an empty string when the
+// action is unknown or a preset number is missing.
+std::string EncodePtzCmd(const PtzCmd& command);
+
+// Normalised motion derived from a PTZCmd, independent of any camera
+// protocol. Pan/tilt/zoom are in -1..1 (right/up/zoom-in are positive) and
+// speeds are scaled from the 0..255 wire fields. Preset is set only for the
+// set/call/delete actions.
+struct PtzVelocity {
+  PtzAction action = PtzAction::kStop;
+  double pan = 0.0;
+  double tilt = 0.0;
+  double zoom = 0.0;
+  std::uint16_t preset = 0;
+};
+
+PtzVelocity PtzVelocityFromCmd(const PtzCmd& command);
+
+// One <Control><CmdType>DeviceControl</CmdType> document carrying a PTZCmd.
+struct PtzControl {
+  std::uint64_t sn = 0;
+  std::string device_id;
+  PtzCmd command;
+  int control_priority = 1;
+};
+
+std::string BuildDeviceControl(const PtzControl& control);
+bool ParseDeviceControl(std::string_view xml, PtzControl* control,
+                        std::string* error = nullptr);
+
+// ---------------------------------------------------------------------------
+// Alarm notification (报警上报)
+// ---------------------------------------------------------------------------
+
+// The device -> platform <Notify><CmdType>Alarm</CmdType> document. `priority`
+// uses the standard 1..4 scale (1 is the most severe); `method` defaults to 5
+// (video alarm), which is what the AI plate/face detectors report. AlarmType
+// values follow GB/T 28181 Annex B; `alarm_type_param` carries the vendor
+// extension (for example AI-PLATE or AI-FACE) so a platform can distinguish
+// the source without inventing a new AlarmMethod.
+struct AlarmNotify {
+  std::uint64_t sn = 0;
+  std::string device_id;
+  int priority = 2;
+  int method = 5;
+  std::string time; // "YYYY-MM-DDTHH:MM:SS"; the builder fills the current time
+  std::string description;
+  std::string alarm_type = "1";
+  std::string alarm_type_param;
+};
+
+std::string BuildAlarmNotify(const AlarmNotify& alarm);
+bool ParseAlarmNotify(std::string_view xml, AlarmNotify* alarm, std::string* error = nullptr);
+
+// ---------------------------------------------------------------------------
 // Keepalive
 // ---------------------------------------------------------------------------
 
@@ -391,6 +505,11 @@ public:
   // It is called on the SIP event-loop thread, so it must not block for long;
   // the service implementation performs a bounded SQLite query.
   using RecordSource = std::function<std::vector<RecordItem>(const RecordInfoQuery&)>;
+  // Handles a parsed PTZ command. It runs on the SIP event-loop thread, so it
+  // must not block: the service queues the actual ONVIF/private-protocol call
+  // on a worker. Returning false only writes a diagnostic; the inbound
+  // MESSAGE is already acknowledged with 200 OK by the SIP layer.
+  using PtzHandler = std::function<bool(const PtzControl&, std::string* error)>;
 
   explicit ManscdpResponder(ManscdpDeviceConfig config);
 
@@ -398,12 +517,18 @@ public:
   void set_channel_source(ChannelSource source);
   void set_status_source(StatusSource source);
   void set_record_source(RecordSource source);
+  void set_ptz_handler(PtzHandler handler);
 
   // Returns true when `body` is a recognised MANSCDP command. `response_body`
   // is empty for Keepalive notifications, which the device does not answer.
   // Returns false with an `error` for malformed XML or unsupported commands.
   bool Handle(std::string_view body, std::string* response_body,
               std::string* error = nullptr) const;
+
+  // Current catalog as built from the configured sources. Used by the SIP
+  // SUBSCRIBE/NOTIFY path, which sends the catalog outside a Query/Response
+  // exchange.
+  CatalogMapResult CatalogSnapshot() const;
 
   const ManscdpDeviceConfig& config() const {
     return config_;
@@ -424,6 +549,7 @@ private:
   ChannelSource channel_source_;
   StatusSource status_source_;
   RecordSource record_source_;
+  PtzHandler ptz_handler_;
 };
 
 // Current local time in the DeviceStatus form. Exposed for tests and for

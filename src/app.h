@@ -189,6 +189,14 @@ private:
   void StartGb28181();
   void StopGb28181();
 
+  // Sends one PTZ operation to an ONVIF camera on a worker thread. Shared by
+  // the GB/T 28181 DeviceControl path and the private protocol's PTZ_CONTROL
+  // opcode. `operation` uses the OnvifPtzOperation order: 0 continuous move,
+  // 1 stop, 2 set preset, 3 goto preset, 4 remove preset. The completion runs
+  // on the web loop.
+  bool QueuePtz(int64_t channel_id, int operation, double pan, double tilt, double zoom,
+                int preset, std::function<void(bool, const std::string&)> done);
+
   // Private protocol (docs/private-protocol.md). The dispatcher reuses the
   // same services and database rows as the REST handlers.
   void StartPrivateProtocol();
@@ -306,6 +314,10 @@ private:
   std::unique_ptr<proto::ProtoServer> proto_;
 #if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
   std::unique_ptr<gb28181::Gb28181Service> gb28181_;
+  // Alarm sources (AI workers, the monitor thread) run concurrently with
+  // shutdown; this guards the pointer and keeps ReportAlarm alive until the
+  // queue accepts the alarm.
+  mutable std::mutex gb28181_mutex_;
 #endif
 #if UVNVR_ENABLE_AI
   std::unique_ptr<AiService> ai_;

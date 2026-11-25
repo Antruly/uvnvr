@@ -465,6 +465,173 @@ void TestResponder() {
              false);
 }
 
+// ---------------------------------------------------------------------------
+// PTZCmd / DeviceControl and Alarm
+// ---------------------------------------------------------------------------
+
+void TestPtzCodec() {
+  PtzCmd right;
+  right.action = PtzAction::kRight;
+  right.horizontal_speed = 0xFF;
+  const std::string right_hex = EncodePtzCmd(right);
+  Expect("ptz/encode-right", right_hex, "A501FF00000000A5");
+
+  PtzCmd decoded;
+  std::string error;
+  ExpectBool("ptz/decode-right", DecodePtzCmd(right_hex, &decoded, &error), true);
+  Expect("ptz/decode-action", std::string(PtzActionName(decoded.action)), "right");
+  Expect("ptz/decode-hspeed", std::to_string(decoded.horizontal_speed), "255");
+
+  ExpectBool("ptz/decode-bad-checksum",
+             DecodePtzCmd("A501FF00000000A6", &decoded, &error), false);
+  ExpectBool("ptz/decode-bad-magic", DecodePtzCmd("A401FF00000000A4", &decoded, &error), false);
+  ExpectBool("ptz/decode-unknown-action",
+             DecodePtzCmd("A5200000000000C5", &decoded, &error), false);
+
+  PtzCmd goto_preset;
+  goto_preset.action = PtzAction::kGotoPreset;
+  goto_preset.preset = 5;
+  const std::string preset_hex = EncodePtzCmd(goto_preset);
+  ExpectBool("ptz/decode-preset", DecodePtzCmd(preset_hex, &decoded, &error), true);
+  Expect("ptz/preset-value", std::to_string(decoded.preset), "5");
+  Expect("ptz/preset-action", std::string(PtzActionName(decoded.action)), "goto-preset");
+
+  // Vendor spelling 0x82 for "call preset" decodes to the same action.
+  PtzCmd vendor;
+  // 0xA5 + 0x82 + 0 + 0 + 0 + 0 + 5 = 0x12C -> 0x2C.
+  ExpectBool("ptz/decode-vendor-preset-ok",
+             DecodePtzCmd("A58200000000052C", &vendor, &error), true);
+  Expect("ptz/vendor-action", std::string(PtzActionName(vendor.action)), "goto-preset");
+  Expect("ptz/vendor-preset", std::to_string(vendor.preset), "5");
+
+  PtzCmd zero_preset;
+  zero_preset.action = PtzAction::kSetPreset;
+  Expect("ptz/encode-zero-preset", EncodePtzCmd(zero_preset), "");
+}
+
+void TestPtzVelocity() {
+  PtzCmd command;
+  command.action = PtzAction::kUpLeft;
+  command.horizontal_speed = 0x80;
+  command.vertical_speed = 0x80;
+  const PtzVelocity velocity = PtzVelocityFromCmd(command);
+  ExpectBool("ptz/velocity-left", velocity.pan < 0.0 && velocity.pan > -0.6, true);
+  ExpectBool("ptz/velocity-up", velocity.tilt > 0.0 && velocity.tilt < 0.6, true);
+  ExpectBool("ptz/velocity-no-zoom", velocity.zoom == 0.0, true);
+
+  command.action = PtzAction::kZoomOut;
+  command.zoom_speed = 0;
+  const PtzVelocity zoom = PtzVelocityFromCmd(command);
+  ExpectBool("ptz/velocity-zoom-default", zoom.zoom < 0.0, true);
+
+  command.action = PtzAction::kStop;
+  const PtzVelocity stop = PtzVelocityFromCmd(command);
+  ExpectBool("ptz/velocity-stop", stop.pan == 0.0 && stop.tilt == 0.0 && stop.zoom == 0.0, true);
+}
+
+void TestDeviceControlDocument() {
+  PtzControl control;
+  control.sn = 42;
+  control.device_id = kChannelId1;
+  control.command.action = PtzAction::kDownRight;
+  control.command.horizontal_speed = 0x40;
+  control.command.vertical_speed = 0x20;
+  const std::string xml = BuildDeviceControl(control);
+  ExpectContains("ptz/xml-cmdtype", xml, "<CmdType>DeviceControl</CmdType>");
+  ExpectContains("ptz/xml-device", xml, std::string("<DeviceID>") + kChannelId1 + "</DeviceID>");
+  ExpectContains("ptz/xml-sn", xml, "<SN>42</SN>");
+  ExpectContains("ptz/xml-priority", xml, "<ControlPriority>1</ControlPriority>");
+
+  PtzControl parsed;
+  std::string error;
+  ExpectBool("ptz/xml-parse", ParseDeviceControl(xml, &parsed, &error), true);
+  Expect("ptz/xml-parse-sn", std::to_string(parsed.sn), "42");
+  Expect("ptz/xml-parse-device", parsed.device_id, kChannelId1);
+  Expect("ptz/xml-parse-action", std::string(PtzActionName(parsed.command.action)), "down-right");
+  Expect("ptz/xml-parse-hspeed", std::to_string(parsed.command.horizontal_speed), "64");
+  Expect("ptz/xml-parse-vspeed", std::to_string(parsed.command.vertical_speed), "32");
+
+  ExpectBool("ptz/xml-parse-checksum",
+             ParseDeviceControl(
+                 std::string("<?xml version=\"1.0\"?><Control><CmdType>DeviceControl</CmdType>"
+                             "<SN>1</SN><DeviceID>") +
+                     kChannelId1 + "</DeviceID><PTZCmd>A501FF00000000A6</PTZCmd></Control>",
+                 &parsed, &error),
+             false);
+}
+
+void TestAlarmDocument() {
+  AlarmNotify alarm;
+  alarm.sn = 7;
+  alarm.device_id = kChannelId2;
+  alarm.priority = 2;
+  alarm.method = 5;
+  alarm.time = "2026-11-25T12:00:00";
+  alarm.description = "AI 车牌预警: 京A12345";
+  alarm.alarm_type = "1";
+  alarm.alarm_type_param = "AI-PLATE";
+  const std::string xml = BuildAlarmNotify(alarm);
+  ExpectContains("alarm/cmdtype", xml, "<CmdType>Alarm</CmdType>");
+  ExpectContains("alarm/priority", xml, "<AlarmPriority>2</AlarmPriority>");
+  ExpectContains("alarm/method", xml, "<AlarmMethod>5</AlarmMethod>");
+  ExpectContains("alarm/time", xml, "<AlarmTime>2026-11-25T12:00:00</AlarmTime>");
+  ExpectContains("alarm/type", xml, "<AlarmType>1</AlarmType>");
+  ExpectContains("alarm/type-param", xml, "<AlarmTypeParam>AI-PLATE</AlarmTypeParam>");
+
+  AlarmNotify parsed;
+  std::string error;
+  ExpectBool("alarm/parse", ParseAlarmNotify(xml, &parsed, &error), true);
+  Expect("alarm/sn", std::to_string(parsed.sn), "7");
+  Expect("alarm/device", parsed.device_id, kChannelId2);
+  Expect("alarm/description", parsed.description, "AI 车牌预警: 京A12345");
+  Expect("alarm/param", parsed.alarm_type_param, "AI-PLATE");
+
+  ExpectBool("alarm/reject-priority",
+             ParseAlarmNotify("<?xml version=\"1.0\"?><Notify><CmdType>Alarm</CmdType><SN>1</SN>"
+                              "<DeviceID>" +
+                                  std::string(kChannelId1) +
+                                  "</DeviceID><AlarmPriority>9</AlarmPriority></Notify>",
+                              &parsed, &error),
+             false);
+}
+
+void TestResponderPtzDispatch() {
+  ManscdpDeviceConfig config;
+  config.device_id = kDeviceId;
+  ManscdpResponder responder(config);
+  responder.set_channel_source([] { return std::vector<CatalogChannel>{}; });
+
+  PtzControl received;
+  bool called = false;
+  responder.set_ptz_handler([&](const PtzControl& control, std::string*) {
+    called = true;
+    received = control;
+    return true;
+  });
+
+  PtzControl control;
+  control.sn = 9;
+  control.device_id = kChannelId1;
+  control.command.action = PtzAction::kZoomIn;
+  control.command.zoom_speed = 0x80;
+  std::string response;
+  std::string error;
+  ExpectBool("ptz/responder-handle", responder.Handle(BuildDeviceControl(control), &response, &error),
+             true);
+  ExpectBool("ptz/responder-called", called, true);
+  ExpectBool("ptz/responder-no-response", response.empty(), true);
+  Expect("ptz/responder-action", std::string(PtzActionName(received.command.action)), "zoom-in");
+
+  responder.set_ptz_handler([](const PtzControl&, std::string* error) {
+    if (error != nullptr)
+      *error = "backend unavailable";
+    return false;
+  });
+  ExpectBool("ptz/responder-reject", responder.Handle(BuildDeviceControl(control), &response, &error),
+             false);
+  ExpectContains("ptz/responder-error", error, "backend unavailable");
+}
+
 bool WriteFile(const std::string& path, const std::string& data) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   if (!output)
@@ -514,6 +681,11 @@ int main(int argc, char** argv) {
   TestDeviceInfoAndStatus();
   TestCatalogMapping();
   TestResponder();
+  TestPtzCodec();
+  TestPtzVelocity();
+  TestDeviceControlDocument();
+  TestAlarmDocument();
+  TestResponderPtzDispatch();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);

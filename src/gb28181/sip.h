@@ -250,9 +250,36 @@ struct SipUaCallbacks {
   std::function<void(const SipMessage&)> on_ack;
   std::function<void(const SipMessage&)> on_bye;
   std::function<void(const SipMessage&)> on_info;
+  // SUBSCRIBE is not answered by the user agent: the callback owns the
+  // response because it also needs the To tag and the contact/expires headers
+  // for the following NOTIFY dialog. A missing callback earns a 501.
+  std::function<void(const SipMessage&)> on_subscribe;
+  // An inbound NOTIFY is acknowledged with 200 OK before the callback runs.
+  std::function<void(const SipMessage&)> on_notify;
   // Human-readable progress information (keepalive sent/acknowledged, ...).
   std::function<void(const std::string&)> on_event;
 };
+
+// One outbound NOTIFY inside an established subscription dialog. The caller
+// copies these fields from the SUBSCRIBE request and keeps them for the life
+// of the subscription; the user agent assigns the NOTIFY CSeq per Call-ID.
+struct SipNotifyRequest {
+  std::string call_id;
+  std::string from;
+  std::string to;
+  // Contact/remote target from the SUBSCRIBE. Empty falls back to the
+  // registrar/MESSAGE target.
+  std::string request_uri;
+  std::string event;
+  std::string subscription_state = "active";
+  std::uint32_t expires_seconds = 0;
+  std::string content_type;
+  std::string body;
+};
+
+// Deterministic To tag for a dialog created by an inbound request. Exposed so
+// the service can put the same tag in the 200 OK and in the NOTIFY requests.
+std::string SipDialogTag(std::string_view call_id);
 
 class SipUserAgent {
  public:
@@ -281,11 +308,16 @@ class SipUserAgent {
                    std::string content_type = "Application/MANSCDP+xml",
                    std::string* error = nullptr);
 
+  // Sends a NOTIFY in a subscription dialog created by an inbound SUBSCRIBE.
+  // Requires a registered transport; Digest authorization is added when the
+  // registrar has already issued a challenge.
+  bool SendNotify(const SipNotifyRequest& notify, std::string* error = nullptr);
+
   // Sends a response to an inbound request on the same transport. `to_tag`
-  // is added to the To header for a dialog-creating response (INVITE 200) when
-  // the request has no tag; an empty value derives a stable tag from the
-  // Call-ID. Extra headers (Contact, Content-Type, ...) are appended verbatim
-  // as name/value pairs. Body bytes are copied unchanged.
+  // is added to the To header for a dialog-creating response (INVITE or
+  // SUBSCRIBE 200) when the request has no tag; an empty value derives a
+  // stable tag from the Call-ID. Extra headers (Contact, Content-Type, ...)
+  // are appended verbatim as name/value pairs. Body bytes are copied unchanged.
   bool SendResponse(const SipMessage& request, int status_code,
                     const std::string& reason, const std::string& body = {},
                     const std::string& content_type = {},

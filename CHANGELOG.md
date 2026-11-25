@@ -8,6 +8,20 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB/T 28181 云台控制与报警上报 (opt-in, P6.2e).** `DeviceControl`
+  `PTZCmd` is decoded with byte/checksum/preset validation and normalised to
+  pan/tilt/zoom velocities; the server dispatches it off the SIP loop to the
+  ONVIF ver20 PTZ service (`ContinuousMove`, `Stop`, `SetPreset`,
+  `GotoPreset`, `RemovePreset`). A new `PTZ_CONTROL` private-protocol opcode
+  drives the same backend. Every `RaiseAlert` (including the AI plate/face
+  workers) is published as a MANSCDP `Alarm` MESSAGE and fanned out to
+  `Event: Alarm` subscribers through SIP NOTIFY. SUBSCRIBE for `Catalog` and
+  `Alarm` supports refresh and `Expires: 0` unsubscribe. Still behind
+  `-DUVNVR_ENABLE_GB28181=ON` (default off) and started only when
+  `gb28181.enabled=1`; existing paths are unchanged. See
+  `docs/gb28181-ptz-alarm.md`; evidence is
+  `tests/gb28181_manscdp_test.cpp`, `tests/onvif_ptz_test.cpp` and
+  `tests/integration/gb28181_ptz_alarm.py`.
 - **GB/T 28181 录像查询与回放 (opt-in, P6.2d).** `RecordInfo` answers from the
   local `recordings` index (including active `.part` segments) with the
   channel's 20-digit identifier, time range and MANSCDP record type. Playback

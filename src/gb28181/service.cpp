@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +41,56 @@ std::string ToLower(std::string text) {
 
 bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
   return ToLower(a) == ToLower(b);
+}
+
+std::string TrimText(std::string text) {
+  std::size_t begin = 0;
+  while (begin < text.size() &&
+         std::isspace(static_cast<unsigned char>(text[begin])) != 0)
+    ++begin;
+  std::size_t end = text.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(text[end - 1])) != 0)
+    --end;
+  return text.substr(begin, end - begin);
+}
+
+// Extracts the URI from a Contact value: "<sip:a@b>;expires=60" -> "sip:a@b".
+std::string ContactUri(std::string contact) {
+  contact = TrimText(std::move(contact));
+  const std::size_t open = contact.find('<');
+  if (open != std::string::npos) {
+    const std::size_t close = contact.find('>', open + 1);
+    if (close != std::string::npos)
+      return TrimText(contact.substr(open + 1, close - open - 1));
+  }
+  const std::size_t semicolon = contact.find(';');
+  if (semicolon != std::string::npos)
+    contact.resize(semicolon);
+  return TrimText(std::move(contact));
+}
+
+// "Catalog;id=1" -> "Catalog".
+std::string EventPackage(std::string value) {
+  value = TrimText(std::move(value));
+  const std::size_t semicolon = value.find(';');
+  if (semicolon != std::string::npos)
+    value.resize(semicolon);
+  return TrimText(std::move(value));
+}
+
+bool ParseExpires(std::string text, std::uint32_t* expires) {
+  text = TrimText(std::move(text));
+  if (text.empty())
+    return false;
+  std::uint64_t parsed = 0;
+  const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+  if (result.ec != std::errc() || result.ptr != text.data() + text.size() ||
+      parsed > 86400 * 7) {
+    return false;
+  }
+  *expires = static_cast<std::uint32_t>(parsed);
+  return true;
 }
 
 std::vector<std::string> SplitLines(const std::string& text) {
@@ -368,6 +419,228 @@ struct Gb28181Service::Impl {
       Log("cannot send MANSCDP response: " + error);
     else
       ++messages_out;
+  }
+
+  // --- subscriptions and alarms ------------------------------------------
+
+  struct Subscription {
+    SipNotifyRequest notify;
+    std::string event;
+    std::uint64_t expires_at_ms = 0;
+  };
+
+  void OnSubscribe(const SipMessage& message) {
+    ++messages_in;
+    if (!ua)
+      return;
+    const std::string call_id = message.CallId();
+    const std::string event = EventPackage(message.GetHeader("Event"));
+    if (event.empty()) {
+      ua->SendResponse(message, 400, "Bad Request", {}, {},
+                       {{"Reason", "missing Event header"}}, {}, nullptr);
+      Log("SUBSCRIBE without an Event header from call-id=" + call_id);
+      return;
+    }
+    if (!EqualsIgnoreCase(event, "Catalog") && !EqualsIgnoreCase(event, "Alarm")) {
+      ua->SendResponse(message, 489, "Bad Event", {}, {}, {}, SipDialogTag(call_id), nullptr);
+      Log("SUBSCRIBE for unsupported event package '" + event + "' ignored");
+      return;
+    }
+
+    std::uint32_t expires = 3600;
+    const std::string expires_header = message.GetHeader("Expires");
+    if (!expires_header.empty() && !ParseExpires(expires_header, &expires)) {
+      ua->SendResponse(message, 400, "Bad Request", {}, {},
+                       {{"Reason", "invalid Expires"}}, {}, nullptr);
+      Log("SUBSCRIBE with invalid Expires '" + expires_header + "' ignored");
+      return;
+    }
+
+    const std::string tag = SipDialogTag(call_id);
+    std::string to = message.GetHeader("To");
+    if (!to.empty() && to.find(";tag=") == std::string::npos)
+      to += ";tag=" + tag;
+
+    if (expires == 0) {
+      ua->SendResponse(message, 200, "OK", {}, {}, {{"Expires", "0"}}, tag, nullptr);
+      SipNotifyRequest terminated;
+      bool found = false;
+      {
+        std::lock_guard<std::mutex> lock(subscription_mutex);
+        const auto it = subscriptions.find(call_id);
+        if (it != subscriptions.end()) {
+          terminated = it->second.notify;
+          subscriptions.erase(it);
+          found = true;
+        }
+      }
+      if (found) {
+        terminated.subscription_state = "terminated";
+        terminated.expires_seconds = 0;
+        terminated.body.clear();
+        std::string error;
+        if (!ua->SendNotify(terminated, &error))
+          Log("cannot send terminating NOTIFY: " + error);
+      }
+      Log("SUBSCRIBE " + event + " unsubscribed (call-id=" + call_id + ")");
+      return;
+    }
+
+    SipNotifyRequest notify;
+    notify.call_id = call_id;
+    notify.from = message.GetHeader("From");
+    notify.to = to;
+    notify.request_uri = ContactUri(message.GetHeader("Contact"));
+    notify.event = event;
+    notify.subscription_state = "active";
+    notify.expires_seconds = expires;
+    notify.content_type = std::string(kManscdpContentType);
+    {
+      std::lock_guard<std::mutex> lock(subscription_mutex);
+      Subscription& stored = subscriptions[call_id];
+      stored.notify = notify;
+      stored.event = event;
+      stored.expires_at_ms = MonotonicMs() + static_cast<std::uint64_t>(expires) * 1000;
+    }
+
+    const std::string expires_text = std::to_string(expires);
+    ua->SendResponse(message, 200, "OK", {}, {},
+                     {{"Expires", expires_text}, {"Event", event}}, tag, nullptr);
+    ++messages_out;
+
+    // Confirm the dialog immediately: Catalog carries the current catalog,
+    // Alarm starts empty and is fed by ReportAlarm().
+    if (EqualsIgnoreCase(event, "Catalog")) {
+      notify.body = BuildCatalogNotifyBody();
+    }
+    std::string error;
+    if (!ua->SendNotify(notify, &error))
+      Log("cannot send initial NOTIFY: " + error);
+    else
+      ++messages_out;
+    Log("SUBSCRIBE " + event + " active for " + expires_text + "s (call-id=" + call_id + ")");
+  }
+
+  void OnNotify(const SipMessage& message) {
+    ++messages_in;
+    Log("inbound NOTIFY (call-id=" + message.CallId() + ", " +
+        std::to_string(message.body.size()) + " body bytes)");
+  }
+
+  std::string BuildCatalogNotifyBody() {
+    CatalogMapResult mapped;
+    if (responder)
+      mapped = responder->CatalogSnapshot();
+    if (!mapped.ok)
+      return {};
+    CatalogResponse response;
+    response.sn = ++catalog_sn;
+    response.device_id = config.device_id;
+    response.devices = std::move(mapped.items);
+    response.sum_num = static_cast<std::uint32_t>(response.devices.size());
+    return BuildCatalogResponse(response);
+  }
+
+  void ExpireSubscriptions() {
+    const std::uint64_t now = MonotonicMs();
+    std::vector<SipNotifyRequest> expired;
+    {
+      std::lock_guard<std::mutex> lock(subscription_mutex);
+      for (auto it = subscriptions.begin(); it != subscriptions.end();) {
+        if (it->second.expires_at_ms > now) {
+          ++it;
+          continue;
+        }
+        SipNotifyRequest notify = it->second.notify;
+        notify.subscription_state = "terminated";
+        notify.expires_seconds = 0;
+        notify.body.clear();
+        expired.push_back(std::move(notify));
+        it = subscriptions.erase(it);
+      }
+    }
+    for (const SipNotifyRequest& notify : expired) {
+      std::string error;
+      if (ua && !ua->SendNotify(notify, &error))
+        Log("cannot send expiry NOTIFY: " + error);
+      Log("subscription expired (call-id=" + notify.call_id + ")");
+    }
+  }
+
+  std::string AlarmDeviceId(std::int64_t channel_id) const {
+    if (channel_id > 0) {
+      GbChannel channel;
+      if (FindChannelByLocal(channel_id, &channel)) {
+        const std::string id = ChannelGbId(channel);
+        if (!id.empty())
+          return id;
+      }
+    }
+    return config.device_id;
+  }
+
+  void PublishAlarm(const GbAlarm& alarm) {
+    AlarmNotify message;
+    message.sn = ++alarm_sn;
+    message.device_id = AlarmDeviceId(alarm.channel_id);
+    message.priority = alarm.priority;
+    message.method = alarm.method;
+    message.alarm_type = alarm.alarm_type;
+    message.alarm_type_param = alarm.alarm_type_param;
+    message.description = alarm.description;
+    const std::int64_t time_ms =
+        alarm.time_ms > 0
+            ? alarm.time_ms
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
+    message.time = FormatGbTime(time_ms);
+    const std::string body = BuildAlarmNotify(message);
+
+    if (ua) {
+      std::string error;
+      if (!ua->SendMessage(body, std::string(kManscdpContentType), &error)) {
+        Log("cannot send Alarm MESSAGE: " + error);
+      } else {
+        ++messages_out;
+      }
+    }
+
+    std::vector<SipNotifyRequest> subscribers;
+    const std::uint64_t now = MonotonicMs();
+    {
+      std::lock_guard<std::mutex> lock(subscription_mutex);
+      for (const auto& [call_id, subscription] : subscriptions) {
+        (void)call_id;
+        if (!EqualsIgnoreCase(subscription.event, "Alarm") ||
+            subscription.expires_at_ms <= now)
+          continue;
+        SipNotifyRequest notify = subscription.notify;
+        notify.body = body;
+        notify.content_type = std::string(kManscdpContentType);
+        subscribers.push_back(std::move(notify));
+      }
+    }
+    for (const SipNotifyRequest& notify : subscribers) {
+      std::string error;
+      if (ua && ua->SendNotify(notify, &error))
+        ++messages_out;
+      else
+        Log("cannot send Alarm NOTIFY: " + error);
+    }
+    alarms_sent.fetch_add(1);
+    Log("alarm published (SN=" + std::to_string(message.sn) + ", device=" +
+        message.device_id + ", subscribers=" + std::to_string(subscribers.size()) + ")");
+  }
+
+  void DrainAlarms() {
+    std::deque<GbAlarm> alarms;
+    {
+      std::lock_guard<std::mutex> lock(alarm_mutex);
+      alarms.swap(alarm_queue);
+    }
+    for (const GbAlarm& alarm : alarms)
+      PublishAlarm(alarm);
   }
 
   void OnInvite(const SipMessage& message, const std::string& peer) {
@@ -710,6 +983,8 @@ struct Gb28181Service::Impl {
     DrainLive();
     DrainSend();
     DrainFinished();
+    DrainAlarms();
+    ExpireSubscriptions();
   }
 
   static void OnTick(uv_timer_t* handle) {
@@ -785,6 +1060,8 @@ struct Gb28181Service::Impl {
     ua_callbacks.on_ack = [this](const SipMessage& message) { OnAck(message); };
     ua_callbacks.on_bye = [this](const SipMessage& message) { OnBye(message); };
     ua_callbacks.on_info = [this](const SipMessage& message) { OnInfo(message); };
+    ua_callbacks.on_subscribe = [this](const SipMessage& message) { OnSubscribe(message); };
+    ua_callbacks.on_notify = [this](const SipMessage& message) { OnNotify(message); };
     ua_callbacks.on_event = [this](const std::string& text) { Log(text); };
     ua->set_callbacks(std::move(ua_callbacks));
 
@@ -818,6 +1095,33 @@ struct Gb28181Service::Impl {
     responder->set_status_source([this] { return DeviceStatusSnapshot(); });
     responder->set_record_source(
         [this](const RecordInfoQuery& query) { return HandleRecordInfo(query); });
+    responder->set_ptz_handler([this](const PtzControl& command, std::string* error) {
+      GbChannel channel;
+      if (!FindChannelByGb(command.device_id, &channel)) {
+        if (error != nullptr)
+          *error = "PTZ command for unknown channel " + command.device_id;
+        return false;
+      }
+      if (!channel.enabled) {
+        if (error != nullptr)
+          *error = "PTZ command for disabled channel " + command.device_id;
+        return false;
+      }
+      if (!callbacks.ptz_control) {
+        if (error != nullptr)
+          *error = "no PTZ backend is configured for channel " + command.device_id;
+        return false;
+      }
+      std::string dispatch_error;
+      if (!callbacks.ptz_control(channel.local_id, command, &dispatch_error)) {
+        if (error != nullptr)
+          *error = dispatch_error.empty() ? "PTZ backend rejected the command" : dispatch_error;
+        return false;
+      }
+      Log("PTZ " + std::string(PtzActionName(command.command.action)) + " -> channel " +
+          std::to_string(channel.local_id) + " (GB " + command.device_id + ")");
+      return true;
+    });
 
     SegmentReadFn reader = callbacks.read_segment ? callbacks.read_segment : ReadPlainSegment;
     playback = std::make_unique<PlaybackController>(
@@ -871,6 +1175,14 @@ struct Gb28181Service::Impl {
       if (callbacks.live_close && session->subscription != 0)
         callbacks.live_close(session->channel_id, session->stream, session->subscription);
       session->pipeline.reset();
+    }
+    {
+      std::lock_guard<std::mutex> lock(subscription_mutex);
+      subscriptions.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(alarm_mutex);
+      alarm_queue.clear();
     }
     if (playback)
       playback->StopAll();
@@ -928,6 +1240,14 @@ struct Gb28181Service::Impl {
   std::unique_ptr<ManscdpResponder> responder;
   std::unique_ptr<PlaybackController> playback;
 
+  mutable std::mutex subscription_mutex;
+  std::map<std::string, Subscription> subscriptions;
+  std::uint64_t catalog_sn = 0;
+  std::uint64_t alarm_sn = 0;
+
+  mutable std::mutex alarm_mutex;
+  std::deque<GbAlarm> alarm_queue;
+
   mutable std::mutex sessions_mutex;
   std::map<std::string, Pending> pending_sessions;
   std::map<std::string, std::shared_ptr<LiveSession>> live_sessions;
@@ -949,6 +1269,7 @@ struct Gb28181Service::Impl {
   std::uint16_t local_port = 0;
   std::atomic<std::uint64_t> messages_in{0};
   std::atomic<std::uint64_t> messages_out{0};
+  std::atomic<std::uint64_t> alarms_sent{0};
   std::set<std::string> first_frame_logged;
   std::set<std::string> send_error_logged;
 };
@@ -1022,12 +1343,31 @@ Gb28181Service::Status Gb28181Service::GetStatus() const {
   }
   status.messages_in = impl_->messages_in.load();
   status.messages_out = impl_->messages_out.load();
+  status.alarms_sent = impl_->alarms_sent.load();
   {
     std::lock_guard<std::mutex> lock(impl_->sessions_mutex);
     status.live_sessions = impl_->live_sessions.size();
     status.playback_sessions = impl_->playback_sessions.size();
   }
+  {
+    std::lock_guard<std::mutex> lock(impl_->subscription_mutex);
+    for (const auto& [call_id, subscription] : impl_->subscriptions) {
+      (void)call_id;
+      if (EqualsIgnoreCase(subscription.event, "Alarm"))
+        ++status.alarm_subscriptions;
+    }
+  }
   return status;
+}
+
+bool Gb28181Service::ReportAlarm(const GbAlarm& alarm) {
+  if (!impl_ || !impl_->running.load())
+    return false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->alarm_mutex);
+    impl_->alarm_queue.push_back(alarm);
+  }
+  return true;
 }
 
 bool Gb28181Service::ParsePlaybackSdp(const std::string& sdp, std::string* channel_id,
