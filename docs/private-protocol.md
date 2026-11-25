@@ -147,8 +147,9 @@ connection; this keeps the door open for a future multiplexing revision.
 | 0x0053 | `AI_UNSUBSCRIBE` | C → S | `aiUnsubscribe` |
 
 Replies carry the request opcode and `RESPONSE`, except `HELLO→HELLO_ACK`,
-`AUTH→AUTH_ACK`, `LIVE_OPEN→LIVE_ACK` and `DOWNLOAD_OPEN→DOWNLOAD_BEGIN`,
-which have their own opcodes. `request_id` is copied verbatim into the reply.
+`AUTH→AUTH_ACK`, `LIVE_OPEN→LIVE_ACK`, `DOWNLOAD_OPEN→DOWNLOAD_BEGIN` and
+`AI_SUBSCRIBE→AI_SUBSCRIBE_ACK`, which have their own opcodes. `request_id` is
+copied verbatim into the reply.
 `session_id` is copied into replies once a session exists.
 
 ## 4. Handshake
