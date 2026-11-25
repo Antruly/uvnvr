@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - tmp/win-build-audio
       - feat/ai-pipeline
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
