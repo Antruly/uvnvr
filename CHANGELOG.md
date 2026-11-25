@@ -24,6 +24,26 @@ All notable changes to UvNVR are documented here. The format follows
   registrar are included. Build with `-DUVNVR_ENABLE_GB28181=ON`; the module is
   not linked into the server yet, so default deployments are unchanged. See
   `docs/gb28181-sip.md`.
+- **GB/T 28181 PS/RTP media path (opt-in, P6.2c).** H.264/H.265 Annex B
+  elementary streams are muxed into the Appendix C MPEG-2 PS layout (pack,
+  system header, PSM with CRC-32/MPEG-2 and PES with 90 kHz PTS/DTS), then
+  packetized as RTP payload type 96 with sequence, SSRC and per-frame marker
+  bits. UDP, TCP active and TCP passive (RFC 4571 length framing) are
+  supported, together with SDP build/parse and INVITE answer negotiation
+  (`a=setup`, `PS/90000`, `y=`). Build with `-DUVNVR_ENABLE_GB28181=ON`;
+  `gb28181_ps_cli` and an ffmpeg-backed integration check are included. The
+  module is not linked into the server yet, so default deployments are
+  unchanged. See `docs/gb28181-ps-rtp.md`.
+- **GB/T 28181 RTCP and INVITE/BYE media dialogs (opt-in, P6.2c).** The media
+  session now emits compound RTCP Sender Reports with SDES CNAME, consumes
+  Receiver Reports (loss/jitter/RTT), parses PLI and FIR key-frame requests
+  and RTCP BYE, and supports NACK diagnostics. A dialog manager binds the
+  stream to INVITE/ACK/BYE: SDP offer/answer with SSRC and port allocation,
+  idempotent retransmissions, re-INVITE replacement, TCP passive accept after
+  ACK, ACK timeout, and RTCP BYE on close. `gb28181_session_cli` and a
+  platform-side integration script validate all three transports and decode
+  the received PS with ffmpeg. Still behind `-DUVNVR_ENABLE_GB28181=ON`
+  (default off) and not linked into the server. See `docs/gb28181-ps-rtp.md`.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry

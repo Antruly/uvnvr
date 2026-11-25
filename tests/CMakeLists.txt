@@ -41,4 +41,16 @@ if(UVNVR_GB28181_ENABLED)
                  BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
   endif()
   add_test(NAME gb28181_manscdp COMMAND gb28181_manscdp_test)
+
+  add_executable(gb28181_ps_test gb28181_ps_test.cpp)
+  target_link_libraries(gb28181_ps_test PRIVATE uvnvr_gb28181)
+  add_test(NAME gb28181_ps COMMAND gb28181_ps_test)
+
+  add_executable(gb28181_rtcp_test gb28181_rtcp_test.cpp)
+  target_link_libraries(gb28181_rtcp_test PRIVATE uvnvr_gb28181)
+  add_test(NAME gb28181_rtcp COMMAND gb28181_rtcp_test)
+
+  add_executable(gb28181_media_session_test gb28181_media_session_test.cpp)
+  target_link_libraries(gb28181_media_session_test PRIVATE uvnvr_gb28181)
+  add_test(NAME gb28181_media_session COMMAND gb28181_media_session_test)
 endif()
