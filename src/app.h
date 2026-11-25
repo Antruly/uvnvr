@@ -9,6 +9,10 @@
 #include "recording.h"
 #include "rtsp.h"
 
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+#include "gb28181/service.h"
+#endif
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -180,6 +184,11 @@ private:
   void RegisterProtectedRoutes();
   void RegisterStatic();
 
+  // GB/T 28181 device-side service (opt-in). It is started only when the
+  // `gb28181.enabled` setting is on; the default build has the module off.
+  void StartGb28181();
+  void StopGb28181();
+
   // Private protocol (docs/private-protocol.md). The dispatcher reuses the
   // same services and database rows as the REST handlers.
   void StartPrivateProtocol();
@@ -295,6 +304,9 @@ private:
   std::unique_ptr<PlaybackService> playback_;
   std::unique_ptr<RtspServer> rtsp_;
   std::unique_ptr<proto::ProtoServer> proto_;
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  std::unique_ptr<gb28181::Gb28181Service> gb28181_;
+#endif
 #if UVNVR_ENABLE_AI
   std::unique_ptr<AiService> ai_;
 #endif
