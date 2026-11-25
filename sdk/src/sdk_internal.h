@@ -93,9 +93,34 @@ struct CallResult {
   json data = json::object();
 };
 
+struct AiEvent {
+  int64_t id = 0;
+  int32_t type = 0; // 1 = plate, 2 = face
+  int64_t channel_id = 0;
+  int64_t ts = 0;
+  bool alert = false;
+  double confidence = 0.0;
+  double quality = 0.0;
+  std::string channel_name;
+  std::string plate;
+  std::string plate_norm;
+  std::string color;
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t w = 0;
+  int32_t h = 0;
+  std::string engine;
+  int64_t matched_face_id = 0;
+  double matched_score = 0.0;
+  std::string matched_name;
+  std::string image_url;
+  std::string crop_url;
+};
+
 using FrameCallback =
     std::function<void(int handle, const uint8_t* data, size_t size, int codec, uint32_t flags,
                        int64_t pts_ms)>;
+using AiEventCallback = std::function<void(int handle, const AiEvent& event)>;
 using ProgressCallback = std::function<void(int64_t received, int64_t total)>;
 
 // Internal client: owns one libuv loop thread plus one persistent transport.
@@ -121,6 +146,9 @@ public:
                     int64_t to_ms, std::vector<Recording>* out, std::string* error);
   int LiveOpen(int64_t channel_id, int stream, FrameCallback callback, std::string* error);
   int LiveClose(int handle);
+  int AiSubscribe(int64_t channel_id, uint32_t types, AiEventCallback callback,
+                  std::string* error);
+  int AiUnsubscribe(int handle);
   int Download(int64_t recording_id, const std::string& path, ProgressCallback progress,
                std::string* error);
   void Cancel();
@@ -140,6 +168,10 @@ private:
 
   struct LiveEntry {
     FrameCallback callback;
+  };
+
+  struct AiEntry {
+    AiEventCallback callback;
   };
 
   struct DownloadState {
@@ -193,6 +225,7 @@ private:
   void HandleFrame(const proto::Header& header, std::string payload);
   void HandleResponse(const proto::Header& header, const std::string& payload);
   void HandleStreamFrame(const proto::Header& header, const std::string& payload);
+  void HandleAiEvent(const std::string& payload);
   void HandleError(const proto::Header& header, const std::string& payload);
 
   // Requests.
@@ -244,6 +277,7 @@ private:
   std::atomic<uint64_t> session_id_{0};
   std::atomic<uint32_t> next_request_id_{1};
   std::atomic<uint32_t> next_live_handle_{1};
+  std::atomic<uint32_t> next_ai_handle_{1};
   std::atomic<uint32_t> next_download_id_{1};
   std::atomic<uint64_t> generation_{0};
 
@@ -273,6 +307,7 @@ private:
   std::vector<uint8_t> input_;
   std::unordered_map<uint32_t, std::shared_ptr<Pending>> pending_;
   std::unordered_map<int, LiveEntry> live_;
+  std::unordered_map<int, AiEntry> ai_subscriptions_;
 
   std::mutex downloads_mutex_;
   std::unordered_map<uint32_t, std::shared_ptr<DownloadState>> downloads_;

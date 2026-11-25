@@ -45,6 +45,11 @@ enum Opcode : uint16_t {
   kOpDownloadBegin = 0x0041,
   kOpDownloadChunk = 0x0042,
   kOpDownloadDone = 0x0043,
+  // AI event subscription (additive in v1; see docs/private-protocol.md §7.3).
+  kOpAiSubscribe = 0x0050,
+  kOpAiSubscribeAck = 0x0051,
+  kOpAiEvent = 0x0052,
+  kOpAiUnsubscribe = 0x0053,
 };
 
 struct Header {

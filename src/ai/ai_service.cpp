@@ -2,6 +2,7 @@
 
 #include "ai_common.h"
 #include "ai_engine.h"
+#include "ai_event_json.h"
 #include "media.h"
 #include "plate_post.h"
 #include "snapshot_quota.h"
@@ -1245,6 +1246,27 @@ struct AiService::Impl {
     message["imageUrl"] = full_path.empty() ? "" : SnapshotUrl("plate", event_id, "full");
     message["cropUrl"] = crop_path.empty() ? "" : SnapshotUrl("plate", event_id, "crop");
 
+    if (opts.event_sink) {
+      AiEventFields fields;
+      fields.id = event_id;
+      fields.face = false;
+      fields.channel_id = frame.channel_id;
+      fields.channel_name = frame.channel_name;
+      fields.ts = ts;
+      fields.confidence = result.confidence;
+      fields.plate = normalized;
+      fields.plate_norm = normalized;
+      fields.color = result.color;
+      fields.x = result.x;
+      fields.y = result.y;
+      fields.w = result.w;
+      fields.h = result.h;
+      fields.engine = engine_name;
+      fields.alert = alert;
+      fields.image_url = message["imageUrl"].get<std::string>();
+      fields.crop_url = message["cropUrl"].get<std::string>();
+      opts.event_sink(AiEventJson(fields));
+    }
     if (opts.broadcast)
       opts.broadcast(message);
     if (alert && opts.raise_alert) {
@@ -1372,6 +1394,29 @@ struct AiService::Impl {
     message["imageUrl"] = full_path.empty() ? "" : SnapshotUrl("face", event_id, "full");
     message["cropUrl"] = crop_path.empty() ? "" : SnapshotUrl("face", event_id, "crop");
 
+    if (opts.event_sink) {
+      AiEventFields fields;
+      fields.id = event_id;
+      fields.face = true;
+      fields.channel_id = frame.channel_id;
+      fields.channel_name = frame.channel_name;
+      fields.ts = ts;
+      fields.confidence = result.detConfidence;
+      fields.quality = result.quality;
+      fields.x = result.x;
+      fields.y = result.y;
+      fields.w = result.w;
+      fields.h = result.h;
+      fields.engine = engine_name;
+      fields.alert = alert;
+      fields.matched = match.found;
+      fields.matched_face_id = match.id;
+      fields.matched_score = match.score;
+      fields.matched_name = match.name;
+      fields.image_url = message["imageUrl"].get<std::string>();
+      fields.crop_url = message["cropUrl"].get<std::string>();
+      opts.event_sink(AiEventJson(fields));
+    }
     if (opts.broadcast)
       opts.broadcast(message);
     if (alert && opts.raise_alert) {

@@ -182,6 +182,14 @@ const char* OpcodeName(uint16_t opcode) {
     return "DOWNLOAD_CHUNK";
   case kOpDownloadDone:
     return "DOWNLOAD_DONE";
+  case kOpAiSubscribe:
+    return "AI_SUBSCRIBE";
+  case kOpAiSubscribeAck:
+    return "AI_SUBSCRIBE_ACK";
+  case kOpAiEvent:
+    return "AI_EVENT";
+  case kOpAiUnsubscribe:
+    return "AI_UNSUBSCRIBE";
   default:
     return "UNKNOWN";
   }

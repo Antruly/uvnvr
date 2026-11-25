@@ -30,6 +30,10 @@ public:
     std::string data_dir;
     // Broadcasts one JSON message on /ws/events.
     std::function<void(const nlohmann::json&)> broadcast;
+    // Delivers the same recognition as a REST-shaped event item. The private
+    // protocol forwards it to subscribed SDK clients. Kept separate from
+    // `broadcast` because the WebSocket message uses its own field names.
+    std::function<void(const nlohmann::json&)> event_sink;
     // Insert a snapshot path; may be empty.
     std::function<void(int64_t, const std::string&, const std::string&, const std::string&,
                        const std::string&)>

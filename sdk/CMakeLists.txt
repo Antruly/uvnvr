@@ -101,7 +101,7 @@ install(TARGETS uvnvr_sdk
 install(FILES include/uvnvr_sdk.h DESTINATION include)
 
 # Samples -------------------------------------------------------------------
-foreach(sample basic live download)
+foreach(sample basic live download ai)
   add_executable(uvnvr_sample_${sample} samples/sample_${sample}.c)
   target_link_libraries(uvnvr_sample_${sample} PRIVATE uvnvr_sdk)
   set_target_properties(uvnvr_sample_${sample} PROPERTIES

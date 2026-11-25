@@ -146,6 +146,33 @@ new message types:
 `ai.face.matchThreshold`. Pushes go through the existing asynchronous
 `EventHub`; a slow client cannot block recognition.
 
+### Private-protocol SDK subscription
+
+The C SDK can receive the same events without a browser or a WebSocket ticket
+(`AI_SUBSCRIBE`, opcode `0x0050`; see [private-protocol.md](private-protocol.md)
+§7.3):
+
+```c
+static void on_event(uvnvr_sdk_t* sdk, int handle,
+                     const uvnvr_ai_event_t* event, void* user) {
+  printf("%s channel=%lld plate=%s confidence=%.2f\n",
+         event->type == UVNVR_AI_EVENT_PLATE ? "plate" : "face",
+         (long long)event->channel_id, event->plate, event->confidence);
+}
+
+int handle = uvnvr_ai_subscribe(sdk, 0 /* every channel */,
+                                UVNVR_AI_EVENT_PLATE | UVNVR_AI_EVENT_FACE,
+                                on_event, NULL);
+/* ... */
+uvnvr_ai_unsubscribe(sdk, handle);
+```
+
+`uvnvr_ai_event_t` uses the REST event item names (`id`, `channel_id`, `ts`,
+`plate`, `plate_norm`, `quality`, `matched_face_id`, `image_url`, ...), plus
+the WS-only `alert` and `matched_name`. The subscription requires
+`alert.view`, is not replayed, and must be re-created after a reconnect.
+`sample_ai.c` prints events for 30 seconds and is a quick smoke test.
+
 ## Persistence
 
 Tables created by the normal migration:

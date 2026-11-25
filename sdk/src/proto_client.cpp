@@ -45,6 +45,44 @@ json ParseJson(const std::string& text) {
   return value.is_discarded() ? json::object() : value;
 }
 
+// Tolerant field readers: a malformed or unexpected type must not throw on the
+// loop thread, where an exception would escape through the libuv callback.
+int64_t FieldInt(const json& object, const char* key, int64_t fallback = 0) {
+  const auto it = object.find(key);
+  if (it == object.end() || !it->is_number())
+    return fallback;
+  try {
+    return it->get<int64_t>();
+  } catch (...) {
+    return fallback;
+  }
+}
+
+double FieldDouble(const json& object, const char* key, double fallback = 0.0) {
+  const auto it = object.find(key);
+  if (it == object.end() || !it->is_number())
+    return fallback;
+  try {
+    return it->get<double>();
+  } catch (...) {
+    return fallback;
+  }
+}
+
+std::string FieldString(const json& object, const char* key) {
+  const auto it = object.find(key);
+  if (it == object.end() || !it->is_string())
+    return std::string();
+  return it->get<std::string>();
+}
+
+bool FieldBool(const json& object, const char* key, bool fallback = false) {
+  const auto it = object.find(key);
+  if (it == object.end() || !it->is_boolean())
+    return fallback;
+  return it->get<bool>();
+}
+
 } // namespace
 
 namespace {
@@ -159,6 +197,7 @@ void Client::ShutdownOnLoop() {
   quic_attempt_active_ = false;
   hello_pending_ = false;
   live_.clear();
+  ai_subscriptions_.clear();
   // Refuse any Post() that races with teardown, then leave the loop.
   running_ = false;
   loop_.stop();
@@ -548,7 +587,7 @@ void Client::BeginHandshake(uint64_t epoch) {
   const json hello = {{"protocol", static_cast<int>(proto::kVersion)},
                       {"client", "uvnvr-sdk/" UVNVR_SDK_VERSION},
                       {"transports", json::array({"quic", "tcp"})},
-                      {"features", json::array({"live", "download", "days"})},
+                      {"features", json::array({"live", "download", "days", "ai.events"})},
                       {"resumeSessionId", session_id_.load()}};
   SendJsonFrame(proto::kOpHello, 0, hello_request_id_, hello);
 }
@@ -566,6 +605,7 @@ void Client::OnTransportClosed(uint64_t epoch) {
   FailAllPending(UVNVR_ERR_NETWORK, "the connection was lost");
   FailDownloads(UVNVR_ERR_NETWORK, "the connection was lost");
   live_.clear();
+  ai_subscriptions_.clear();
   if (connect_waiter_) {
     auto waiter = connect_waiter_;
     connect_waiter_.reset();
@@ -721,6 +761,9 @@ void Client::HandleFrame(const proto::Header& header, std::string payload) {
   case proto::kOpDownloadDone:
     HandleStreamFrame(header, payload);
     return;
+  case proto::kOpAiEvent:
+    HandleAiEvent(payload);
+    return;
   default:
     return;
   }
@@ -859,6 +902,47 @@ void Client::HandleStreamFrame(const proto::Header& header, const std::string& p
       progress(received, total);
     return;
   }
+}
+
+void Client::HandleAiEvent(const std::string& payload) {
+  const json data = ParseJson(payload);
+  if (!data.is_object())
+    return;
+  const int handle = static_cast<int>(FieldInt(data, "subscriptionId"));
+  auto it = ai_subscriptions_.find(handle);
+  if (it == ai_subscriptions_.end() || !it->second.callback)
+    return;
+
+  AiEvent event;
+  const std::string type = FieldString(data, "type");
+  event.type = type == "plate" ? UVNVR_AI_EVENT_PLATE
+                               : (type == "face" ? UVNVR_AI_EVENT_FACE : 0);
+  if (event.type == 0)
+    return;
+  event.id = FieldInt(data, "id");
+  event.channel_id = FieldInt(data, "channelId");
+  event.ts = FieldInt(data, "ts");
+  event.alert = FieldBool(data, "alert");
+  event.confidence = FieldDouble(data, "confidence");
+  event.quality = FieldDouble(data, "quality");
+  event.channel_name = FieldString(data, "channelName");
+  event.plate = FieldString(data, "plate");
+  event.plate_norm = FieldString(data, "plateNorm");
+  event.color = FieldString(data, "color");
+  event.engine = FieldString(data, "engine");
+  event.matched_face_id = FieldInt(data, "matchedFaceId");
+  event.matched_score = FieldDouble(data, "matchedScore");
+  event.matched_name = FieldString(data, "matchedName");
+  event.image_url = FieldString(data, "imageUrl");
+  event.crop_url = FieldString(data, "cropUrl");
+  const auto box = data.find("box");
+  if (box != data.end() && box->is_object()) {
+    event.x = static_cast<int32_t>(FieldInt(*box, "x"));
+    event.y = static_cast<int32_t>(FieldInt(*box, "y"));
+    event.w = static_cast<int32_t>(FieldInt(*box, "w"));
+    event.h = static_cast<int32_t>(FieldInt(*box, "h"));
+  }
+  it->second.callback(handle, event);
 }
 
 CallResult Client::Request(uint16_t opcode, const json& payload, bool with_session,
@@ -1120,6 +1204,57 @@ int Client::LiveClose(int handle) {
       const json payload = {{"streamId", handle}};
       SendJsonFrame(proto::kOpLiveClose, session_id_.load(), next_request_id_.fetch_add(1),
                     payload);
+    }
+  });
+  return UVNVR_OK;
+}
+
+int Client::AiSubscribe(int64_t channel_id, uint32_t types, AiEventCallback callback,
+                        std::string* error) {
+  constexpr uint32_t kKnownTypes =
+      UVNVR_AI_EVENT_PLATE | UVNVR_AI_EVENT_FACE;
+  if (types == 0 || (types & ~kKnownTypes) != 0 || !callback) {
+    if (error)
+      *error = "types must contain UVNVR_AI_EVENT_PLATE and/or UVNVR_AI_EVENT_FACE";
+    return UVNVR_ERR_INVALID_ARGUMENT;
+  }
+  const int ready = EnsureReady(error);
+  if (ready != UVNVR_OK)
+    return ready;
+
+  const int handle = static_cast<int>(next_ai_handle_.fetch_add(1));
+  Post([this, handle, callback = std::move(callback)] {
+    ai_subscriptions_[handle] = AiEntry{callback};
+  });
+
+  json type_list = json::array();
+  if ((types & UVNVR_AI_EVENT_PLATE) != 0)
+    type_list.push_back("plate");
+  if ((types & UVNVR_AI_EVENT_FACE) != 0)
+    type_list.push_back("face");
+  const json payload = {{"subscriptionId", handle},
+                        {"channelId", channel_id > 0 ? channel_id : 0},
+                        {"types", type_list}};
+  const CallResult result = RequestWithAuth(
+      proto::kOpAiSubscribe, payload, static_cast<int>(options_.request_timeout_ms));
+  if (result.code != UVNVR_OK) {
+    Post([this, handle] { ai_subscriptions_.erase(handle); });
+    if (error)
+      *error = result.message;
+    return -result.code;
+  }
+  return handle;
+}
+
+int Client::AiUnsubscribe(int handle) {
+  if (handle <= 0)
+    return UVNVR_ERR_INVALID_ARGUMENT;
+  Post([this, handle] {
+    ai_subscriptions_.erase(handle);
+    if (connected_.load()) {
+      const json payload = {{"subscriptionId", handle}};
+      SendJsonFrame(proto::kOpAiUnsubscribe, session_id_.load(),
+                    next_request_id_.fetch_add(1), payload);
     }
   });
   return UVNVR_OK;

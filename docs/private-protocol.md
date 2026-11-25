@@ -1,6 +1,8 @@
 # UvNVR Private Protocol (UVNVR-PP) — version 1
 
 Status: **stable v1**, implemented by `src/proto/` and `sdk/`.
+Additive revisions: AI event subscription (§7.3) added opcodes `0x0050`–`0x0053`
+without changing the frame layout or any existing opcode.
 
 This document is the normative wire specification for the UvNVR private
 protocol. It is the contract between the recorder and the C SDK
@@ -139,6 +141,10 @@ connection; this keeps the door open for a future multiplexing revision.
 | 0x0041 | `DOWNLOAD_BEGIN` | S → C | `downloadBegin` |
 | 0x0042 | `DOWNLOAD_CHUNK` | S → C | binary, `STREAM` (§7.2) |
 | 0x0043 | `DOWNLOAD_DONE` | S → C | `downloadDone`, `FIN` |
+| 0x0050 | `AI_SUBSCRIBE` | C → S | `aiSubscribe` (§7.3) |
+| 0x0051 | `AI_SUBSCRIBE_ACK` | S → C | `aiSubscribeAck` |
+| 0x0052 | `AI_EVENT` | S → C | `aiEvent` (JSON, unsolicited) |
+| 0x0053 | `AI_UNSUBSCRIBE` | C → S | `aiUnsubscribe` |
 
 Replies carry the request opcode and `RESPONSE`, except `HELLO→HELLO_ACK`,
 `AUTH→AUTH_ACK`, `LIVE_OPEN→LIVE_ACK` and `DOWNLOAD_OPEN→DOWNLOAD_BEGIN`,
@@ -182,7 +188,7 @@ The chosen transport can be read back with `uvnvr_transport()`.
   "protocol": 1,
   "client": "uvnvr-sdk/0.1.0",
   "transports": ["quic", "tcp"],
-  "features": ["live", "download", "days"],
+  "features": ["live", "download", "days", "ai.events"],
   "resumeSessionId": 0
 }
 ```
@@ -274,8 +280,10 @@ in-flight requests with `UVNVR_ERR_NETWORK`, and attempts one reconnect on the
 next API call using the same host/port, the same transport preference, and the
 stored `session_id`. Live handles are not resurrected automatically: their
 `LIVE_FRAME` callbacks stop, and the application must call `uvnvr_live_open`
-again. Downloads that fail mid-transfer return an error; the file is left with
-the bytes received so far and the caller may retry with a new request.
+again. AI event subscriptions behave the same way; call `uvnvr_ai_subscribe`
+again after a reconnect. Downloads that fail mid-transfer return an error; the
+file is left with the bytes received so far and the caller may retry with a
+new request.
 
 ## 6. Error model
 
@@ -376,6 +384,53 @@ chunk the server sends `DOWNLOAD_DONE` with `flags = RESPONSE | FIN`:
 Only finalized segments (`id > 0`, `active=false`) can be downloaded, matching
 the REST endpoint. `404 not_found` is returned for a missing row or file.
 
+### 7.3 AI_EVENT
+
+`AI_SUBSCRIBE`:
+
+```json
+{ "subscriptionId": 1, "channelId": 0, "types": ["plate", "face"] }
+```
+
+* `subscriptionId` is client-chosen, non-zero and unique per connection; it is
+  the demultiplexing key for pushes, in the same role `streamId` plays for
+  `LIVE_FRAME`.
+* `channelId` `0` (or negative) means every channel.
+* `types` is a non-empty subset of `"plate"` and `"face"`.
+
+The server replies `AI_SUBSCRIBE_ACK` (`opcode=0x0051`, `RESPONSE`) echoing the
+three fields, then pushes `AI_EVENT` (`opcode=0x0052`) frames as the AI
+pipeline recognises them. Pushes are JSON, do not carry `RESPONSE`, `STREAM`
+or `FIN`, and add the demultiplexing key at the top level:
+
+```json
+{"subscriptionId":1,"id":4,"type":"plate","channelId":1,"channelName":"LabCam",
+ "ts":1795515031,"plate":"京A12345","plateNorm":"京A12345","color":"蓝",
+ "confidence":0.93,"box":{"x":128,"y":240,"w":160,"h":48},"engine":"stub",
+ "alert":true,"createdAt":1795515031,
+ "imageUrl":"/api/v1/ai/events/4/snapshot?type=plate&kind=full",
+ "cropUrl":"/api/v1/ai/events/4/snapshot?type=plate&kind=crop"}
+```
+
+The event object reuses the REST item spelling from `GET /api/v1/ai/events`
+(`id`, `type`, `channelId`, `channelName`, `ts`, `plate`, `plateNorm`,
+`confidence`, `color`, `box`, `engine`, `createdAt`, `imageUrl`, `cropUrl`;
+face items add `quality`, `matchedFaceId`, `matchedScore`), so REST parsers
+work unchanged. `alert` and `matchedName` are the two fields that only exist
+on the `/ws/events` real-time message and are carried here too; WS
+`channel.id`/`channel.name` correspond to `channelId`/`channelName` and WS
+`matched.name` to `matchedName`. `matchedFaceId` and `matchedName` are `null`
+when no face-library entry reached the threshold.
+
+`AI_UNSUBSCRIBE` `{"subscriptionId":1}` removes the subscription and is
+answered with the request opcode, `RESPONSE`, and `{"subscriptionId":1,
+"ok":true}`. A subscription is also removed when its connection closes. Like
+`LIVE_OPEN`, the permission is checked once at subscribe time (`alert.view`,
+the same permission as the REST AI event endpoints); there is no replay of
+events detected before the subscription, and a reconnect starts with no
+subscriptions. AI disabled at build time (`UVNVR_ENABLE_AI=0`) or an AI
+service that is not running answers `503 ai_unavailable`, mirroring REST.
+
 ## 8. Relationship to REST API v1
 
 The private protocol is a second entry point to the same services, not a
@@ -390,6 +445,7 @@ reimplementation. The dispatcher in `src/app.cpp` calls the same
 | `RECORDING_LIST` | `GET /api/v1/recordings` | `playback.view` |
 | `LIVE_OPEN` | `POST /api/v1/streams/ticket` + `/ws/live` | `preview.view` |
 | `DOWNLOAD_OPEN` | `GET /api/v1/recordings/{id}/download` | `playback.download` |
+| `AI_SUBSCRIBE` | `POST /api/v1/events/ticket` + `/ws/events`, items from `GET /api/v1/ai/events` | `alert.view` |
 
 Permissions are evaluated with the same `PermissionImplies` table as REST, so
 `preview`-scoped accounts behave identically on both entry points.
