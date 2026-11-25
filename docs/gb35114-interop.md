@@ -5,10 +5,11 @@
 
 | 验收项 | 实现 | 证据 |
 | --- | --- | --- |
-| 身份认证 | 设备/平台双向 SM2 签名（ClientHello / ServerHello / VkekDelivery / VkekAck） | `gb35114_interop` 平台侧输出 `identity=ok`，pcap 中 4 条 SIP MESSAGE |
+| 身份认证 | 设备/平台双向 SM2 签名（ClientHello / ServerHello / VkekDelivery / VkekAck），VkekAck 必须绑定到本次会话/密钥/序号 | `identity=ok`；伪造设备密钥与伪造平台密钥两个负向探针均 `rejected`（§4.2） |
 | 签名可验 | A 级：SM3(access unit) + SM2，按帧索引/通道/时间戳绑定 | `signature_verified=2`（2 个关键帧全部通过） |
 | 加密可解 | B 级：会话协商出的 VKEK 经 HKDF-SM3 派生，SM4-CTR + HMAC-SM3 封帧 | `cipher_frames=20`、`plaintext_match=yes`、SHA-256 与设备侧一致 |
-| 篡改被拒 | 修改签名摘要、修改密文各一个探针 | `signature_tamper=rejected`、`cipher_tamper=rejected` |
+| 篡改被拒 | 修改签名摘要、修改密文正文（第 56 字节起）各一个探针 | `signature_tamper=rejected`、`cipher_tamper=rejected` |
+| 联调记录与抓包 | 本文 §4 + 端点 pcap | `docs/evidence/gb35114-interop-record.txt`、`docs/evidence/gb35114-interop.pcap` |
 
 ## 1. 联调拓扑
 
@@ -93,37 +94,44 @@ python3 tests/integration/gb35114_interop.py ./build/gb35114_interop \
 ```
 
 脚本会生成 SM2 身份、用 ffmpeg 生成 20 帧 H.264 素材、启动平台/设备两个进程，
-解析平台写出的 pcap，并断言五个条件（身份、签名、解密、两个篡改探针）。
+解析平台写出的 pcap，并断言身份、签名、解密、两个篡改探针和两个伪造身份负向探针。
 默认输出：`gb35114_interop.pcap`、`platform.log`、`device.log`、
-`interop-summary.txt`、`summary.json`。
+`interop-summary.txt`、`summary.json`；负向探针的日志在 `negative-*/` 下。
+`--skip-negative-controls` 可只跑主流程。
 
 ## 4. 实测记录
 
-环境：Linux 6.14，GCC 13.3，OpenSSL 3.0.13，libuvcpp 1.9.1，ffmpeg（H.264/`libx264`）。
+环境：Linux 6.14，GCC 13.3，OpenSSL 3.0.13，libuvcpp 1.9.1，ffmpeg 9.0.1（H.264/`libx264`）。
 命令与输出均来自 2026-11-26 的实际运行：
 
-```
-$ python3 tests/integration/gb35114_interop.py ./build/gb35114_interop --evidence-dir /tmp/gb35114-evidence
-[1/5] generate the SM2 identities and an H.264 fixture
+```text
+$ python3 tests/integration/gb35114_interop.py ./build/gb35114_interop --evidence-dir /tmp/gh27-final
+[1/7] generate the SM2 identities and an H.264 fixture
       fixture: 49495 bytes sha256=98cf25d8dd7cdc4aaff34a0d68ac5a9e7b3db396067ac46bf52e3fd68f5ac979
-[2/5] start the reference platform
-      platform ready negotiate=47531 media=38951 signature=53989 pcap=/tmp/gb35114-evidence/gb35114_interop.pcap
-[3/5] run the device handshake, media and tamper probes
-[4/5] collect the platform verdict
-[5/5] parse the capture
+[2/7] start the reference platform
+      platform ready negotiate=49049 media=34473 signature=42598 pcap=/tmp/gh27-final/gb35114_interop.pcap
+[3/7] run the device handshake, media and tamper probes
+[4/7] collect the platform verdict
+[5/7] parse the capture
+[6/7] negative identity controls (forged device / forged platform)
+      forged-device: rejected (device exit 1, platform exit 1)
+      forged-platform: rejected (device exit 1, platform exit 1)
+[7/7] write the record
 
 GB 35114 A-level -> B-level interop record
 stream id: 34020000001320000001
-capture: gb35114_interop.pcap (64201 bytes, sha256=3e722c4c34eb9e3e15bd453b843cf9e94a798cd482829d38fb366126019e9efd)
+capture: gb35114_interop.pcap (64201 bytes, sha256=207dc75a163e3017f3f44f150987ec67da426b85b12425d451d6a7a979b9c407)
 packets: 56, RTP: 46 (50615 payload bytes), other: 0
 SIP MESSAGE: ClientHello=1, Report=1, ServerHello=1, VkekAck=1, VkekDelivery=1
 side channel: type0(end)=1 type1(signature)=2 type2(tampered signature)=1 type3(tampered ciphertext)=1
+negative identity (forged device key) = rejected
+negative identity (forged platform key) = rejected
 
 device output:
-device: ClientHello sent (200 bytes)
+device: ClientHello sent (199 bytes)
 device: ServerHello ok
 device: VkekDelivery ok
-device: B-level keys derived key_id=1 session=ebafab475e1f4d1c
+device: B-level keys derived key_id=1 session=2d6db005825ecc16
 device: sent 20 sealed frames, 2 signatures, plaintext_sha256=98cf25d8dd7cdc4aaff34a0d68ac5a9e7b3db396067ac46bf52e3fd68f5ac979
 device: platform report
 identity=ok
@@ -137,9 +145,9 @@ cipher_tamper=rejected
 overall=ok
 
 platform output:
-platform ready negotiate=47531 media=38951 signature=53989 pcap=/tmp/gb35114-evidence/gb35114_interop.pcap
-platform: ClientHello from device=34020000001320000001 nonce=37fc911670bd7375 identity=authenticated
-platform: VkekAck key_id=1 status=accepted signature=verified
+platform ready negotiate=49049 media=34473 signature=42598 pcap=/tmp/gh27-final/gb35114_interop.pcap
+platform: ClientHello from device=34020000001320000001 nonce=4b98828f580260cb identity=authenticated
+platform: VkekAck key_id=1 status=accepted binding=ok signature=verified
 platform: identity=ok signatures=2/2 tampered_signature=rejected
 platform: cipher_frames=20 plaintext_sha256=98cf25d8dd7cdc4aaff34a0d68ac5a9e7b3db396067ac46bf52e3fd68f5ac979 plaintext_match=yes tampered_ciphertext=rejected
 platform: overall=ok
@@ -154,34 +162,55 @@ platform: overall=ok
 ```
 $ tcpdump -nn -r docs/evidence/gb35114-interop.pcap | head -8
 reading from file docs/evidence/gb35114-interop.pcap, link-type EN10MB (Ethernet), snapshot length 65535
-01:39:55.503025 IP 127.0.0.1.60855 > 127.0.0.1.47531: UDP, length 618
-01:39:55.505788 IP 127.0.0.1.47531 > 127.0.0.1.60855: UDP, length 598
-01:39:55.507318 IP 127.0.0.1.47531 > 127.0.0.1.60855: UDP, length 787
-01:39:55.509671 IP 127.0.0.1.60855 > 127.0.0.1.47531: UDP, length 526
-01:39:55.510615 IP 127.0.0.1.48787 > 127.0.0.1.53989: UDP, length 171
-01:39:55.510690 IP 127.0.0.1.49211 > 127.0.0.1.38951: UDP, length 1412
-01:39:55.510708 IP 127.0.0.1.49211 > 127.0.0.1.38951: UDP, length 1412
-01:39:55.510712 IP 127.0.0.1.49211 > 127.0.0.1.38951: UDP, length 1412
+02:04:09.647029 IP 127.0.0.1.39003 > 127.0.0.1.49049: UDP, length 618
+02:04:09.650102 IP 127.0.0.1.49049 > 127.0.0.1.39003: UDP, length 598
+02:04:09.651925 IP 127.0.0.1.49049 > 127.0.0.1.39003: UDP, length 787
+02:04:09.654463 IP 127.0.0.1.39003 > 127.0.0.1.49049: UDP, length 526
+02:04:09.655629 IP 127.0.0.1.37293 > 127.0.0.1.34473: UDP, length 1412
+02:04:09.655665 IP 127.0.0.1.37696 > 127.0.0.1.42598: UDP, length 171
+02:04:09.655673 IP 127.0.0.1.37293 > 127.0.0.1.34473: UDP, length 1412
+02:04:09.655680 IP 127.0.0.1.37293 > 127.0.0.1.34473: UDP, length 1412
 ```
 
-端口对照：47531 协商（SIP MESSAGE），38951 RTP，53989 签名旁路。
+端口对照：49049 协商（SIP MESSAGE），34473 RTP，42598 签名旁路。
 抓包文件与记录已随仓库提交：
 
 - [`evidence/gb35114-interop.pcap`](evidence/gb35114-interop.pcap)
-  （64201 字节，SHA-256 `3e722c4c34eb9e3e15bd453b843cf9e94a798cd482829d38fb366126019e9efd`）
+  （64201 字节，SHA-256 `207dc75a163e3017f3f44f150987ec67da426b85b12425d451d6a7a979b9c407`）
 - [`evidence/gb35114-interop-record.txt`](evidence/gb35114-interop-record.txt)
 - [`evidence/gb35114-interop.pcap.sha256`](evidence/gb35114-interop.pcap.sha256)
+- [`evidence/gb35114-interop-negative.txt`](evidence/gb35114-interop-negative.txt)
+
+### 4.2 身份认证的负向控制
+
+主流程证明"真设备 + 真平台"能互认；两个负向探针证明认错身份时会失败关闭。
+脚本把其中一方的固定公钥替换成另一方的公钥后再跑一次完整握手：
+
+```text
+=== forged device key: platform pins the wrong device identity ===
+--- platform output ---
+platform: ClientHello from device=34020000001320000001 nonce=51af8835be15797e identity=rejected
+error: device ClientHello signature did not verify
+
+=== forged platform key: device pins the wrong platform identity ===
+--- device output ---
+device: ServerHello bad-signature
+error: platform authentication failed: the platform server hello signature is invalid: SM2 signature verification failed (bad-signature)
+```
+
+两次运行中双方进程都以非零状态退出，脚本据此断言 `negative identity ... = rejected`。
+完整日志见 [`evidence/gb35114-interop-negative.txt`](evidence/gb35114-interop-negative.txt)。
 
 ## 5. 逐条对应 issue #27
 
 | issue 条目 | 实现位置 | 本次证据 |
 | --- | --- | --- |
-| 身份认证 | `VkekManager`（`src/gb35114/vkek.cpp`）、`gb35114_interop` | `identity=ok`；ClientHello/ServerHello/VkekDelivery/VkekAck 四种记录各 1 条 |
+| 身份认证 | `VkekManager`（`src/gb35114/vkek.cpp`）、`gb35114_interop` | `identity=ok`；`binding=ok`；ClientHello/ServerHello/VkekDelivery/VkekAck 各 1 条；两个伪造身份负向探针均 `rejected` |
 | 签名可验 | `src/gb35114/sign.cpp`、平台侧 `VerifyFrameSignature` | `signature_verified=2`，`signature_total=2` |
 | 加密可解 | `src/gb35114/stream_keys.cpp` + `es_crypto.cpp` | 20 帧全部解密，明文 SHA-256 与设备侧一致 |
-| 篡改被拒 | 平台侧负向探针 | 改 1 bit 签名摘要 / 改 1 bit 密文：`rejected` |
-| 联调记录 | 本文 §4 | 实际命令与输出 |
-| 抓包 | `docs/evidence/gb35114-interop.pcap` | 56 个 UDP 包，`tcpdump -r` 可读 |
+| 篡改被拒 | 平台侧负向探针 | 改 1 bit 签名摘要 / 改 1 bit 密文正文：`rejected` |
+| 联调记录 | 本文 §4、§4.2 | 实际命令与输出；`docs/evidence/gb35114-interop-record.txt` |
+| 抓包 | `docs/evidence/gb35114-interop.pcap` | 56 个 UDP 包，`tcpdump -r` 可读，SHA-256 见 §4.1 |
 
 ## 6. 遗留问题与限制
 

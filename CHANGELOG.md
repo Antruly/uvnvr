@@ -15,10 +15,12 @@ All notable changes to UvNVR are documented here. The format follows
   the SM4-CTR/HMAC-SM3 sealed H.264 stream; a side channel carries the A-level
   SM3/SM2 frame signatures. The platform verifies the device identity,
   verifies every signed key frame, decrypts all 20 frames with the negotiated
-  VKEK, and rejects a one-bit signature change and a one-bit ciphertext change.
-  `tests/integration/gb35114_interop.py` drives both processes, parses the
-  endpoint pcap and asserts the four acceptance items; the record and capture
-  are in `docs/gb35114-interop.md` and `docs/evidence/`. Built only with
+  VKEK, requires the VkekAck to be bound to the delivered session/key id/key
+  version/sequence, and rejects a one-bit signature change and a one-bit
+  ciphertext-body change. `tests/integration/gb35114_interop.py` drives both
+  processes, parses the endpoint pcap, and runs two forged-identity controls
+  (wrong device key, wrong platform key) that must fail closed. The record and
+  capture are in `docs/gb35114-interop.md` and `docs/evidence/`. Built only with
   `UVNVR_ENABLE_GB28181=ON` and `UVNVR_ENABLE_GB35114=ON` on non-Windows hosts,
   and not linked into the server.
 - **GB/T 28181 云台控制与报警上报 (opt-in, P6.2e).** `DeviceControl`

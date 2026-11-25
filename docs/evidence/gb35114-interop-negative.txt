@@ -1,0 +1,20 @@
+GB 35114 interop: negative identity controls (fail-closed)
+
+=== forged device key: platform pins the wrong device identity ===
+--- platform output ---
+platform ready negotiate=46948 media=38661 signature=49317 pcap=/tmp/gh27-final/negative-forged-device/negative.pcap
+error: device ClientHello signature did not verify
+platform: ClientHello from device=34020000001320000001 nonce=51af8835be15797e identity=rejected
+--- device output ---
+error: timed out waiting for ServerHello
+device: ClientHello sent (199 bytes)
+
+=== forged platform key: device pins the wrong platform identity ===
+--- device output ---
+error: platform authentication failed: the platform server hello signature is invalid: SM2 signature verification failed (bad-signature)
+device: ClientHello sent (199 bytes)
+device: ServerHello bad-signature
+--- platform output ---
+platform ready negotiate=50757 media=59800 signature=57491 pcap=/tmp/gh27-final/negative-forged-platform/negative.pcap
+error: did not receive a VkekAck
+platform: ClientHello from device=34020000001320000001 nonce=df5d2c66533fb6f2 identity=authenticated

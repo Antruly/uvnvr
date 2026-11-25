@@ -1,15 +1,17 @@
 GB 35114 A-level -> B-level interop record
 stream id: 34020000001320000001
-capture: gb35114_interop.pcap (64201 bytes, sha256=3e722c4c34eb9e3e15bd453b843cf9e94a798cd482829d38fb366126019e9efd)
+capture: gb35114_interop.pcap (64201 bytes, sha256=207dc75a163e3017f3f44f150987ec67da426b85b12425d451d6a7a979b9c407)
 packets: 56, RTP: 46 (50615 payload bytes), other: 0
 SIP MESSAGE: ClientHello=1, Report=1, ServerHello=1, VkekAck=1, VkekDelivery=1
 side channel: type0(end)=1 type1(signature)=2 type2(tampered signature)=1 type3(tampered ciphertext)=1
+negative identity (forged device key) = rejected
+negative identity (forged platform key) = rejected
 
 device output:
-device: ClientHello sent (200 bytes)
+device: ClientHello sent (199 bytes)
 device: ServerHello ok
 device: VkekDelivery ok
-device: B-level keys derived key_id=1 session=ebafab475e1f4d1c
+device: B-level keys derived key_id=1 session=2d6db005825ecc16
 device: sent 20 sealed frames, 2 signatures, plaintext_sha256=98cf25d8dd7cdc4aaff34a0d68ac5a9e7b3db396067ac46bf52e3fd68f5ac979
 device: platform report
 identity=ok
@@ -23,9 +25,9 @@ cipher_tamper=rejected
 overall=ok
 
 platform output:
-platform ready negotiate=47531 media=38951 signature=53989 pcap=docs/evidence/gb35114-interop.pcap
-platform: ClientHello from device=34020000001320000001 nonce=37fc911670bd7375 identity=authenticated
-platform: VkekAck key_id=1 status=accepted signature=verified
+platform ready negotiate=49049 media=34473 signature=42598 pcap=/tmp/gh27-final/gb35114_interop.pcap
+platform: ClientHello from device=34020000001320000001 nonce=4b98828f580260cb identity=authenticated
+platform: VkekAck key_id=1 status=accepted binding=ok signature=verified
 platform: identity=ok signatures=2/2 tampered_signature=rejected
 platform: cipher_frames=20 plaintext_sha256=98cf25d8dd7cdc4aaff34a0d68ac5a9e7b3db396067ac46bf52e3fd68f5ac979 plaintext_match=yes tampered_ciphertext=rejected
 platform: overall=ok

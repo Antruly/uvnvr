@@ -142,6 +142,95 @@ def parse_capture(path: Path) -> dict[str, object]:
     }
 
 
+def run_negative_control(binary: str, source: Path, workdir: Path, sample: Path,
+                         stream_id: str, kind: str) -> dict[str, object]:
+    """Runs one impersonation scenario and requires the receiver to fail closed.
+
+    forged-device:   the platform pins the wrong device key, so a correctly
+                     signed ClientHello from the real device must be rejected.
+    forged-platform: the device pins the wrong platform key, so a correctly
+                     signed ServerHello from the real platform must be rejected.
+    """
+    directory = workdir / ("negative-" + kind)
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    for name in ("device_private_key.pem", "device_public_key.pem",
+                 "platform_private_key.pem", "platform_public_key.pem"):
+        shutil.copyfile(source / name, directory / name)
+    if kind == "forged-device":
+        shutil.copyfile(directory / "platform_public_key.pem",
+                        directory / "device_public_key.pem")
+    elif kind == "forged-platform":
+        shutil.copyfile(directory / "device_public_key.pem",
+                        directory / "platform_public_key.pem")
+    else:
+        raise AssertionError("unknown negative control: %s" % kind)
+
+    pcap = directory / "negative.pcap"
+    platform = subprocess.Popen(
+        [binary, "platform", "--dir", str(directory), "--pcap", str(pcap),
+         "--stream-id", stream_id, "--timeout-ms", "1500"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert platform.stdout is not None
+    ready_line = ""
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        line = platform.stdout.readline()
+        if not line:
+            break
+        ready_line = line
+        if "platform ready" in line:
+            break
+    if "platform ready" not in ready_line:
+        platform.kill()
+        raise AssertionError("%s: platform did not become ready: %r" % (kind, ready_line))
+    fields = dict(part.split("=", 1) for part in ready_line.split() if "=" in part)
+    device = subprocess.run(
+        [
+            binary, "device", "--dir", str(directory),
+            "--negotiate-port", fields["negotiate"],
+            "--media-port", fields["media"],
+            "--signature-port", fields["signature"],
+            "--h264", str(sample),
+            "--stream-id", stream_id,
+            "--timeout-ms", "1500",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=20,
+    )
+    remaining, _ = platform.communicate(timeout=20)
+    platform_output = ready_line + (remaining or "")
+    (directory / "platform.log").write_text(platform_output)
+    (directory / "device.log").write_text(device.stdout)
+
+    if kind == "forged-device":
+        if platform.returncode == 0 or "identity=rejected" not in platform_output:
+            raise AssertionError(
+                "forged device identity was not rejected:\n%s" % platform_output)
+        if device.returncode == 0:
+            raise AssertionError(
+                "forged device identity run unexpectedly succeeded:\n%s" % device.stdout)
+    else:
+        if device.returncode == 0 or "ServerHello bad-signature" not in device.stdout:
+            raise AssertionError(
+                "forged platform identity was not rejected:\n%s" % device.stdout)
+        if platform.returncode == 0:
+            raise AssertionError(
+                "forged platform identity run unexpectedly succeeded:\n%s" % platform_output)
+    return {
+        "kind": kind,
+        "verdict": "rejected",
+        "device_exit": device.returncode,
+        "platform_exit": platform.returncode,
+    }
+
+
 def run_checked(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
     if proc.returncode != 0:
@@ -157,6 +246,8 @@ def main() -> int:
     parser.add_argument("binary", help="path to gb35114_interop")
     parser.add_argument("--evidence-dir", help="keep artifacts in this directory")
     parser.add_argument("--stream-id", default=STREAM_ID)
+    parser.add_argument("--skip-negative-controls", action="store_true",
+                        help="skip the two forged-identity runs")
     args = parser.parse_args()
 
     binary = require_executable(args.binary, "gb35114_interop")
@@ -172,7 +263,7 @@ def main() -> int:
     pcap = workdir / "gb35114_interop.pcap"
     sample = workdir / "sample.h264"
 
-    print("[1/5] generate the SM2 identities and an H.264 fixture")
+    print("[1/7] generate the SM2 identities and an H.264 fixture")
     run_checked([binary, "keygen", "--dir", str(workdir)])
     run_checked(
         [
@@ -184,7 +275,7 @@ def main() -> int:
     )
     print("      fixture: %d bytes sha256=%s" % (sample.stat().st_size, sha256(sample)))
 
-    print("[2/5] start the reference platform")
+    print("[2/7] start the reference platform")
     platform_log = workdir / "platform.log"
     platform = subprocess.Popen(
         [binary, "platform", "--dir", str(workdir), "--pcap", str(pcap),
@@ -212,7 +303,7 @@ def main() -> int:
     signature_port = int(fields["signature"])
     print("      %s" % ready_line.strip())
 
-    print("[3/5] run the device handshake, media and tamper probes")
+    print("[3/7] run the device handshake, media and tamper probes")
     device = subprocess.run(
         [
             binary, "device", "--dir", str(workdir),
@@ -227,7 +318,7 @@ def main() -> int:
         text=True,
     )
 
-    print("[4/5] collect the platform verdict")
+    print("[4/7] collect the platform verdict")
     remaining, _ = platform.communicate(timeout=30)
     platform_output = ready_line + (remaining or "")
     platform_log.write_text(platform_output)
@@ -251,7 +342,7 @@ def main() -> int:
         if token not in platform_output:
             raise AssertionError("platform output is missing %r:\n%s" % (token, platform_output))
 
-    print("[5/5] parse the capture")
+    print("[5/7] parse the capture")
     stats = parse_capture(pcap)
     required_sip = {"ClientHello", "ServerHello", "VkekDelivery", "VkekAck", "Report"}
     missing = required_sip - set(stats["sip_messages"])
@@ -263,6 +354,20 @@ def main() -> int:
     if side.get(1, 0) < 1 or side.get(2, 0) != 1 or side.get(3, 0) != 1 or side.get(0, 0) != 1:
         raise AssertionError("unexpected side-channel records: %s" % side)
 
+    negative_controls = []
+    if args.skip_negative_controls:
+        print("[6/7] negative identity controls skipped")
+    else:
+        print("[6/7] negative identity controls (forged device / forged platform)")
+        for kind in ("forged-device", "forged-platform"):
+            result = run_negative_control(binary, workdir, workdir, sample,
+                                          args.stream_id, kind)
+            negative_controls.append(result)
+            print("      %s: %s (device exit %d, platform exit %d)"
+                  % (kind, result["verdict"], result["device_exit"],
+                     result["platform_exit"]))
+
+    print("[7/7] write the record")
     summary = {
         "stream_id": args.stream_id,
         "capture": str(pcap),
@@ -274,6 +379,7 @@ def main() -> int:
         "capture_stats": stats,
         "device_exit": device.returncode,
         "platform_exit": platform.returncode,
+        "negative_controls": negative_controls,
     }
     summary_path = workdir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -288,6 +394,10 @@ def main() -> int:
     report.append("side channel: type0(end)=%d type1(signature)=%d type2(tampered signature)=%d "
                   "type3(tampered ciphertext)=%d"
                   % (side.get(0, 0), side.get(1, 0), side.get(2, 0), side.get(3, 0)))
+    labels = {"forged-device": "negative identity (forged device key)",
+              "forged-platform": "negative identity (forged platform key)"}
+    for result in negative_controls:
+        report.append("%s = %s" % (labels[result["kind"]], result["verdict"]))
     report.append("")
     report.append("device output:")
     report.extend(device.stdout.rstrip().splitlines())

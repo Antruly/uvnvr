@@ -618,16 +618,25 @@ int RunPlatform(const PlatformOptions& options) {
     Fail("VkekAck parse: " + error);
     return 1;
   }
-  const bool ack_valid =
-      ack.status == gb35114::kVkekAckAccepted &&
+  // The acknowledgement must be bound to the delivery the platform actually
+  // sent: a valid device signature over a different session, key id, key
+  // version or sequence is an acknowledgement of something else and does not
+  // complete the handshake.
+  const bool ack_bound = ack.session_id == server_hello.session_id &&
+                         ack.key_id == delivery.key_id &&
+                         ack.key_version == delivery.key_version &&
+                         ack.sequence == delivery.sequence;
+  const bool ack_signature_ok =
       gm::Sm2Verify(device_public_key, BytesView(gb35114::VkekAckSignedData(ack)), ack.signature,
                     &error);
-  std::printf("platform: VkekAck key_id=%llu status=%s signature=%s\n",
+  const bool ack_valid =
+      ack.status == gb35114::kVkekAckAccepted && ack_bound && ack_signature_ok;
+  std::printf("platform: VkekAck key_id=%llu status=%s binding=%s signature=%s\n",
               static_cast<unsigned long long>(ack.key_id),
               ack.status == gb35114::kVkekAckAccepted ? "accepted" : "rejected",
-              ack_valid ? "verified" : "invalid");
+              ack_bound ? "ok" : "mismatch", ack_signature_ok ? "verified" : "invalid");
   if (!ack_valid) {
-    Fail("VkekAck did not verify");
+    Fail("VkekAck did not verify or is not bound to the delivered VKEK");
     return 1;
   }
 
@@ -1064,9 +1073,12 @@ int RunDevice(const DeviceOptions& options) {
     sig_socket.SendTo(options.host, options.signature_port,
                       std::string(envelope.begin(), envelope.end()));
   }
-  if (!first_sealed.empty()) {
+  if (first_sealed.size() > gb35114::kSealedFrameHeaderSize) {
     gm::Bytes tampered = first_sealed;
-    tampered.back() ^= 0x01;
+    // Flip one bit in the first ciphertext byte, past the 56-byte frame header
+    // and its HMAC-SM3 tag, so the probe exercises the authenticated body
+    // rather than only the tag.
+    tampered[gb35114::kSealedFrameHeaderSize] ^= 0x01;
     const gm::Bytes envelope = MakeSigEnvelope(3, tampered);
     sig_socket.SendTo(options.host, options.signature_port,
                      std::string(envelope.begin(), envelope.end()));
