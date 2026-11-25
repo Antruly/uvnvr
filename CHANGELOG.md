@@ -8,6 +8,14 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB/T 28181 SIP user agent (opt-in, P6.2a).** A self-hosted SIP stack for
+  the lower-device role: UDP/TCP transport on libuvcpp, REGISTER with Digest
+  authentication and 401/407 retry, Expires refresh, MANSCDP-style Keepalive
+  heartbeats, SIP retransmission for UDP and exponential reconnect backoff.
+  Message/URI/Digest helpers plus `sip_reg_cli` and a local Python fake
+  registrar are included. Build with `-DUVNVR_ENABLE_GB28181=ON`; the module is
+  not linked into the server yet, so default deployments are unchanged. See
+  `docs/gb28181-sip.md`.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry

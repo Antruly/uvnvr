@@ -198,6 +198,7 @@ and `/ws` to `127.0.0.1:8080`).
 |---|---|---|
 | `UVNVR_LIBUVCPP_ROOT` | empty | Unpacked libuvcpp release archive (uses pkg-config) |
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
+| `UVNVR_ENABLE_GB28181` | `OFF` | GB/T 28181 SIP registration/heartbeat stack and `sip_reg_cli` (see [`docs/gb28181-sip.md`](docs/gb28181-sip.md)) |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
 ## Known limitations (0.18.1)
