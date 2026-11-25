@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -275,6 +277,22 @@ std::vector<std::string> SplitSdpLines(std::string_view sdp) {
     begin = end + 1;
   }
   return lines;
+}
+
+std::int64_t MonotonicMillis() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+void SystemNtpNow(std::uint32_t* seconds, std::uint32_t* fraction) {
+  using namespace std::chrono;
+  const std::int64_t unix_ms =
+      duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+  const std::int64_t unix_seconds = unix_ms / 1000;
+  const std::int64_t millis = unix_ms % 1000;
+  // The NTP epoch starts 2208988800 seconds before the Unix epoch.
+  *seconds = static_cast<std::uint32_t>(unix_seconds + 2208988800LL);
+  *fraction = static_cast<std::uint32_t>((millis * 4294967296LL) / 1000);
 }
 
 }  // namespace
@@ -710,7 +728,14 @@ bool BuildSdpAnswer(const SdpVideoSession& offer, const std::string& local_addre
 struct RtpSession::Impl {
   explicit Impl(const RtpSessionConfig& config)
       : packetizer(RtpPacketizerConfig{config.payload_type, config.ssrc,
-                                       config.initial_sequence, config.max_payload_size}) {}
+                                       config.initial_sequence, config.max_payload_size}),
+        mode(config.mode),
+        enable_rtcp(config.enable_rtcp),
+        media_ssrc(config.ssrc),
+        sender_report_interval_ms(config.sender_report_interval_ms) {}
+
+  bool SendRtcpPayload(const std::vector<std::uint8_t>& bytes, std::string* error);
+  void HandleRtcpPacket(const RtcpPacket& packet, std::int64_t now_ms);
 
   SocketHandle fd = kInvalidSocket;
   SocketHandle accepted = kInvalidSocket;
@@ -720,7 +745,123 @@ struct RtpSession::Impl {
   std::uint16_t bound_port = 0;
   std::string peer;
   RtpPacketizer packetizer;
+
+  RtpTransportMode mode = RtpTransportMode::kUdp;
+  bool enable_rtcp = false;
+  std::uint32_t media_ssrc = 0;
+  std::uint32_t sender_report_interval_ms = 5000;
+
+  SocketHandle rtcp_fd = kInvalidSocket;
+  sockaddr_in rtcp_remote{};
+  bool has_rtcp_remote = false;
+  bool rtcp_via_tcp = false;
+  std::uint16_t rtcp_bound_port = 0;
+  std::string rtcp_peer;
+  std::vector<std::uint8_t> tcp_rtcp_buffer;
+
+  RtcpStats rtcp_stats;
+  std::function<void(const RtcpPacket&)> rtcp_callback;
+  std::int64_t last_sr_at_ms = -1;
+  std::int64_t last_sr_wall_ms = -1;
+  std::uint32_t last_sr_compact_ntp = 0;
 };
+
+bool RtpSession::Impl::SendRtcpPayload(const std::vector<std::uint8_t>& bytes,
+                                       std::string* error) {
+  if (bytes.empty()) {
+    if (error)
+      *error = "empty RTCP packet";
+    return false;
+  }
+  if (rtcp_via_tcp) {
+    const SocketHandle target = mode == RtpTransportMode::kTcpPassive ? accepted : fd;
+    if (target == kInvalidSocket) {
+      if (error)
+        *error = "TCP media connection is not open";
+      return false;
+    }
+    std::vector<std::uint8_t> framed(2 + bytes.size());
+    framed[0] = static_cast<std::uint8_t>(bytes.size() >> 8);
+    framed[1] = static_cast<std::uint8_t>(bytes.size() & 0xFF);
+    std::memcpy(framed.data() + 2, bytes.data(), bytes.size());
+    return SendAll(target, framed.data(), framed.size(), error);
+  }
+  if (rtcp_fd == kInvalidSocket || !has_rtcp_remote) {
+    if (error)
+      *error = "RTCP UDP socket is not open";
+    return false;
+  }
+#ifdef _WIN32
+  const int sent = sendto(rtcp_fd, reinterpret_cast<const char*>(bytes.data()),
+                          static_cast<int>(bytes.size()), 0,
+                          reinterpret_cast<const sockaddr*>(&rtcp_remote),
+                          sizeof(rtcp_remote));
+#else
+  const ssize_t sent = sendto(rtcp_fd, bytes.data(), bytes.size(), 0,
+                              reinterpret_cast<const sockaddr*>(&rtcp_remote),
+                              sizeof(rtcp_remote));
+#endif
+  if (sent < 0 || static_cast<std::size_t>(sent) != bytes.size()) {
+    if (error)
+      *error = "RTCP UDP send failed: " + SocketErrorText(LastSocketError());
+    return false;
+  }
+  return true;
+}
+
+void RtpSession::Impl::HandleRtcpPacket(const RtcpPacket& packet, std::int64_t now_ms) {
+  ++rtcp_stats.packets_received;
+  switch (packet.payload_type) {
+    case kRtcpPtSenderReport:
+      ++rtcp_stats.sender_reports_received;
+      break;
+    case kRtcpPtReceiverReport:
+      ++rtcp_stats.receiver_reports_received;
+      rtcp_stats.receiver_ssrc = packet.sender_ssrc;
+      break;
+    case kRtcpPtSdes:
+      ++rtcp_stats.sdes_received;
+      break;
+    case kRtcpPtBye:
+      ++rtcp_stats.byes_received;
+      break;
+    default:
+      break;
+  }
+
+  if (packet.payload_type == kRtcpPtSenderReport ||
+      packet.payload_type == kRtcpPtReceiverReport) {
+    for (const RtcpReportBlock& block : packet.report_blocks) {
+      if (block.ssrc != 0 && block.ssrc != media_ssrc)
+        continue;
+      rtcp_stats.last_fraction_lost = block.fraction_lost;
+      rtcp_stats.last_cumulative_lost = block.cumulative_lost;
+      rtcp_stats.last_jitter = block.jitter;
+      rtcp_stats.last_extended_highest_sequence = block.extended_highest_sequence;
+      if (last_sr_wall_ms >= 0 && block.last_sender_report != 0 &&
+          block.last_sender_report == last_sr_compact_ntp) {
+        const std::int64_t elapsed = now_ms - last_sr_wall_ms;
+        const std::int64_t rtt =
+            elapsed - static_cast<std::int64_t>(RtcpDlsrToMs(block.delay_since_last_sender_report));
+        if (rtt >= 0 && rtt <= 600000) {
+          rtcp_stats.last_rtt_ms = static_cast<std::uint32_t>(rtt);
+          rtcp_stats.has_rtt = true;
+        }
+      }
+    }
+  }
+
+  if (packet.is_keyframe_request) {
+    ++rtcp_stats.keyframe_requests_received;
+    if (packet.is_fir)
+      ++rtcp_stats.fir_received;
+    else
+      ++rtcp_stats.pli_received;
+  }
+
+  if (rtcp_callback)
+    rtcp_callback(packet);
+}
 
 RtpSession::RtpSession(RtpSessionConfig config)
     : impl_(std::make_unique<Impl>(config)), config_(std::move(config)) {}
@@ -736,10 +877,19 @@ void RtpSession::Close() {
     CloseSocketHandle(impl_->fd);
     impl_->fd = kInvalidSocket;
   }
+  if (impl_->rtcp_fd != kInvalidSocket) {
+    CloseSocketHandle(impl_->rtcp_fd);
+    impl_->rtcp_fd = kInvalidSocket;
+  }
   impl_->has_remote = false;
+  impl_->has_rtcp_remote = false;
   impl_->listening = false;
+  impl_->rtcp_via_tcp = false;
   impl_->bound_port = 0;
+  impl_->rtcp_bound_port = 0;
   impl_->peer.clear();
+  impl_->rtcp_peer.clear();
+  impl_->tcp_rtcp_buffer.clear();
   impl_->packetizer.Reset();
 }
 
@@ -749,27 +899,120 @@ bool RtpSession::Open(std::string* error) {
     return false;
 
   if (config_.mode == RtpTransportMode::kUdp) {
-    impl_->fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (impl_->fd == kInvalidSocket) {
-      if (error)
-        *error = "cannot create UDP socket: " + SocketErrorText(LastSocketError());
-      return false;
+    if (!config_.enable_rtcp) {
+      impl_->fd = socket(AF_INET, SOCK_DGRAM, 0);
+      if (impl_->fd == kInvalidSocket) {
+        if (error)
+          *error = "cannot create UDP socket: " + SocketErrorText(LastSocketError());
+        return false;
+      }
+      SetReuseAddress(impl_->fd);
+      if (!BindSocket(impl_->fd, config_.local_address, config_.local_port, SOCK_DGRAM,
+                      error)) {
+        Close();
+        return false;
+      }
+      if (!ResolveIpv4(config_.remote_address, config_.remote_port, SOCK_DGRAM, false,
+                       &impl_->remote, error)) {
+        Close();
+        return false;
+      }
+      impl_->has_remote = true;
+      impl_->bound_port = BoundPort(impl_->fd);
+      impl_->peer = AddressToString(impl_->remote);
+      return true;
     }
-    SetReuseAddress(impl_->fd);
-    if (!BindSocket(impl_->fd, config_.local_address, config_.local_port, SOCK_DGRAM,
-                    error)) {
-      Close();
-      return false;
+
+    // RTCP needs a second socket. RFC 3550 expects an even RTP port followed
+    // by RTCP on the next (odd) port; when the caller asks for an ephemeral
+    // port, retry until that pair can be bound.
+    const int attempts = config_.local_port == 0 ? 32 : 1;
+    std::string last_error = "cannot bind a UDP RTP/RTCP port pair";
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+      impl_->fd = socket(AF_INET, SOCK_DGRAM, 0);
+      if (impl_->fd == kInvalidSocket) {
+        last_error = "cannot create UDP socket: " + SocketErrorText(LastSocketError());
+        break;
+      }
+      SetReuseAddress(impl_->fd);
+      if (!BindSocket(impl_->fd, config_.local_address, config_.local_port, SOCK_DGRAM,
+                      &last_error)) {
+        CloseSocketHandle(impl_->fd);
+        impl_->fd = kInvalidSocket;
+        if (config_.local_port != 0)
+          break;
+        continue;
+      }
+      const std::uint16_t rtp_port = BoundPort(impl_->fd);
+      if (config_.local_port == 0 && (rtp_port & 1u)) {
+        CloseSocketHandle(impl_->fd);
+        impl_->fd = kInvalidSocket;
+        continue;
+      }
+      if (rtp_port == 0 || rtp_port == 65535) {
+        CloseSocketHandle(impl_->fd);
+        impl_->fd = kInvalidSocket;
+        continue;
+      }
+
+      const std::uint16_t rtcp_port =
+          config_.rtcp_local_port != 0 ? config_.rtcp_local_port
+                                       : static_cast<std::uint16_t>(rtp_port + 1);
+      impl_->rtcp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+      if (impl_->rtcp_fd == kInvalidSocket) {
+        last_error = "cannot create the RTCP UDP socket: " +
+                     SocketErrorText(LastSocketError());
+        CloseSocketHandle(impl_->fd);
+        impl_->fd = kInvalidSocket;
+        break;
+      }
+      SetReuseAddress(impl_->rtcp_fd);
+      if (!BindSocket(impl_->rtcp_fd, config_.local_address, rtcp_port, SOCK_DGRAM,
+                      &last_error)) {
+        CloseSocketHandle(impl_->rtcp_fd);
+        impl_->rtcp_fd = kInvalidSocket;
+        CloseSocketHandle(impl_->fd);
+        impl_->fd = kInvalidSocket;
+        if (config_.local_port != 0)
+          break;
+        continue;
+      }
+
+      if (!ResolveIpv4(config_.remote_address, config_.remote_port, SOCK_DGRAM, false,
+                       &impl_->remote, &last_error)) {
+        Close();
+        if (error)
+          *error = last_error;
+        return false;
+      }
+      std::uint16_t remote_rtcp_port =
+          config_.rtcp_remote_port != 0
+              ? config_.rtcp_remote_port
+              : static_cast<std::uint16_t>(config_.remote_port == 65535
+                                               ? 65534
+                                               : config_.remote_port + 1);
+      if (!ResolveIpv4(config_.remote_address, remote_rtcp_port, SOCK_DGRAM, false,
+                       &impl_->rtcp_remote, &last_error)) {
+        Close();
+        if (error)
+          *error = last_error;
+        return false;
+      }
+
+      impl_->has_remote = true;
+      impl_->has_rtcp_remote = true;
+      impl_->rtcp_via_tcp = false;
+      impl_->bound_port = rtp_port;
+      impl_->rtcp_bound_port = BoundPort(impl_->rtcp_fd);
+      impl_->peer = AddressToString(impl_->remote);
+      impl_->rtcp_peer = AddressToString(impl_->rtcp_remote);
+      return true;
     }
-    if (!ResolveIpv4(config_.remote_address, config_.remote_port, SOCK_DGRAM, false,
-                     &impl_->remote, error)) {
-      Close();
-      return false;
-    }
-    impl_->has_remote = true;
-    impl_->bound_port = BoundPort(impl_->fd);
-    impl_->peer = AddressToString(impl_->remote);
-    return true;
+
+    Close();
+    if (error)
+      *error = last_error;
+    return false;
   }
 
   impl_->fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -795,11 +1038,17 @@ bool RtpSession::Open(std::string* error) {
     }
     impl_->bound_port = BoundPort(impl_->fd);
     impl_->listening = true;
+    if (config_.enable_rtcp) {
+      impl_->rtcp_via_tcp = true;
+      impl_->rtcp_bound_port = impl_->bound_port;
+    }
     return true;
   }
 
   // kTcpActive: bind the requested local endpoint (possibly all-zero) so the
-  // selected source port can be reported in SDP, then connect.
+  // selected source port can be reported in SDP, then connect. SO_REUSEADDR
+  // lets a dialog reuse its port after the previous TCP connection closed.
+  SetReuseAddress(impl_->fd);
   if (!BindSocket(impl_->fd, config_.local_address, config_.local_port, SOCK_STREAM, error)) {
     Close();
     return false;
@@ -820,6 +1069,11 @@ bool RtpSession::Open(std::string* error) {
   impl_->has_remote = true;
   impl_->bound_port = BoundPort(impl_->fd);
   impl_->peer = AddressToString(remote);
+  if (config_.enable_rtcp) {
+    impl_->rtcp_via_tcp = true;
+    impl_->rtcp_bound_port = impl_->bound_port;
+    impl_->rtcp_peer = impl_->peer;
+  }
   return true;
 }
 
@@ -874,6 +1128,7 @@ bool RtpSession::Accept(std::string* peer, int timeout_ms, std::string* error) {
   }
   SetNoDelay(impl_->accepted);
   impl_->peer = AddressToString(peer_address);
+  impl_->rtcp_peer = impl_->peer;
   if (peer)
     *peer = impl_->peer;
   return true;
@@ -931,6 +1186,209 @@ bool RtpSession::SendFrame(const std::uint8_t* ps, std::size_t size,
   stats_.last_sequence = impl_->packetizer.next_sequence() - 1;
   stats_.last_timestamp = timestamp_90k;
   return true;
+}
+
+void RtpSession::SetRtcpEventCallback(std::function<void(const RtcpPacket&)> callback) {
+  impl_->rtcp_callback = std::move(callback);
+}
+
+bool RtpSession::SendSenderReport(std::string* error) {
+  if (!config_.enable_rtcp) {
+    if (error)
+      *error = "RTCP is disabled for this session";
+    return false;
+  }
+  if (!is_open()) {
+    if (error)
+      *error = "RTP session is not connected";
+    return false;
+  }
+
+  std::uint32_t ntp_seconds = 0;
+  std::uint32_t ntp_fraction = 0;
+  SystemNtpNow(&ntp_seconds, &ntp_fraction);
+
+  RtcpSenderInfo info;
+  info.ntp_seconds = ntp_seconds;
+  info.ntp_fraction = ntp_fraction;
+  info.rtp_timestamp = stats_.last_timestamp;
+  info.packet_count = static_cast<std::uint32_t>(stats_.packets);
+  info.octet_count = static_cast<std::uint32_t>(stats_.payload_bytes);
+
+  std::string cname = config_.rtcp_cname;
+  if (cname.empty()) {
+    cname = "uvnvr@";
+    cname += impl_->bound_port != 0 ? AddressToString(impl_->remote) : std::string("local");
+    if (cname == "uvnvr@")
+      cname = "uvnvr@local";
+    else if (cname == "uvnvr@0.0.0.0")
+      cname = "uvnvr@local";
+  }
+  const std::vector<std::uint8_t> bytes =
+      BuildRtcpSenderReportCompound(config_.ssrc, info, cname);
+  if (bytes.empty()) {
+    if (error)
+      *error = "cannot build the RTCP sender report";
+    return false;
+  }
+  if (!impl_->SendRtcpPayload(bytes, error))
+    return false;
+
+  ++impl_->rtcp_stats.sender_reports_sent;
+  impl_->last_sr_at_ms = MonotonicMillis();
+  impl_->last_sr_wall_ms = impl_->last_sr_at_ms;
+  impl_->last_sr_compact_ntp = RtcpCompactNtp(ntp_seconds, ntp_fraction);
+  return true;
+}
+
+bool RtpSession::SendBye(std::string_view reason, std::string* error) {
+  if (!config_.enable_rtcp) {
+    if (error)
+      *error = "RTCP is disabled for this session";
+    return false;
+  }
+  if (!is_open()) {
+    if (error)
+      *error = "RTP session is not connected";
+    return false;
+  }
+  const std::vector<std::uint8_t> bytes = BuildRtcpBye({config_.ssrc}, reason);
+  if (bytes.empty()) {
+    if (error)
+      *error = "cannot build the RTCP BYE";
+    return false;
+  }
+  if (!impl_->SendRtcpPayload(bytes, error))
+    return false;
+  ++impl_->rtcp_stats.byes_sent;
+  return true;
+}
+
+bool RtpSession::PollRtcp(int timeout_ms, std::string* error) {
+  if (!config_.enable_rtcp) {
+    if (error)
+      *error = "RTCP is disabled for this session";
+    return false;
+  }
+  if (!is_open()) {
+    if (error)
+      *error = "RTP session is not connected";
+    return false;
+  }
+
+  SocketHandle target = kInvalidSocket;
+  if (impl_->rtcp_via_tcp)
+    target = config_.mode == RtpTransportMode::kTcpPassive ? impl_->accepted : impl_->fd;
+  else
+    target = impl_->rtcp_fd;
+  if (target == kInvalidSocket) {
+    if (error)
+      *error = "RTCP socket is not open";
+    return false;
+  }
+
+  fd_set read_set;
+  FD_ZERO(&read_set);
+  FD_SET(target, &read_set);
+  timeval timeout{};
+  timeval* timeout_ptr = nullptr;
+  if (timeout_ms >= 0) {
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    timeout_ptr = &timeout;
+  }
+  const int ready =
+      select(static_cast<int>(target) + 1, &read_set, nullptr, nullptr, timeout_ptr);
+  if (ready == 0)
+    return false;  // no RTCP pending; not an error
+  if (ready < 0) {
+    if (error)
+      *error = "RTCP select failed: " + SocketErrorText(LastSocketError());
+    return false;
+  }
+
+  const std::int64_t now_ms = MonotonicMillis();
+  if (!impl_->rtcp_via_tcp) {
+    std::uint8_t buffer[4096];
+    const int received = recv(target, reinterpret_cast<char*>(buffer), sizeof(buffer), 0);
+    if (received <= 0) {
+      if (error)
+        *error = "RTCP receive failed: " + SocketErrorText(LastSocketError());
+      return false;
+    }
+    std::vector<RtcpPacket> packets;
+    if (!ParseRtcpCompound(buffer, static_cast<std::size_t>(received), &packets, error))
+      return false;
+    impl_->rtcp_stats.bytes_received += static_cast<std::uint64_t>(received);
+    for (const RtcpPacket& packet : packets)
+      impl_->HandleRtcpPacket(packet, now_ms);
+    return true;
+  }
+
+  std::uint8_t chunk[4096];
+  const int received = recv(target, reinterpret_cast<char*>(chunk), sizeof(chunk), 0);
+  if (received <= 0) {
+    if (error)
+      *error = "TCP media read for RTCP failed: " + SocketErrorText(LastSocketError());
+    return false;
+  }
+  impl_->tcp_rtcp_buffer.insert(impl_->tcp_rtcp_buffer.end(), chunk,
+                                chunk + static_cast<std::size_t>(received));
+  bool processed = false;
+  while (impl_->tcp_rtcp_buffer.size() >= 2) {
+    const std::size_t length =
+        (static_cast<std::size_t>(impl_->tcp_rtcp_buffer[0]) << 8) |
+        impl_->tcp_rtcp_buffer[1];
+    if (impl_->tcp_rtcp_buffer.size() < 2 + length)
+      break;
+    // Remove the frame before dispatching: a BYE callback closes the session
+    // and clears this buffer, and the loop must not touch it afterwards.
+    std::vector<std::uint8_t> frame(impl_->tcp_rtcp_buffer.begin() + 2,
+                                    impl_->tcp_rtcp_buffer.begin() + 2 + length);
+    impl_->tcp_rtcp_buffer.erase(impl_->tcp_rtcp_buffer.begin(),
+                                 impl_->tcp_rtcp_buffer.begin() + 2 + length);
+    // A platform may send RTP on this connection too. RTCP is identified by
+    // payload types 200..207; anything else is not addressed to this parser.
+    if (length >= 2 && (frame[0] >> 6) == 2 && frame[1] >= 200 && frame[1] <= 207) {
+      std::vector<RtcpPacket> packets;
+      if (!ParseRtcpCompound(frame.data(), frame.size(), &packets, error))
+        return false;
+      impl_->rtcp_stats.bytes_received += length;
+      for (const RtcpPacket& packet : packets)
+        impl_->HandleRtcpPacket(packet, now_ms);
+      processed = true;
+    }
+  }
+  return processed;
+}
+
+bool RtpSession::Tick(std::int64_t now_ms, std::string* error) {
+  if (!config_.enable_rtcp || !is_open())
+    return true;
+  if (config_.sender_report_interval_ms == 0)
+    return true;
+  if (impl_->last_sr_at_ms >= 0 &&
+      now_ms - impl_->last_sr_at_ms <
+          static_cast<std::int64_t>(config_.sender_report_interval_ms))
+    return true;
+  if (!SendSenderReport(error))
+    return false;
+  impl_->last_sr_at_ms = now_ms;
+  return true;
+}
+
+const RtcpStats& RtpSession::rtcp_stats() const { return impl_->rtcp_stats; }
+
+std::uint16_t RtpSession::rtcp_local_port() const {
+  if (!config_.enable_rtcp)
+    return 0;
+  return impl_->rtcp_bound_port != 0 ? impl_->rtcp_bound_port : config_.rtcp_local_port;
+}
+
+std::string RtpSession::rtcp_peer_address() const {
+  if (!impl_->rtcp_peer.empty())
+    return impl_->rtcp_peer;
+  return impl_->peer;
 }
 
 bool RtpSession::is_open() const {

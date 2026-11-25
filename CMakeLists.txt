@@ -331,6 +331,8 @@ if(UVNVR_ENABLE_GB28181)
   add_library(uvnvr_gb28181_ps STATIC
     src/gb28181/ps.cpp
     src/gb28181/rtp.cpp
+    src/gb28181/rtcp.cpp
+    src/gb28181/media_session.cpp
   )
   target_include_directories(uvnvr_gb28181_ps PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_compile_definitions(uvnvr_gb28181_ps PUBLIC UVNVR_ENABLE_GB28181=1)
@@ -349,8 +351,13 @@ if(UVNVR_ENABLE_GB28181)
   target_link_libraries(gb28181_ps_cli PRIVATE uvnvr_gb28181_ps)
   set_target_properties(gb28181_ps_cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+  add_executable(gb28181_session_cli tools/gb28181_session_cli/main.cpp)
+  target_link_libraries(gb28181_session_cli PRIVATE uvnvr_gb28181_ps)
+  set_target_properties(gb28181_session_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   if(UVNVR_LIBUVCPP_ROOT)
-    set_property(TARGET gb28181_ps_cli APPEND PROPERTY BUILD_RPATH
+    set_property(TARGET gb28181_session_cli APPEND PROPERTY BUILD_RPATH
                  "${UVNVR_LIBUVCPP_ROOT}/lib")
   endif()
   message(STATUS "gb28181: PS/RTP media enabled (gb28181_ps_cli included)")

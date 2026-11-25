@@ -17,8 +17,11 @@
 //
 // This file is compiled only with UVNVR_ENABLE_GB28181=ON (default off).
 
+#include "gb28181/rtcp.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -140,6 +143,18 @@ struct RtpSessionConfig {
   std::uint32_t ssrc = 0;
   std::uint16_t initial_sequence = 0;
   std::size_t max_payload_size = 1400;
+
+  // RTCP is opt-in so the PS/RTP-only path keeps its exact socket behaviour.
+  // For UDP the sender opens a second socket; the platform receives SR/SDES
+  // there and sends RR/PLI/FIR to it. For TCP, RTCP is framed on the same
+  // media connection (RFC 4571), so no extra port is used.
+  bool enable_rtcp = false;
+  // 0 = RTP local port + 1 (RFC 3550 convention).
+  std::uint16_t rtcp_local_port = 0;
+  // 0 = remote RTP port + 1.
+  std::uint16_t rtcp_remote_port = 0;
+  std::string rtcp_cname;  // defaults to "uvnvr@<local address>"
+  std::uint32_t sender_report_interval_ms = 5000;
 };
 
 struct RtpSendStats {
@@ -169,6 +184,21 @@ class RtpSession {
 
   bool SendFrame(const std::uint8_t* ps, std::size_t size, std::uint32_t timestamp_90k,
                  bool keyframe, std::string* error = nullptr);
+
+  // RTCP. SetRtcpEventCallback receives every parsed inbound packet; the
+  // callback runs on the calling thread inside PollRtcp(). Tick() emits a
+  // sender report when the interval elapsed and is cheap to call often.
+  // `now_ms` is a monotonic millisecond clock supplied by the caller; the SR
+  // NTP field itself uses the system clock.
+  void SetRtcpEventCallback(std::function<void(const RtcpPacket&)> callback);
+  bool SendSenderReport(std::string* error = nullptr);
+  bool SendBye(std::string_view reason = {}, std::string* error = nullptr);
+  bool PollRtcp(int timeout_ms, std::string* error = nullptr);
+  bool Tick(int64_t now_ms, std::string* error = nullptr);
+
+  const RtcpStats& rtcp_stats() const;
+  std::uint16_t rtcp_local_port() const;
+  std::string rtcp_peer_address() const;
 
   bool is_open() const;
   std::uint16_t local_port() const;
