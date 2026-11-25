@@ -23,6 +23,12 @@ option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (re
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
+# Object-level channel ACL (GA/T 2155.2 ACC-02). Off by default: without it the
+# service keeps the existing role-only authorization and every account sees the
+# same catalog.
+option(UVNVR_ENABLE_CHANNEL_ACL
+       "Build the object-level channel/group authorization (deny-by-default for non-admin users)"
+       OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -316,6 +322,27 @@ if(UVNVR_ENABLE_SECURE)
   endif()
 else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
+endif()
+
+# Object-level channel ACL. The static library holds the pure decision logic so
+# it can be unit tested without libuvcpp; the tables and enforcement hooks live
+# in the server under the same compile definition. When the option is off no
+# ACL code, table or route is compiled, so existing deployments are unchanged.
+set(UVNVR_CHANNEL_ACL_ENABLED 0)
+if(UVNVR_ENABLE_CHANNEL_ACL)
+  set(UVNVR_CHANNEL_ACL_ENABLED 1)
+  add_library(uvnvr_channel_acl STATIC src/secure/channel_acl.cpp)
+  target_include_directories(uvnvr_channel_acl PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_compile_definitions(uvnvr_channel_acl PUBLIC UVNVR_ENABLE_CHANNEL_ACL=1)
+  if(MSVC)
+    target_compile_options(uvnvr_channel_acl PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(uvnvr_channel_acl PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  target_link_libraries(uvnvr PRIVATE uvnvr_channel_acl)
+  message(STATUS "channel_acl: enabled")
+else()
+  message(STATUS "channel_acl: disabled by UVNVR_ENABLE_CHANNEL_ACL=OFF")
 endif()
 
 if(WIN32)

@@ -132,6 +132,23 @@ jobs:
       - name: Maintenance integration test
         run: python3 tests/integration/maintenance.py ./build/uvnvr 19910
 
+      - name: Configure channel ACL build
+        run: |
+          cmake -S . -B build-acl -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-linux-x64" \
+            -DUVNVR_ENABLE_CHANNEL_ACL=ON \
+            -DUVNVR_BUILD_TESTS=ON
+
+      - name: Build channel ACL configuration
+        run: cmake --build build-acl --parallel
+
+      - name: Channel ACL unit tests
+        run: ctest --test-dir build-acl --output-on-failure
+
+      - name: Channel ACL integration test
+        run: bash tests/integration/channel_acl.sh ./build-acl/uvnvr 18097
+
       - name: Upload server log on failure
         if: failure()
         uses: actions/upload-artifact@v7

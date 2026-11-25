@@ -1015,6 +1015,7 @@ struct RtspServer::Impl {
   Ha1Fn ha1;
   AttachFn attach;
   DetachFn detach;
+  ChannelAuthFn channel_auth;
   std::string nonce;
   std::string opaque;
   static constexpr const char* kRealm = "UvNVR";
@@ -1289,6 +1290,12 @@ struct RtspServer::Impl {
         }
         authenticated = true;
       }
+      // Object-level authorization is applied after the credential check and
+      // before any method touches the media pipeline.
+      if (channel_auth && !channel_auth(username, channel)) {
+        session->WriteTcp(Response(403, "Forbidden", cseq, ""));
+        break;
+      }
 
       if (request.method == "OPTIONS") {
         session->WriteTcp(
@@ -1455,6 +1462,10 @@ void RtspServer::Stop() {
 
 int RtspServer::Port() const {
   return impl_->port;
+}
+
+void RtspServer::SetChannelAuthorizer(ChannelAuthFn authorize) {
+  impl_->channel_auth = std::move(authorize);
 }
 
 } // namespace uvnvr

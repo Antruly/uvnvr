@@ -275,7 +275,10 @@ rm -f "${COOKIE2}"
 
 ### TC-ACC-02 通道/录像/抓图的对象级越权
 
-- **关联条目**：ACC-02（部分）
+- **关联条目**：ACC-02（满足）
+- **自动化**：`tests/integration/channel_acl.sh`（需以
+  `-DUVNVR_ENABLE_CHANNEL_ACL=ON` 构建）；单元用例
+  `tests/channel_acl_test.cpp`；实现说明 `docs/channel-acl.md`。
 - **前置条件**：§2 环境；已 `setup_admin`。
 - **步骤**：
 
@@ -305,13 +308,18 @@ curl -sS -b "${COOKIE3}" -o /dev/null -w "encoder_channel_2=%{http_code}\n" \
   "${BASE}/api/v1/channels/2/encoder"
 ```
 
-- **期望**：
-  - **当前预期（差距）**：operator 的 `visible_channels=2`；对第二个通道的编码器接口
-    `encoder_channel_2` 不是 `403`（无摄像机时可能是 `502`/`404`，但说明已越过对象授权进入业务逻辑），
-    证明没有通道级 ACL。
-  - **整改后验收**：只授予 `cam-alpha` 时，列表仅返回 1 条；对 `cam-beta` 的列表/编码器/快照/
-    回放/导出返回 `403` 或 `404`，并写 `permission` 审计；私有协议 `CHANNEL_LIST`/`LIVE_OPEN` 同样受限。
-- **证据形式**：通道列表 JSON、状态码、operator 的权限集合、审计。
+- **期望（已整改）**：
+  - 只授予 `cam-alpha` 时，`GET /api/v1/channels` 仅返回 1 条（`cam-alpha`）；
+    对未授权的 `cam-beta`/`cam-gamma` 的列表、编码器、快照、重连、通道更新、
+    直播票据、回放票据、录像列表/日历/下载/导出均返回 `403`，并写 `category=permission`、
+    `result=denied` 审计。
+  - 授予父分组时，子分组内的通道可见（分组层级向下展开）；清空授权后列表为空（默认拒绝）。
+  - 私有协议 `CHANNEL_LIST` 同样过滤，`LIVE_OPEN`/`RECORDING_LIST` 对未授权通道返回
+    错误帧 `status=403`。
+  - 管理接口：`GET/PUT /api/v1/users/{id}/channel-grants`（`user.manage`），PUT 时校验
+    通道/分组存在，成功后写 `permission` 审计。
+  - 未开启编译开关时行为与整改前一致（仅角色/权限点），不影响既有部署。
+- **证据形式**：自动化脚本输出、通道列表 JSON、状态码、operator 的权限集合、审计。
 
 ### TC-ACC-04 管理面来源限制
 
