@@ -8,6 +8,19 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB 35114 A 级 → B 级平台联调 (opt-in, GH-27).** `tools/gb35114_interop`
+  plays the device and a reference 35114 platform over real UDP: SIP MESSAGE
+  carries the mutual SM2 ClientHello/ServerHello, the signed and SM2-wrapped
+  VKEK delivery and the signed acknowledgement; RTP payload type 96 carries
+  the SM4-CTR/HMAC-SM3 sealed H.264 stream; a side channel carries the A-level
+  SM3/SM2 frame signatures. The platform verifies the device identity,
+  verifies every signed key frame, decrypts all 20 frames with the negotiated
+  VKEK, and rejects a one-bit signature change and a one-bit ciphertext change.
+  `tests/integration/gb35114_interop.py` drives both processes, parses the
+  endpoint pcap and asserts the four acceptance items; the record and capture
+  are in `docs/gb35114-interop.md` and `docs/evidence/`. Built only with
+  `UVNVR_ENABLE_GB28181=ON` and `UVNVR_ENABLE_GB35114=ON` on non-Windows hosts,
+  and not linked into the server.
 - **GB/T 28181 云台控制与报警上报 (opt-in, P6.2e).** `DeviceControl`
   `PTZCmd` is decoded with byte/checksum/preset validation and normalised to
   pan/tilt/zoom velocities; the server dispatches it off the SIP loop to the

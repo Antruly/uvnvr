@@ -436,6 +436,21 @@ if(UVNVR_ENABLE_GB35114)
     set_target_properties(gb35114_cli PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     install(TARGETS gb35114_cli RUNTIME DESTINATION bin)
+
+    # A-level -> B-level interop harness. It needs the GB/T 28181 RTP framing
+    # for the media path and uses POSIX UDP sockets, so it is built on
+    # non-Windows hosts when both compliance modules are enabled.
+    if(UVNVR_GB28181_ENABLED AND NOT WIN32)
+      add_executable(gb35114_interop tools/gb35114_interop/main.cpp)
+      target_link_libraries(gb35114_interop PRIVATE uvnvr_gb35114 uvnvr_gb28181)
+      set_target_properties(gb35114_interop PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+      if(UVNVR_LIBUVCPP_ROOT)
+        set_property(TARGET gb35114_interop APPEND PROPERTY BUILD_RPATH
+                     "${UVNVR_LIBUVCPP_ROOT}/lib")
+      endif()
+    endif()
+
     message(STATUS
       "gb35114: enabled (A-level signing + VKEK negotiation + B-level SM4, gb35114_verify/gb35114_cli)")
   endif()
