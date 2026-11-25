@@ -78,6 +78,12 @@ All notable changes to UvNVR are documented here. The format follows
   certificate, and detects a one-byte change. The module is behind
   `UVNVR_ENABLE_GB35114` (default OFF) and is not linked into the server. See
   `docs/gb35114-a-sign.md`.
+- **GB 35114 B-level video encryption.** An optional `gb35114` module wraps a
+  VKEK with the device SM2 certificate, derives per-stream keys with HKDF-SM3,
+  and seals H.264 access units with SM4-CTR plus an HMAC-SM3 tag before PS
+  muxing. A `gb35114_cli` platform tool and an end-to-end PS/RTP test decrypt
+  the stream and decode the picture. The module is off by default and is not
+  linked into the server; see `docs/gb35114-b-level.md`.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry

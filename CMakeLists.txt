@@ -20,6 +20,7 @@ set(UVNVR_INSPIREFACE_ROOT "" CACHE PATH
     "InspireFace SDK root containing include/inspireface.h and lib/libInspireFace")
 option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (requires OpenSSL)"
        ON)
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 B-level video encryption module" OFF)
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
@@ -390,9 +391,10 @@ else()
   message(STATUS "gb28181: disabled by UVNVR_ENABLE_GB28181=OFF")
 endif()
 
-# GB 35114 module: SM3 access-unit digests and SM2 device signatures, SM2/SM3
-# signature negotiation and SM2-encrypted VKEK distribution with rotation and
-# replay protection. It is a standalone library and is not linked into the
+# GB 35114 module: SM3 access-unit digests and SM2 device signatures (A level),
+# SM2/SM3 signature negotiation and SM2-encrypted VKEK distribution with
+# rotation/replay protection, plus SM4-CTR encryption of the H.264 elementary
+# stream (B level). It is a standalone library and is not linked into the
 # server, so enabling it does not change the existing
 # preview/recording/RTSP/ONVIF/private-protocol paths.
 set(UVNVR_GB35114_ENABLED 0)
@@ -405,6 +407,8 @@ if(UVNVR_ENABLE_GB35114)
     add_library(uvnvr_gb35114 STATIC
       src/gb35114/sign.cpp
       src/gb35114/vkek.cpp
+      src/gb35114/stream_keys.cpp
+      src/gb35114/es_crypto.cpp
     )
     target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
@@ -420,7 +424,14 @@ if(UVNVR_ENABLE_GB35114)
     set_target_properties(gb35114_verify PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     install(TARGETS gb35114_verify RUNTIME DESTINATION bin)
-    message(STATUS "gb35114: enabled (A-level signing + VKEK negotiation + gb35114_verify)")
+
+    add_executable(gb35114_cli tools/gb35114_cli/main.cpp)
+    target_link_libraries(gb35114_cli PRIVATE uvnvr_gb35114)
+    set_target_properties(gb35114_cli PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    install(TARGETS gb35114_cli RUNTIME DESTINATION bin)
+    message(STATUS
+      "gb35114: enabled (A-level signing + VKEK negotiation + B-level SM4, gb35114_verify/gb35114_cli)")
   endif()
 else()
   message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")

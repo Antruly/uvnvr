@@ -10,6 +10,7 @@
 | [`gb28181-playback.md`](gb28181-playback.md) | GB/T 28181 RecordInfo and playback (INVITE Range, speed/pause/seek, shared PS/RTP) |
 | [`gb28181-ptz-alarm.md`](gb28181-ptz-alarm.md) | GB/T 28181 PTZCmd, Alarm reporting and SUBSCRIBE/NOTIFY |
 | [`gb35114-vkek.md`](gb35114-vkek.md) | GB 35114 signature negotiation, SM2 VKEK distribution and key rotation |
+| [`gb35114-b-level.md`](gb35114-b-level.md) | GB 35114 B level: VKEK distribution and SM4 encryption of the video ES |
 | [`api.md`](api.md) | REST/WebSocket/RTSP API reference (M4) |
 | [`deployment.md`](deployment.md) | Installation and operations guide (M5) |
 | [`configuration.md`](configuration.md) | Startup JSON file, ports, precedence and validation (0.2.0) |
