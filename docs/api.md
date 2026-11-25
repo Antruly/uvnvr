@@ -598,7 +598,7 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 | `GET /api/v1/ai/stats` | `{enabled,running,plate:{workers,processed,failed,dropped,avgMs,fps},face:{...,deduped},snapshots:{today,bytes,skipped,blocked},channels:[{id,name,plate,face}]}`. |
 | `POST /api/v1/ai/test` | `{channelId, type?}` grabs one current frame and runs the configured engines; returns boxes, normalised text and elapsed milliseconds. |
 | `GET /api/v1/ai/faces`, `POST /api/v1/ai/faces`, `PUT/DELETE /api/v1/ai/faces/{id}` | Local face library CRUD (`name`, `note`, optional `feature` number array and `imagePath`). |
-| `POST /api/v1/ai/faces/search` | 1:N cosine search: `{feature:[numbers], threshold?:0..1, limit?:1..50}`; returns `{threshold,librarySize,matched,items:[{id,name,score,matched}]}`. |
+| `POST /api/v1/ai/faces/search` | 1:N cosine search: `{feature:[numbers], threshold?:0..1, limit?:1..50}`; `threshold` defaults to `ai.face.matchThreshold`. Returns `{threshold,librarySize,matched,items:[{id,name,score,matched}]}`. |
 
 Times in these endpoints are epoch **seconds**. Example event item:
 

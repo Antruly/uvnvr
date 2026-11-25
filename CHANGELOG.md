@@ -14,7 +14,9 @@ All notable changes to UvNVR are documented here. The format follows
   `ai_plate_events` row and push it on `/ws/events`. The legacy
   `ai.plate.watchlist` is still read as a blacklist for existing installs.
   Face recognition keeps its 1:N cosine match with `ai.face.matchThreshold`
-  and adds `POST /api/v1/ai/faces/search` for explicit 1:N searches.
+  and adds `POST /api/v1/ai/faces/search` for explicit 1:N searches; an
+  omitted search threshold inherits the configured value, and equal scores
+  resolve to the lower face id.
 - **Alert acknowledgement flow.** Alerts carry `source_type`/`source_id`,
   snapshot and source URLs; `POST /api/v1/alerts/{id}/ack` accepts an optional
   note and records the operator and timestamp. The alerts page shows AI

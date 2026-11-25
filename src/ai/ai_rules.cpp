@@ -92,7 +92,10 @@ FaceMatchResult MatchFaceFeature(const std::vector<FaceLibraryEntry>& library,
     if (entry.id <= 0 || !UsableFeature(entry.feature) || entry.feature.size() != feature.size())
       continue;
     const double score = CosineSimilarity(feature, entry.feature);
-    if (best.id == 0 || score > best.score) {
+    // Equal scores keep the lower id, matching RankFaceMatches and the
+    // documented ordering so a search result is deterministic even when the
+    // caller did not sort the library.
+    if (best.id == 0 || score > best.score || (score == best.score && entry.id < best.id)) {
       best.id = entry.id;
       best.name = entry.name;
       best.score = score;

@@ -631,8 +631,9 @@ struct AiService::Impl {
     if (opts.db != nullptr) {
       uvcpp::uvcpp_db_table table;
       if (uvcpp::uvcpp_db_ok(opts.db->query(
-              "SELECT id, name, feature_blob FROM ai_faces WHERE feature_blob IS NOT NULL", {},
-              &table))) {
+              "SELECT id, name, feature_blob FROM ai_faces WHERE feature_blob IS NOT NULL "
+              "ORDER BY id",
+              {}, &table))) {
         for (size_t row = 0; row < table.rows().size(); ++row) {
           FaceRecord record;
           record.id = SqlInt(table, row, "id");
@@ -2369,7 +2370,13 @@ json AiService::SearchFaces(const json& body, std::string* error) const {
       *error = "feature must be a non-empty array of numbers";
     return json();
   }
+  // Default to the configured global threshold so a caller that omits the
+  // field gets the same decision the live pipeline would make.
   double threshold = 0.75;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    threshold = impl_->settings.face_match_threshold;
+  }
   if (body.contains("threshold")) {
     if (!body["threshold"].is_number()) {
       if (error != nullptr)

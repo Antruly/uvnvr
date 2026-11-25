@@ -239,7 +239,9 @@ the whole library (1:N, cosine similarity) and the best entry is stored in
 
 `POST /api/v1/ai/faces/search` exposes the same 1:N search for a supplied
 feature vector, returning the best `limit` entries with their score and whether
-each one reached `threshold`.
+each one reached `threshold`. The optional `threshold` defaults to
+`ai.face.matchThreshold`, so an omitted field uses the live pipeline's decision.
+Equal scores resolve to the lower `ai_faces.id`, making the answer deterministic.
 
 Alert rows carry `source_type`/`source_id` and a `sourceUrl` for the AI crop
 snapshot, so the alert page can show the recognition image next to the alert.

@@ -118,6 +118,18 @@ void TestFaceMatch1toN() {
   const std::vector<uvnvr::FaceLibraryEntry> zero = {Entry(1, "zero", {0.0f, 0.0f})};
   match = uvnvr::MatchFaceFeature(zero, {1.0f, 0.0f}, 0.0);
   ExpectBool("1:N: zero vector", match.found, false);
+
+  // Equal scores must resolve to the lower id even when the caller's library
+  // is not sorted by id; otherwise the answer depends on row order.
+  const std::vector<uvnvr::FaceLibraryEntry> unsorted = {
+      Entry(9, "carol", {1.0f, 0.0f, 0.0f}),
+      Entry(3, "alice", {1.0f, 0.0f, 0.0f}),
+  };
+  match = uvnvr::MatchFaceFeature(unsorted, {1.0f, 0.0f, 0.0f}, 0.75);
+  ExpectBool("1:N: tie keeps lower id", match.id == 3, true);
+  ExpectString("1:N: tie keeps lower id name", match.name, "alice");
+  const auto tied = uvnvr::RankFaceMatches(unsorted, {1.0f, 0.0f, 0.0f}, 0.75, 0);
+  ExpectBool("rank: tie keeps lower id first", tied.size() == 2 && tied[0].id == 3, true);
 }
 
 void TestRankFaces() {
