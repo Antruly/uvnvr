@@ -23,6 +23,10 @@ option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (re
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
+# GB/T 28181 media: PS encapsulation (Appendix C) and RTP over UDP/TCP. This
+# stage does not link into the server, so enabling it cannot change the
+# existing preview/recording/ONVIF paths.
+option(UVNVR_ENABLE_GB28181 "Build the GB/T 28181 PS/RTP media module" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -316,6 +320,42 @@ if(UVNVR_ENABLE_SECURE)
   endif()
 else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
+endif()
+
+# GB/T 28181 media: MPEG-2 PS encapsulation (Appendix C) and RTP transport.
+# The library is self-contained (no libuv/SIP dependency), and the CLI plus the
+# integration script exercise it independently of the server binary.
+set(UVNVR_GB28181_ENABLED 0)
+if(UVNVR_ENABLE_GB28181)
+  set(UVNVR_GB28181_ENABLED 1)
+  add_library(uvnvr_gb28181_ps STATIC
+    src/gb28181/ps.cpp
+    src/gb28181/rtp.cpp
+  )
+  target_include_directories(uvnvr_gb28181_ps PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_compile_definitions(uvnvr_gb28181_ps PUBLIC UVNVR_ENABLE_GB28181=1)
+  if(MSVC)
+    target_compile_options(uvnvr_gb28181_ps PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(uvnvr_gb28181_ps PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(WIN32)
+    # rtp.cpp uses Winsock directly; consumers of the static library need this
+    # as well, so it is PUBLIC.
+    target_link_libraries(uvnvr_gb28181_ps PUBLIC ws2_32)
+  endif()
+
+  add_executable(gb28181_ps_cli tools/gb28181_ps_cli/main.cpp)
+  target_link_libraries(gb28181_ps_cli PRIVATE uvnvr_gb28181_ps)
+  set_target_properties(gb28181_ps_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET gb28181_ps_cli APPEND PROPERTY BUILD_RPATH
+                 "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+  message(STATUS "gb28181: PS/RTP media enabled (gb28181_ps_cli included)")
+else()
+  message(STATUS "gb28181: PS/RTP media disabled by UVNVR_ENABLE_GB28181=OFF")
 endif()
 
 if(WIN32)
