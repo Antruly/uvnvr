@@ -198,6 +198,7 @@ and `/ws` to `127.0.0.1:8080`).
 |---|---|---|
 | `UVNVR_LIBUVCPP_ROOT` | empty | Unpacked libuvcpp release archive (uses pkg-config) |
 | `UVNVR_BUILD_TESTS` | `OFF` | Build unit tests |
+| `UVNVR_ENABLE_GB28181` | `OFF` | GB/T 28181 device-side stack: SIP/MANSCDP, PS/RTP, live and RecordInfo playback (see [`docs/gb28181-playback.md`](docs/gb28181-playback.md)) |
 | `UVNVR_EMBED_WEB` | `OFF` | Embed `frontend/dist` into the binary (later milestone) |
 
 ## Known limitations (0.18.1)

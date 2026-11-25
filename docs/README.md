@@ -7,6 +7,8 @@
 | [`uvp.md`](uvp.md) | How uvp-agents 0.4.0 was used to scaffold and verify the project |
 | [`architecture.md`](architecture.md) | Living architecture notes (expanded with the media core) |
 | [`secure-module.md`](secure-module.md) | Audit hash chain, firmware signatures and SM4 data-at-rest encryption |
+| [`gb28181-playback.md`](gb28181-playback.md) | GB/T 28181 RecordInfo and playback (INVITE Range, speed/pause/seek, shared PS/RTP) |
+| [`gb28181-ptz-alarm.md`](gb28181-ptz-alarm.md) | GB/T 28181 PTZCmd, Alarm reporting and SUBSCRIBE/NOTIFY |
 | [`api.md`](api.md) | REST/WebSocket/RTSP API reference (M4) |
 | [`deployment.md`](deployment.md) | Installation and operations guide (M5) |
 | [`configuration.md`](configuration.md) | Startup JSON file, ports, precedence and validation (0.2.0) |

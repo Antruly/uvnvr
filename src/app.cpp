@@ -2596,6 +2596,7 @@ int App::Run() {
   } else {
     std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
   }
+  StartGb28181();
   StartPrivateProtocol();
 #if UVNVR_ENABLE_AI
   {
@@ -2644,6 +2645,7 @@ int App::Run() {
       std::fprintf(stderr, "could not open a browser; visit %s\n", url.c_str());
   }
   web_.join();
+  StopGb28181();
   StopPrivateProtocol();
 #if UVNVR_ENABLE_AI
   if (ai_)
@@ -5305,6 +5307,68 @@ std::string App::BuildChannelUrl(const ChannelRow& channel, bool sub, std::strin
     }
   }
   return url;
+}
+
+bool App::QueuePtz(int64_t channel_id, int operation, double pan, double tilt, double zoom,
+                   int preset, std::function<void(bool, const std::string&)> done) {
+  if (channel_id <= 0) {
+    if (done)
+      done(false, "PTZ needs a valid channel id");
+    return false;
+  }
+  if (operation < static_cast<int>(OnvifPtzOperation::kContinuousMove) ||
+      operation > static_cast<int>(OnvifPtzOperation::kRemovePreset)) {
+    if (done)
+      done(false, "unsupported PTZ operation");
+    return false;
+  }
+
+  struct PtzOutcome {
+    bool ok = false;
+    std::string error;
+  };
+  auto outcome = std::make_shared<PtzOutcome>();
+  auto request = std::make_shared<OnvifPtzRequest>();
+  request->operation = static_cast<OnvifPtzOperation>(operation);
+  request->pan = pan;
+  request->tilt = tilt;
+  request->zoom = zoom;
+  request->preset = preset;
+
+  RunWork(
+      [this, channel_id, request, outcome] {
+        ChannelRow channel;
+        std::string error;
+        if (!LoadChannel(channel_id, &channel, &error)) {
+          outcome->error = error.empty() ? "channel not found" : error;
+          return;
+        }
+        if (!channel.enabled) {
+          outcome->error = "channel is disabled";
+          return;
+        }
+        if (channel.host.empty()) {
+          outcome->error = "channel has no camera address for PTZ";
+          return;
+        }
+        request->host = channel.host;
+        request->port = ChannelHttpPort(channel);
+        request->username = channel.username;
+        if (!channel.password_enc.empty()) {
+          std::string decrypt_error;
+          request->password = DecryptSecret(channel.password_enc, &decrypt_error);
+          if (request->password.empty() && !decrypt_error.empty()) {
+            outcome->error = "cannot decrypt the camera password: " + decrypt_error;
+            return;
+          }
+        }
+        outcome->ok = OnvifPtzControl(*request, &outcome->error);
+      },
+      [outcome, done] {
+        if (done)
+          done(outcome->ok, outcome->error);
+      });
+  return true;
 }
 
 void App::SyncMediaChannel(int64_t id) {
@@ -9308,6 +9372,8 @@ void App::RegisterRecordingRoutes() {
 }
 
 App::~App() {
+  // Stop every alarm source before the GB bridge: the AI workers and the
+  // monitor thread call RaiseAlert(), which forwards into the GB service.
   StopStatusPush();
   StopMonitors();
 #if UVNVR_ENABLE_AI
@@ -9316,6 +9382,7 @@ App::~App() {
 #endif
   if (onvif_events_)
     onvif_events_->Stop();
+  StopGb28181();
 }
 
 void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
@@ -9364,6 +9431,53 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
       }).detach();
     }
   }
+
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  // Every alert that reaches this function is also a GB/T 28181 Alarm. The AI
+  // plate/face detectors call RaiseAlert with type ai_plate/ai_face, so their
+  // events travel to the platform through the same path as motion and device
+  // alarms. ReportAlarm is thread-safe (the AI workers call this function).
+  {
+    std::lock_guard<std::mutex> lock(gb28181_mutex_);
+    if (gb28181_) {
+      gb28181::GbAlarm alarm;
+      alarm.channel_id = channel_id;
+      alarm.priority = level == "error" ? 1 : (level == "warning" ? 2 : 3);
+      alarm.method = 5;
+      alarm.alarm_type = "1";
+      alarm.description = message;
+      alarm.time_ms = NowSeconds() * 1000;
+      if (type == "ai_plate") {
+        alarm.alarm_type_param = "AI-PLATE";
+      } else if (type == "ai_face") {
+        alarm.alarm_type_param = "AI-FACE";
+      } else if (type == "motion") {
+        alarm.alarm_type_param = "MOTION";
+      } else if (type == "person") {
+        alarm.alarm_type_param = "PERSON";
+      } else if (type == "intrusion") {
+        alarm.alarm_type_param = "INTRUSION";
+      } else if (type == "tamper") {
+        alarm.alarm_type_param = "TAMPER";
+      } else if (type == "channel_offline" || type == "channel_online" ||
+                 type == "disk_error" || type == "storage_full") {
+        // Device-level conditions use AlarmMethod 6 (device fault) and the
+        // device alarm type (2) rather than a video alarm.
+        alarm.method = 6;
+        alarm.alarm_type = "2";
+        alarm.alarm_type_param = type == "channel_offline" ? "OFFLINE"
+                                : type == "channel_online" ? "ONLINE"
+                                : type == "disk_error"    ? "DISK-ERROR"
+                                                          : "STORAGE-FULL";
+        if (type == "channel_online")
+          alarm.priority = 4;
+      } else {
+        alarm.alarm_type_param = "NVR-ALERT";
+      }
+      gb28181_->ReportAlarm(alarm);
+    }
+  }
+#endif
 }
 
 void App::StartMonitors() {
@@ -10737,6 +10851,264 @@ void App::StartPrivateProtocolOnLoop() {
   std::fflush(stdout);
 }
 
+void App::StartGb28181() {
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  if (GetSettingInt("gb28181.enabled", 0) == 0)
+    return;
+
+  std::string device_id = GetSetting("gb28181.device_id", "");
+  const std::string center_code = GetSetting("gb28181.center_code", "34020000");
+  if (device_id.empty() && center_code.size() == 8) {
+    const int64_t sequence = std::clamp<int64_t>(GetSettingInt("gb28181.sequence", 1), 1, 9999999);
+    device_id = gb28181::FormatGb28181Id(gb28181::Gb28181Id{
+        center_code, "00", "118", static_cast<std::uint32_t>(sequence)});
+  }
+  std::string id_error;
+  if (!gb28181::IsValidGb28181Id(device_id, &id_error)) {
+    std::fprintf(stderr, "GB28181 disabled: gb28181.device_id is invalid: %s\n",
+                 id_error.c_str());
+    RaiseAlert(0, "service_error", "warning",
+               "GB/T 28181 is enabled but gb28181.device_id is invalid: " + id_error, "");
+    return;
+  }
+
+  gb28181::Gb28181Config config;
+  config.device_id = device_id;
+  config.device_name = GetSetting("gb28181.name", GetSetting("system.name", "UvNVR"));
+  config.center_code = center_code;
+  config.civil_code = GetSetting("gb28181.civil_code", device_id.substr(0, 6));
+  config.owner = GetSetting("gb28181.owner", "");
+  config.address = GetSetting("gb28181.address", "");
+  config.secrecy = static_cast<int>(GetSettingInt("gb28181.secrecy", 0));
+  config.server_host = GetSetting("gb28181.server_host", "");
+  config.server_port =
+      static_cast<std::uint16_t>(std::clamp<int64_t>(GetSettingInt("gb28181.server_port", 5060),
+                                                     1, 65535));
+  config.tcp = GetSetting("gb28181.transport", "udp") == "tcp";
+  config.username = GetSetting("gb28181.username", device_id);
+  config.password = GetSetting("gb28181.password", "");
+  config.server_id = GetSetting("gb28181.server_id", "");
+  config.domain = GetSetting("gb28181.domain", "");
+  config.local_ip = GetSetting("gb28181.local_ip", "");
+  config.bind_ip = GetSetting("gb28181.bind_ip", config_.host == "0.0.0.0" ? "" : config_.host);
+  config.local_port = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.local_port", 0), 0, 65535));
+  config.expires_seconds = static_cast<std::uint32_t>(
+      std::max<int64_t>(60, GetSettingInt("gb28181.expires", 3600)));
+  config.keepalive_seconds = static_cast<std::uint32_t>(
+      std::max<int64_t>(5, GetSettingInt("gb28181.keepalive", 60)));
+  config.default_stream = GetSetting("gb28181.stream", "main");
+  config.fallback_stream = GetSetting("gb28181.fallback_stream", "sub");
+  config.rtp_port_min = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.rtp_port_min", 30000), 1024, 65534));
+  config.rtp_port_max = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.rtp_port_max", 30998), 1024, 65534));
+  if (config.rtp_port_max < config.rtp_port_min)
+    std::swap(config.rtp_port_max, config.rtp_port_min);
+  config.max_sessions = static_cast<std::size_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.max_sessions", 8), 1, 64));
+  config.data_dir = config_.data_dir;
+  config.include_disabled_channels = GetSettingInt("gb28181.include_disabled", 0) != 0;
+  config.playback.startup_burst_ms =
+      std::max<int64_t>(0, GetSettingInt("gb28181.playback_burst_ms", 500));
+
+  gb28181::Gb28181Callbacks callbacks;
+  callbacks.log = [](const std::string& text) {
+    std::fprintf(stderr, "[gb28181] %s\n", text.c_str());
+  };
+  callbacks.ptz_control = [this](std::int64_t channel_id,
+                                 const gb28181::PtzControl& control, std::string* error) {
+    const gb28181::PtzVelocity velocity = gb28181::PtzVelocityFromCmd(control.command);
+    int operation = static_cast<int>(OnvifPtzOperation::kContinuousMove);
+    switch (velocity.action) {
+    case gb28181::PtzAction::kStop:
+      operation = static_cast<int>(OnvifPtzOperation::kStop);
+      break;
+    case gb28181::PtzAction::kSetPreset:
+      operation = static_cast<int>(OnvifPtzOperation::kSetPreset);
+      break;
+    case gb28181::PtzAction::kGotoPreset:
+      operation = static_cast<int>(OnvifPtzOperation::kGotoPreset);
+      break;
+    case gb28181::PtzAction::kRemovePreset:
+      operation = static_cast<int>(OnvifPtzOperation::kRemovePreset);
+      break;
+    case gb28181::PtzAction::kFocusNear:
+    case gb28181::PtzAction::kFocusFar:
+    case gb28181::PtzAction::kIrisOpen:
+    case gb28181::PtzAction::kIrisClose:
+      if (error != nullptr)
+        *error = "ONVIF PTZ does not expose focus/iris in ContinuousMove";
+      return false;
+    default:
+      // Pan/tilt/zoom are all ContinuousMove.
+      break;
+    }
+    const int preset = velocity.preset;
+    QueuePtz(channel_id, operation, velocity.pan, velocity.tilt, velocity.zoom, preset,
+             [channel_id, action = velocity.action](bool ok, const std::string& message) {
+               if (!ok) {
+                 std::fprintf(stderr, "[gb28181] PTZ %s for channel %lld failed: %s\n",
+                              std::string(gb28181::PtzActionName(action)).c_str(),
+                              static_cast<long long>(channel_id), message.c_str());
+               }
+             });
+    return true;
+  };
+  callbacks.channels = [this] {
+    std::vector<gb28181::GbChannel> channels;
+    uvcpp::uvcpp_db_table table;
+    uvcpp::uvcpp_db_params params;
+    if (!uvcpp::uvcpp_db_ok(
+            db_.query("SELECT id, name, enabled FROM channels ORDER BY id", params, &table)))
+      return channels;
+    for (size_t row = 0; row < table.rows().size(); ++row) {
+      gb28181::GbChannel channel;
+      channel.local_id = table.at(row, "id").to_int64();
+      channel.name = table.at(row, "name").to_text();
+      channel.enabled = table.at(row, "enabled").to_int64() != 0;
+      channel.gb_id =
+          GetSetting("gb28181.channel." + std::to_string(channel.local_id) + ".device_id", "");
+      channels.push_back(std::move(channel));
+    }
+    return channels;
+  };
+  callbacks.records = [this](int64_t channel_id, const std::string& stream, int64_t start_ms,
+                             int64_t end_ms) {
+    std::vector<gb28181::PlaybackSegment> segments;
+    std::string sql =
+        "SELECT channel_id, stream, path, start_ms, end_ms, size_bytes, codec, record_type "
+        "FROM recordings WHERE end_ms > ? AND start_ms < ?";
+    uvcpp::uvcpp_db_params params;
+    params.add(start_ms);
+    params.add(end_ms);
+    if (channel_id > 0) {
+      sql += " AND channel_id = ?";
+      params.add(channel_id);
+    }
+    if (!stream.empty()) {
+      sql += " AND stream = ?";
+      params.add(stream);
+    }
+    sql += " ORDER BY start_ms LIMIT 20000";
+    uvcpp::uvcpp_db_table table;
+    if (uvcpp::uvcpp_db_ok(db_.query(sql, params, &table))) {
+      for (size_t row = 0; row < table.rows().size(); ++row) {
+        gb28181::PlaybackSegment segment;
+        segment.channel_id = table.at(row, "channel_id").to_int64();
+        segment.stream = table.at(row, "stream").to_text();
+        segment.path = table.at(row, "path").to_text();
+        segment.start_ms = table.at(row, "start_ms").to_int64();
+        segment.end_ms = table.at(row, "end_ms").to_int64();
+        segment.size_bytes = table.at(row, "size_bytes").to_int64();
+        segment.codec = table.at(row, "codec").to_text();
+        segment.record_type = table.at(row, "record_type").to_text();
+        segments.push_back(std::move(segment));
+      }
+    }
+    // RecordInfo includes the segment that is still being written; playback
+    // asks for a concrete stream and follows finalized files only.
+    if (stream.empty() && recording_) {
+      const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+      for (const auto& active : recording_->ActiveSegments()) {
+        if (channel_id > 0 && active.channel_id != channel_id)
+          continue;
+        if (active.start_ms >= end_ms || now_ms <= start_ms)
+          continue;
+        const std::string& path = active.part_path.empty() ? active.final_path : active.part_path;
+        if (path.empty())
+          continue;
+        gb28181::PlaybackSegment segment;
+        segment.channel_id = active.channel_id;
+        segment.stream = active.stream;
+        segment.path = path;
+        segment.start_ms = active.start_ms;
+        segment.end_ms = now_ms;
+        segment.size_bytes = active.bytes;
+        segment.codec = active.codec;
+        segment.record_type = active.record_type;
+        segments.push_back(std::move(segment));
+      }
+    }
+    std::sort(segments.begin(), segments.end(),
+              [](const gb28181::PlaybackSegment& a, const gb28181::PlaybackSegment& b) {
+                return a.start_ms < b.start_ms;
+              });
+    return segments;
+  };
+  callbacks.live_open = [this](int64_t channel_id, const std::string& stream,
+                               std::function<void(const uint8_t*, size_t)> sink,
+                               std::string* error) -> uint64_t {
+    if (!media_)
+      return 0;
+    return media_->AddRawSubscriber(channel_id, stream, std::move(sink), error);
+  };
+  callbacks.live_close = [this](int64_t channel_id, const std::string& stream, uint64_t id) {
+    if (media_)
+      media_->RemoveRawSubscriber(channel_id, stream, id);
+  };
+#ifdef UVNVR_ENABLE_SECURE
+  if (at_rest_key_ready_) {
+    const gm::Bytes key = at_rest_key_;
+    callbacks.read_segment = [key](const std::string& path, std::uint64_t offset,
+                                   std::size_t size, std::vector<uint8_t>* out,
+                                   std::string* error) {
+      if (secure::IsEncryptedRecordingPath(path)) {
+        gm::Bytes plaintext;
+        if (!secure::ReadDecryptedRecordingRange(key, path, offset, size, &plaintext, error))
+          return false;
+        out->assign(plaintext.begin(), plaintext.end());
+        return true;
+      }
+      std::ifstream file(path, std::ios::binary);
+      if (!file) {
+        if (error != nullptr)
+          *error = "cannot open " + path;
+        return false;
+      }
+      file.seekg(static_cast<std::streamoff>(offset));
+      out->resize(size);
+      file.read(reinterpret_cast<char*>(out->data()), static_cast<std::streamsize>(size));
+      out->resize(static_cast<std::size_t>(file.gcount()));
+      return true;
+    };
+  }
+#endif
+
+  gb28181_ = std::make_unique<gb28181::Gb28181Service>(std::move(config), std::move(callbacks));
+  std::string error;
+  if (!gb28181_->Start(&error)) {
+    std::fprintf(stderr, "GB28181 unavailable: %s\n", error.c_str());
+    RaiseAlert(0, "service_error", "warning",
+               "GB/T 28181 is enabled but the service did not start: " + error, "");
+    gb28181_.reset();
+    return;
+  }
+  const auto status = gb28181_->GetStatus();
+  const std::string transport = GetSetting("gb28181.transport", "udp");
+  const std::string server_host = GetSetting("gb28181.server_host", "");
+  const int64_t server_port = GetSettingInt("gb28181.server_port", 5060);
+  std::printf("GB28181: sip %s %s:%u -> %s:%lld device=%s\n", transport.c_str(),
+              status.local_ip.empty() ? "0.0.0.0" : status.local_ip.c_str(), status.local_port,
+              server_host.c_str(), static_cast<long long>(server_port), device_id.c_str());
+  std::fflush(stdout);
+#endif
+}
+
+void App::StopGb28181() {
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  std::unique_ptr<gb28181::Gb28181Service> service;
+  {
+    std::lock_guard<std::mutex> lock(gb28181_mutex_);
+    service = std::move(gb28181_);
+  }
+  if (service)
+    service->Stop();
+#endif
+}
+
 void App::StopPrivateProtocol() {
   proto_.reset();
 }
@@ -11074,6 +11446,83 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     proto::ProtoReply reply;
     reply.data = json{{"streamId", stream_id}, {"ok", true}};
     complete(reply);
+    return;
+  }
+
+  case proto::kOpPtzControl: {
+    if (!HasPermission(user, "channel.manage")) {
+      complete(ProtoFailure(403, "forbidden", "channel.manage permission is required"));
+      return;
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const std::string action = JsonString(fields, "action");
+    const int speed = static_cast<int>(std::clamp<int64_t>(JsonInt(fields, "speed", 255), 0, 255));
+    const int preset = static_cast<int>(std::clamp<int64_t>(JsonInt(fields, "preset", 0), 0, 65535));
+    if (channel_id <= 0 || action.empty()) {
+      complete(ProtoFailure(400, "invalid_ptz", "channelId and action are required"));
+      return;
+    }
+
+    const double magnitude = static_cast<double>(speed) / 255.0;
+    int operation = static_cast<int>(OnvifPtzOperation::kContinuousMove);
+    double pan = 0.0;
+    double tilt = 0.0;
+    double zoom = 0.0;
+    if (action == "stop") {
+      operation = static_cast<int>(OnvifPtzOperation::kStop);
+    } else if (action == "right") {
+      pan = magnitude;
+    } else if (action == "left") {
+      pan = -magnitude;
+    } else if (action == "up") {
+      tilt = magnitude;
+    } else if (action == "down") {
+      tilt = -magnitude;
+    } else if (action == "up-right") {
+      pan = magnitude;
+      tilt = magnitude;
+    } else if (action == "up-left") {
+      pan = -magnitude;
+      tilt = magnitude;
+    } else if (action == "down-right") {
+      pan = magnitude;
+      tilt = -magnitude;
+    } else if (action == "down-left") {
+      pan = -magnitude;
+      tilt = -magnitude;
+    } else if (action == "zoom-in") {
+      zoom = magnitude > 0.0 ? magnitude : 0.5;
+    } else if (action == "zoom-out") {
+      zoom = -(magnitude > 0.0 ? magnitude : 0.5);
+    } else if (action == "set-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kSetPreset);
+    } else if (action == "goto-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kGotoPreset);
+    } else if (action == "remove-preset") {
+      operation = static_cast<int>(OnvifPtzOperation::kRemovePreset);
+    } else {
+      complete(ProtoFailure(400, "invalid_ptz", "unknown action"));
+      return;
+    }
+    if (operation != static_cast<int>(OnvifPtzOperation::kContinuousMove) &&
+        operation != static_cast<int>(OnvifPtzOperation::kStop) && preset <= 0) {
+      complete(ProtoFailure(400, "invalid_ptz", "preset is required for preset actions"));
+      return;
+    }
+
+    QueuePtz(channel_id, operation, pan, tilt, zoom, preset,
+             [complete, channel_id, action](bool ok, const std::string& error) {
+               if (!ok) {
+                 complete(ProtoFailure(502, "ptz_failed",
+                                       error.empty() ? "the camera rejected the PTZ command"
+                                                     : error));
+                 return;
+               }
+               proto::ProtoReply reply;
+               reply.status = 200;
+               reply.data = json{{"channelId", channel_id}, {"action", action}, {"ok", true}};
+               complete(reply);
+             });
     return;
   }
 

@@ -23,6 +23,11 @@ option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (re
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
+# Self-hosted GB/T 28181 stack: SIP registration/MESSAGE dispatch, MANSCDP
+# codec, PS/RTP media and INVITE/BYE dialogs. Off by default: normal
+# deployments do not join a GB/T 28181 platform and no existing
+# preview/recording/ONVIF path changes when it is enabled.
+option(UVNVR_ENABLE_GB28181 "Build the GB/T 28181 SIP, MANSCDP and PS/RTP modules" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -316,6 +321,69 @@ if(UVNVR_ENABLE_SECURE)
   endif()
 else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
+endif()
+
+# GB/T 28181 stack: SIP registration/Digest/MESSAGE dispatch, MANSCDP codec,
+# MPEG-2 PS encapsulation (Appendix C), RTP/RTCP and the INVITE/BYE media
+# dialog. The SIP stack is self-hosted (no GPL/LGPL eXosip2). The library is
+# not linked into the server yet, so enabling it cannot change the existing
+# preview/recording/ONVIF paths.
+set(UVNVR_GB28181_ENABLED 0)
+if(UVNVR_ENABLE_GB28181)
+  set(UVNVR_GB28181_ENABLED 1)
+  add_library(uvnvr_gb28181 STATIC
+    src/gb28181/sip.cpp
+    src/gb28181/manscdp.cpp
+    src/gb28181/time.cpp
+    src/gb28181/ps.cpp
+    src/gb28181/rtp.cpp
+    src/gb28181/rtcp.cpp
+    src/gb28181/media_session.cpp
+    src/gb28181/ts_ps.cpp
+    src/gb28181/playback.cpp
+    src/gb28181/service.cpp
+  )
+  target_include_directories(uvnvr_gb28181 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(uvnvr_gb28181 PUBLIC OpenSSL::Crypto ${UVP_UVCPP_TARGET})
+  target_compile_definitions(uvnvr_gb28181 PUBLIC UVNVR_ENABLE_GB28181=1)
+  if(MSVC)
+    target_compile_options(uvnvr_gb28181 PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(uvnvr_gb28181 PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(WIN32)
+    # sip.cpp/rtp.cpp use Winsock directly; consumers of the static library
+    # need this as well, so it is PUBLIC.
+    target_link_libraries(uvnvr_gb28181 PUBLIC ws2_32)
+  endif()
+  # App wires the service only when UVNVR_ENABLE_GB28181 is on; with the
+  # default (OFF) the executable and its behaviour are unchanged.
+  target_link_libraries(uvnvr PRIVATE uvnvr_gb28181)
+
+  add_executable(sip_reg_cli tools/sip_reg_cli/main.cpp)
+  target_link_libraries(sip_reg_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(sip_reg_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET sip_reg_cli APPEND PROPERTY BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+
+  add_executable(gb28181_ps_cli tools/gb28181_ps_cli/main.cpp)
+  target_link_libraries(gb28181_ps_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(gb28181_ps_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+  add_executable(gb28181_session_cli tools/gb28181_session_cli/main.cpp)
+  target_link_libraries(gb28181_session_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(gb28181_session_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET gb28181_session_cli APPEND PROPERTY BUILD_RPATH
+                 "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+  message(STATUS "gb28181: enabled (SIP, MANSCDP, PS/RTP and media dialogs)")
+else()
+  message(STATUS "gb28181: disabled by UVNVR_ENABLE_GB28181=OFF")
 endif()
 
 if(WIN32)

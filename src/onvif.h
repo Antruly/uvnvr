@@ -95,6 +95,34 @@ bool SetOnvifEncoderConfig(const std::string& host, int port, const std::string&
                            const std::string& password, const OnvifEncoderConfig& config,
                            std::string* error);
 
+// PTZ control through the ONVIF PTZ service (ver20). `pan`/`tilt`/`zoom` are
+// normalised velocities in -1..1; the profile token is the first media
+// profile unless `profile_token` is supplied.
+enum class OnvifPtzOperation {
+  kContinuousMove,
+  kStop,
+  kSetPreset,
+  kGotoPreset,
+  kRemovePreset,
+};
+
+struct OnvifPtzRequest {
+  OnvifPtzOperation operation = OnvifPtzOperation::kContinuousMove;
+  std::string host;
+  int port = 80;
+  std::string username;
+  std::string password;
+  std::string profile_token; // empty = first profile from GetProfiles
+  double pan = 0.0;
+  double tilt = 0.0;
+  double zoom = 0.0;
+  bool stop_pan_tilt = true;
+  bool stop_zoom = true;
+  int preset = 0;
+};
+
+bool OnvifPtzControl(const OnvifPtzRequest& request, std::string* error);
+
 // Sets the camera clock through the ONVIF device service (Manual UTC time).
 bool SetOnvifTime(const std::string& host, int port, const std::string& username,
                   const std::string& password, int64_t epoch_ms, std::string* error);

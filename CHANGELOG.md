@@ -8,6 +8,67 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB/T 28181 云台控制与报警上报 (opt-in, P6.2e).** `DeviceControl`
+  `PTZCmd` is decoded with byte/checksum/preset validation and normalised to
+  pan/tilt/zoom velocities; the server dispatches it off the SIP loop to the
+  ONVIF ver20 PTZ service (`ContinuousMove`, `Stop`, `SetPreset`,
+  `GotoPreset`, `RemovePreset`). A new `PTZ_CONTROL` private-protocol opcode
+  drives the same backend. Every `RaiseAlert` (including the AI plate/face
+  workers) is published as a MANSCDP `Alarm` MESSAGE and fanned out to
+  `Event: Alarm` subscribers through SIP NOTIFY. SUBSCRIBE for `Catalog` and
+  `Alarm` supports refresh and `Expires: 0` unsubscribe. Still behind
+  `-DUVNVR_ENABLE_GB28181=ON` (default off) and started only when
+  `gb28181.enabled=1`; existing paths are unchanged. See
+  `docs/gb28181-ptz-alarm.md`; evidence is
+  `tests/gb28181_manscdp_test.cpp`, `tests/onvif_ptz_test.cpp` and
+  `tests/integration/gb28181_ptz_alarm.py`.
+- **GB/T 28181 录像查询与回放 (opt-in, P6.2d).** `RecordInfo` answers from the
+  local `recordings` index (including active `.part` segments) with the
+  channel's 20-digit identifier, time range and MANSCDP record type. Playback
+  INVITEs carrying `s=Playback` and `u=<channel>:<start>:<end>` are answered
+  with an RTP/PS dialog; SIP INFO `Control/Playback` implements `Scale`
+  (forward speed, `0` pause) and `Range` seek. Live preview and playback share
+  the same TS demuxer, PS muxer and RTP session path. Still behind
+  `-DUVNVR_ENABLE_GB28181=ON` (default off) and only started when
+  `gb28181.enabled=1`; existing preview/recording/ONVIF paths are unchanged.
+  See `docs/gb28181-playback.md`; the platform-side check is
+  `tests/integration/gb28181_record_playback.py`.
+- **GB/T 28181 MANSCDP codec and channel catalog (opt-in, P6.2b).** Catalog,
+  DeviceInfo, DeviceStatus and Keepalive XML encoding/decoding, 20-digit
+  identifier generation and validation, and a mapping from the local channels
+  and channel groups to catalog items with `ParentID`. `ManscdpResponder`
+  answers inbound queries, and the SIP user agent now dispatches inbound
+  MESSAGE requests to a callback and can send the response MESSAGE back. Still
+  compiled only with `-DUVNVR_ENABLE_GB28181=ON`; default deployments are
+  unchanged. See `docs/gb28181-manscdp.md`.
+- **GB/T 28181 SIP user agent (opt-in, P6.2a).** A self-hosted SIP stack for
+  the lower-device role: UDP/TCP transport on libuvcpp, REGISTER with Digest
+  authentication and 401/407 retry, Expires refresh, MANSCDP-style Keepalive
+  heartbeats, SIP retransmission for UDP and exponential reconnect backoff.
+  Message/URI/Digest helpers plus `sip_reg_cli` and a local Python fake
+  registrar are included. Build with `-DUVNVR_ENABLE_GB28181=ON`; the module is
+  not linked into the server yet, so default deployments are unchanged. See
+  `docs/gb28181-sip.md`.
+- **GB/T 28181 PS/RTP media path (opt-in, P6.2c).** H.264/H.265 Annex B
+  elementary streams are muxed into the Appendix C MPEG-2 PS layout (pack,
+  system header, PSM with CRC-32/MPEG-2 and PES with 90 kHz PTS/DTS), then
+  packetized as RTP payload type 96 with sequence, SSRC and per-frame marker
+  bits. UDP, TCP active and TCP passive (RFC 4571 length framing) are
+  supported, together with SDP build/parse and INVITE answer negotiation
+  (`a=setup`, `PS/90000`, `y=`). Build with `-DUVNVR_ENABLE_GB28181=ON`;
+  `gb28181_ps_cli` and an ffmpeg-backed integration check are included. The
+  module is not linked into the server yet, so default deployments are
+  unchanged. See `docs/gb28181-ps-rtp.md`.
+- **GB/T 28181 RTCP and INVITE/BYE media dialogs (opt-in, P6.2c).** The media
+  session now emits compound RTCP Sender Reports with SDES CNAME, consumes
+  Receiver Reports (loss/jitter/RTT), parses PLI and FIR key-frame requests
+  and RTCP BYE, and supports NACK diagnostics. A dialog manager binds the
+  stream to INVITE/ACK/BYE: SDP offer/answer with SSRC and port allocation,
+  idempotent retransmissions, re-INVITE replacement, TCP passive accept after
+  ACK, ACK timeout, and RTCP BYE on close. `gb28181_session_cli` and a
+  platform-side integration script validate all three transports and decode
+  the received PS with ffmpeg. Still behind `-DUVNVR_ENABLE_GB28181=ON`
+  (default off) and not linked into the server. See `docs/gb28181-ps-rtp.md`.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry
