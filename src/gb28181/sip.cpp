@@ -2241,27 +2241,100 @@ struct SipUserAgent::Impl {
       Event("answered inbound MESSAGE with 200 OK");
       if (callbacks.on_message)
         callbacks.on_message(message);
+    } else if (message.method == SipMethod::kInvite) {
+      // The media service owns the offer/answer and must call SendResponse()
+      // with 200 + SDP (or an error status) before this callback returns.
+      if (callbacks.on_invite)
+        callbacks.on_invite(message, peer);
+      else
+        SendSimpleResponse(message, 501, "Not Implemented");
+    } else if (message.method == SipMethod::kAck) {
+      if (callbacks.on_ack)
+        callbacks.on_ack(message);
+    } else if (message.method == SipMethod::kBye) {
+      SendSimpleResponse(message, 200, "OK");
+      Event("answered inbound BYE with 200 OK");
+      if (callbacks.on_bye)
+        callbacks.on_bye(message);
+    } else if (message.method == SipMethod::kInfo) {
+      if (callbacks.on_info)
+        callbacks.on_info(message);
+      else
+        SendSimpleResponse(message, 501, "Not Implemented");
+    } else if (message.method == SipMethod::kCancel) {
+      SendSimpleResponse(message, 481, "Call/Transaction Does Not Exist");
+      Event("answered inbound CANCEL with 481");
     } else {
-      Event("ignoring inbound " + std::string(SipMethodName(message.method)) +
-            " (INVITE/BYE handling is not part of this stage)");
+      SendSimpleResponse(message, 501, "Not Implemented");
+      Event("answered inbound " + std::string(SipMethodName(message.method)) +
+            " with 501 Not Implemented");
     }
   }
 
-  void SendSimpleResponse(const SipMessage& request, int status, const std::string& reason) {
+  static std::string StableDialogTag(const std::string& call_id) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const char c : call_id) {
+      hash ^= static_cast<unsigned char>(c);
+      hash *= 1099511628211ULL;
+    }
+    char text[17];
+    std::snprintf(text, sizeof(text), "%016llx",
+                  static_cast<unsigned long long>(hash));
+    return text;
+  }
+
+  bool SendResponse(const SipMessage& request, int status_code,
+                    const std::string& reason, const std::string& body,
+                    const std::string& content_type,
+                    const std::vector<std::pair<std::string, std::string>>& extra_headers,
+                    const std::string& to_tag, std::string* error) {
     SipMessage response;
     response.is_request = false;
-    response.status_code = status;
+    response.status_code = status_code;
     response.reason_phrase = reason;
     for (const SipHeader* via : request.FindHeaders("Via"))
       response.AddHeader("Via", via->value);
     response.AddHeader("From", request.GetHeader("From"));
-    response.AddHeader("To", request.GetHeader("To"));
+    std::string to = request.GetHeader("To");
+    if (to.empty())
+      to = request.GetHeader("t");
+    const bool dialog_response =
+        request.method == SipMethod::kInvite && status_code >= 200;
+    if (dialog_response && request.ToTag().empty()) {
+      const std::string tag =
+          to_tag.empty() ? StableDialogTag(request.CallId()) : to_tag;
+      if (!to.empty() && to.find(";tag=") == std::string::npos)
+        to += ";tag=" + tag;
+    }
+    response.AddHeader("To", to);
     response.AddHeader("Call-ID", request.GetHeader("Call-ID"));
     response.AddHeader("CSeq", request.GetHeader("CSeq"));
+    if (dialog_response && !config.username.empty() && !local_ip.empty()) {
+      SipUri contact;
+      contact.scheme = "sip";
+      contact.user = config.username;
+      contact.host = local_ip;
+      contact.port = local_port;
+      contact.parameters.emplace_back("transport", config.tcp ? "tcp" : "udp");
+      response.AddHeader("Contact", "<" + FormatSipUri(contact) + ">");
+    }
     response.AddHeader("User-Agent", "UvNVR-GB28181/0.1");
+    for (const auto& [name, value] : extra_headers)
+      response.AddHeader(name, value);
+    if (!content_type.empty()) {
+      response.SetHeader("Content-Type", content_type);
+      response.SetHeader("Content-Length", std::to_string(body.size()));
+      response.body = body;
+    } else {
+      response.SetHeader("Content-Length", "0");
+    }
+    return Emit(response.Serialize(), error);
+  }
+
+  void SendSimpleResponse(const SipMessage& request, int status, const std::string& reason) {
     std::string error;
-    if (!Emit(response.Serialize(), &error))
-      Event("failed to answer OPTIONS: " + error);
+    if (!SendResponse(request, status, reason, {}, {}, {}, {}, &error))
+      Event("failed to answer " + std::string(SipMethodName(request.method)) + ": " + error);
   }
 
   void OnResponse(const SipMessage& message) {
@@ -2853,6 +2926,15 @@ void SipUserAgent::Stop() {
 bool SipUserAgent::SendMessage(std::string body, std::string content_type,
                                std::string* error) {
   return impl_->SendMessage(std::move(body), content_type, error);
+}
+
+bool SipUserAgent::SendResponse(
+    const SipMessage& request, int status_code, const std::string& reason,
+    const std::string& body, const std::string& content_type,
+    const std::vector<std::pair<std::string, std::string>>& extra_headers,
+    const std::string& to_tag, std::string* error) {
+  return impl_->SendResponse(request, status_code, reason, body, content_type,
+                             extra_headers, to_tag, error);
 }
 
 SipRegistrationState SipUserAgent::state() const {

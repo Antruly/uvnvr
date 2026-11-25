@@ -172,6 +172,7 @@ UVNVR_FFMPEG=/path/to/ffmpeg ./build/uvnvr --port 8080 --rtsp-port 554
 |---|---|---|
 | `UVNVR_LIBUVCPP_ROOT` | 空 | libuvcpp Release 归档目录（走 pkg-config） |
 | `UVNVR_BUILD_TESTS` | `OFF` | 构建单元测试 |
+| `UVNVR_ENABLE_GB28181` | `OFF` | GB/T 28181 设备侧：SIP/MANSCDP、PS/RTP、实时与录像回放（见 [`docs/gb28181-playback.md`](docs/gb28181-playback.md)） |
 | `UVNVR_EMBED_WEB` | `OFF` | 将 `frontend/dist` 嵌入二进制（后续里程碑） |
 
 ## 0.18.1 已知限制

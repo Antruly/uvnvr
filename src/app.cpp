@@ -2596,6 +2596,7 @@ int App::Run() {
   } else {
     std::printf("RTSP: rtsp://0.0.0.0:%d/live/{channel}/{main|sub}\n", rtsp_->Port());
   }
+  StartGb28181();
   StartPrivateProtocol();
 #if UVNVR_ENABLE_AI
   {
@@ -2644,6 +2645,7 @@ int App::Run() {
       std::fprintf(stderr, "could not open a browser; visit %s\n", url.c_str());
   }
   web_.join();
+  StopGb28181();
   StopPrivateProtocol();
 #if UVNVR_ENABLE_AI
   if (ai_)
@@ -9308,6 +9310,7 @@ void App::RegisterRecordingRoutes() {
 }
 
 App::~App() {
+  StopGb28181();
   StopStatusPush();
   StopMonitors();
 #if UVNVR_ENABLE_AI
@@ -10735,6 +10738,222 @@ void App::StartPrivateProtocolOnLoop() {
   if (!error.empty())
     std::fprintf(stderr, "Private protocol: %s\n", error.c_str());
   std::fflush(stdout);
+}
+
+void App::StartGb28181() {
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  if (GetSettingInt("gb28181.enabled", 0) == 0)
+    return;
+
+  std::string device_id = GetSetting("gb28181.device_id", "");
+  const std::string center_code = GetSetting("gb28181.center_code", "34020000");
+  if (device_id.empty() && center_code.size() == 8) {
+    const int64_t sequence = std::clamp<int64_t>(GetSettingInt("gb28181.sequence", 1), 1, 9999999);
+    device_id = gb28181::FormatGb28181Id(gb28181::Gb28181Id{
+        center_code, "00", "118", static_cast<std::uint32_t>(sequence)});
+  }
+  std::string id_error;
+  if (!gb28181::IsValidGb28181Id(device_id, &id_error)) {
+    std::fprintf(stderr, "GB28181 disabled: gb28181.device_id is invalid: %s\n",
+                 id_error.c_str());
+    RaiseAlert(0, "service_error", "warning",
+               "GB/T 28181 is enabled but gb28181.device_id is invalid: " + id_error, "");
+    return;
+  }
+
+  gb28181::Gb28181Config config;
+  config.device_id = device_id;
+  config.device_name = GetSetting("gb28181.name", GetSetting("system.name", "UvNVR"));
+  config.center_code = center_code;
+  config.civil_code = GetSetting("gb28181.civil_code", device_id.substr(0, 6));
+  config.owner = GetSetting("gb28181.owner", "");
+  config.address = GetSetting("gb28181.address", "");
+  config.secrecy = static_cast<int>(GetSettingInt("gb28181.secrecy", 0));
+  config.server_host = GetSetting("gb28181.server_host", "");
+  config.server_port =
+      static_cast<std::uint16_t>(std::clamp<int64_t>(GetSettingInt("gb28181.server_port", 5060),
+                                                     1, 65535));
+  config.tcp = GetSetting("gb28181.transport", "udp") == "tcp";
+  config.username = GetSetting("gb28181.username", device_id);
+  config.password = GetSetting("gb28181.password", "");
+  config.server_id = GetSetting("gb28181.server_id", "");
+  config.domain = GetSetting("gb28181.domain", "");
+  config.local_ip = GetSetting("gb28181.local_ip", "");
+  config.bind_ip = GetSetting("gb28181.bind_ip", config_.host == "0.0.0.0" ? "" : config_.host);
+  config.local_port = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.local_port", 0), 0, 65535));
+  config.expires_seconds = static_cast<std::uint32_t>(
+      std::max<int64_t>(60, GetSettingInt("gb28181.expires", 3600)));
+  config.keepalive_seconds = static_cast<std::uint32_t>(
+      std::max<int64_t>(5, GetSettingInt("gb28181.keepalive", 60)));
+  config.default_stream = GetSetting("gb28181.stream", "main");
+  config.fallback_stream = GetSetting("gb28181.fallback_stream", "sub");
+  config.rtp_port_min = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.rtp_port_min", 30000), 1024, 65534));
+  config.rtp_port_max = static_cast<std::uint16_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.rtp_port_max", 30998), 1024, 65534));
+  if (config.rtp_port_max < config.rtp_port_min)
+    std::swap(config.rtp_port_max, config.rtp_port_min);
+  config.max_sessions = static_cast<std::size_t>(
+      std::clamp<int64_t>(GetSettingInt("gb28181.max_sessions", 8), 1, 64));
+  config.data_dir = config_.data_dir;
+  config.include_disabled_channels = GetSettingInt("gb28181.include_disabled", 0) != 0;
+  config.playback.startup_burst_ms =
+      std::max<int64_t>(0, GetSettingInt("gb28181.playback_burst_ms", 500));
+
+  gb28181::Gb28181Callbacks callbacks;
+  callbacks.log = [](const std::string& text) {
+    std::fprintf(stderr, "[gb28181] %s\n", text.c_str());
+  };
+  callbacks.channels = [this] {
+    std::vector<gb28181::GbChannel> channels;
+    uvcpp::uvcpp_db_table table;
+    uvcpp::uvcpp_db_params params;
+    if (!uvcpp::uvcpp_db_ok(
+            db_.query("SELECT id, name, enabled FROM channels ORDER BY id", params, &table)))
+      return channels;
+    for (size_t row = 0; row < table.rows().size(); ++row) {
+      gb28181::GbChannel channel;
+      channel.local_id = table.at(row, "id").to_int64();
+      channel.name = table.at(row, "name").to_text();
+      channel.enabled = table.at(row, "enabled").to_int64() != 0;
+      channel.gb_id =
+          GetSetting("gb28181.channel." + std::to_string(channel.local_id) + ".device_id", "");
+      channels.push_back(std::move(channel));
+    }
+    return channels;
+  };
+  callbacks.records = [this](int64_t channel_id, const std::string& stream, int64_t start_ms,
+                             int64_t end_ms) {
+    std::vector<gb28181::PlaybackSegment> segments;
+    std::string sql =
+        "SELECT channel_id, stream, path, start_ms, end_ms, size_bytes, codec, record_type "
+        "FROM recordings WHERE end_ms > ? AND start_ms < ?";
+    uvcpp::uvcpp_db_params params;
+    params.add(start_ms);
+    params.add(end_ms);
+    if (channel_id > 0) {
+      sql += " AND channel_id = ?";
+      params.add(channel_id);
+    }
+    if (!stream.empty()) {
+      sql += " AND stream = ?";
+      params.add(stream);
+    }
+    sql += " ORDER BY start_ms LIMIT 20000";
+    uvcpp::uvcpp_db_table table;
+    if (uvcpp::uvcpp_db_ok(db_.query(sql, params, &table))) {
+      for (size_t row = 0; row < table.rows().size(); ++row) {
+        gb28181::PlaybackSegment segment;
+        segment.channel_id = table.at(row, "channel_id").to_int64();
+        segment.stream = table.at(row, "stream").to_text();
+        segment.path = table.at(row, "path").to_text();
+        segment.start_ms = table.at(row, "start_ms").to_int64();
+        segment.end_ms = table.at(row, "end_ms").to_int64();
+        segment.size_bytes = table.at(row, "size_bytes").to_int64();
+        segment.codec = table.at(row, "codec").to_text();
+        segment.record_type = table.at(row, "record_type").to_text();
+        segments.push_back(std::move(segment));
+      }
+    }
+    // RecordInfo includes the segment that is still being written; playback
+    // asks for a concrete stream and follows finalized files only.
+    if (stream.empty() && recording_) {
+      const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+      for (const auto& active : recording_->ActiveSegments()) {
+        if (channel_id > 0 && active.channel_id != channel_id)
+          continue;
+        if (active.start_ms >= end_ms || now_ms <= start_ms)
+          continue;
+        const std::string& path = active.part_path.empty() ? active.final_path : active.part_path;
+        if (path.empty())
+          continue;
+        gb28181::PlaybackSegment segment;
+        segment.channel_id = active.channel_id;
+        segment.stream = active.stream;
+        segment.path = path;
+        segment.start_ms = active.start_ms;
+        segment.end_ms = now_ms;
+        segment.size_bytes = active.bytes;
+        segment.codec = active.codec;
+        segment.record_type = active.record_type;
+        segments.push_back(std::move(segment));
+      }
+    }
+    std::sort(segments.begin(), segments.end(),
+              [](const gb28181::PlaybackSegment& a, const gb28181::PlaybackSegment& b) {
+                return a.start_ms < b.start_ms;
+              });
+    return segments;
+  };
+  callbacks.live_open = [this](int64_t channel_id, const std::string& stream,
+                               std::function<void(const uint8_t*, size_t)> sink,
+                               std::string* error) -> uint64_t {
+    if (!media_)
+      return 0;
+    return media_->AddRawSubscriber(channel_id, stream, std::move(sink), error);
+  };
+  callbacks.live_close = [this](int64_t channel_id, const std::string& stream, uint64_t id) {
+    if (media_)
+      media_->RemoveRawSubscriber(channel_id, stream, id);
+  };
+#ifdef UVNVR_ENABLE_SECURE
+  if (at_rest_key_ready_) {
+    const gm::Bytes key = at_rest_key_;
+    callbacks.read_segment = [key](const std::string& path, std::uint64_t offset,
+                                   std::size_t size, std::vector<uint8_t>* out,
+                                   std::string* error) {
+      if (secure::IsEncryptedRecordingPath(path)) {
+        gm::Bytes plaintext;
+        if (!secure::ReadDecryptedRecordingRange(key, path, offset, size, &plaintext, error))
+          return false;
+        out->assign(plaintext.begin(), plaintext.end());
+        return true;
+      }
+      std::ifstream file(path, std::ios::binary);
+      if (!file) {
+        if (error != nullptr)
+          *error = "cannot open " + path;
+        return false;
+      }
+      file.seekg(static_cast<std::streamoff>(offset));
+      out->resize(size);
+      file.read(reinterpret_cast<char*>(out->data()), static_cast<std::streamsize>(size));
+      out->resize(static_cast<std::size_t>(file.gcount()));
+      return true;
+    };
+  }
+#endif
+
+  gb28181_ = std::make_unique<gb28181::Gb28181Service>(std::move(config), std::move(callbacks));
+  std::string error;
+  if (!gb28181_->Start(&error)) {
+    std::fprintf(stderr, "GB28181 unavailable: %s\n", error.c_str());
+    RaiseAlert(0, "service_error", "warning",
+               "GB/T 28181 is enabled but the service did not start: " + error, "");
+    gb28181_.reset();
+    return;
+  }
+  const auto status = gb28181_->GetStatus();
+  const std::string transport = GetSetting("gb28181.transport", "udp");
+  const std::string server_host = GetSetting("gb28181.server_host", "");
+  const int64_t server_port = GetSettingInt("gb28181.server_port", 5060);
+  std::printf("GB28181: sip %s %s:%u -> %s:%lld device=%s\n", transport.c_str(),
+              status.local_ip.empty() ? "0.0.0.0" : status.local_ip.c_str(), status.local_port,
+              server_host.c_str(), static_cast<long long>(server_port), device_id.c_str());
+  std::fflush(stdout);
+#endif
+}
+
+void App::StopGb28181() {
+#if defined(UVNVR_ENABLE_GB28181) && UVNVR_ENABLE_GB28181
+  if (gb28181_) {
+    gb28181_->Stop();
+    gb28181_.reset();
+  }
+#endif
 }
 
 void App::StopPrivateProtocol() {

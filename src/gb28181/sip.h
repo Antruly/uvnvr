@@ -240,6 +240,16 @@ struct SipUaCallbacks {
   // 200 OK. The callback runs on the event-loop thread and may call
   // SendMessage() to return a MANSCDP response. It must not block.
   std::function<void(const SipMessage&)> on_message;
+  // Media dialog requests. The user agent does not answer INVITE/INFO by
+  // itself: the callback must call SendResponse() with the appropriate status
+  // (200 with an SDP answer for a successful INVITE). ACK and BYE are
+  // acknowledged before the callback runs (BYE gets a 200 OK here) and never
+  // need a response from the callback. `peer` is the transport source and is
+  // informational; UDP responses follow the registered platform address.
+  std::function<void(const SipMessage&, const std::string& peer)> on_invite;
+  std::function<void(const SipMessage&)> on_ack;
+  std::function<void(const SipMessage&)> on_bye;
+  std::function<void(const SipMessage&)> on_info;
   // Human-readable progress information (keepalive sent/acknowledged, ...).
   std::function<void(const std::string&)> on_event;
 };
@@ -270,6 +280,17 @@ class SipUserAgent {
   bool SendMessage(std::string body,
                    std::string content_type = "Application/MANSCDP+xml",
                    std::string* error = nullptr);
+
+  // Sends a response to an inbound request on the same transport. `to_tag`
+  // is added to the To header for a dialog-creating response (INVITE 200) when
+  // the request has no tag; an empty value derives a stable tag from the
+  // Call-ID. Extra headers (Contact, Content-Type, ...) are appended verbatim
+  // as name/value pairs. Body bytes are copied unchanged.
+  bool SendResponse(const SipMessage& request, int status_code,
+                    const std::string& reason, const std::string& body = {},
+                    const std::string& content_type = {},
+                    const std::vector<std::pair<std::string, std::string>>& extra_headers = {},
+                    const std::string& to_tag = {}, std::string* error = nullptr);
 
   SipRegistrationState state() const;
   const SipUaConfig& config() const;

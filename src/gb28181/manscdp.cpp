@@ -7,10 +7,13 @@
 // character/entity references and nested elements.
 
 #include "gb28181/manscdp.h"
+#include "gb28181/time.h"
 
 #include <cctype>
+#include <cmath>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <unordered_map>
@@ -36,6 +39,14 @@ std::string_view TrimAscii(std::string_view text) {
   while (end > begin && IsAsciiSpace(text[end - 1]))
     --end;
   return text.substr(begin, end - begin);
+}
+
+std::string ToLowerAscii(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text)
+    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  return out;
 }
 
 bool EqualIgnoreCase(std::string_view a, std::string_view b) {
@@ -676,10 +687,14 @@ std::string_view ManscdpCommandName(ManscdpCommand command) {
     return "DeviceInfo";
   case ManscdpCommand::kDeviceStatus:
     return "DeviceStatus";
+  case ManscdpCommand::kRecordInfo:
+    return "RecordInfo";
   case ManscdpCommand::kKeepalive:
     return "Keepalive";
   case ManscdpCommand::kAlarm:
     return "Alarm";
+  case ManscdpCommand::kPlayback:
+    return "Playback";
   case ManscdpCommand::kUnknown:
     break;
   }
@@ -694,10 +709,14 @@ ManscdpCommand ParseManscdpCommand(std::string_view name) {
     return ManscdpCommand::kDeviceInfo;
   if (EqualIgnoreCase(trimmed, "DeviceStatus"))
     return ManscdpCommand::kDeviceStatus;
+  if (EqualIgnoreCase(trimmed, "RecordInfo"))
+    return ManscdpCommand::kRecordInfo;
   if (EqualIgnoreCase(trimmed, "Keepalive"))
     return ManscdpCommand::kKeepalive;
   if (EqualIgnoreCase(trimmed, "Alarm"))
     return ManscdpCommand::kAlarm;
+  if (EqualIgnoreCase(trimmed, "Playback"))
+    return ManscdpCommand::kPlayback;
   return ManscdpCommand::kUnknown;
 }
 
@@ -992,6 +1011,265 @@ bool ParseDeviceStatusResponse(std::string_view xml, DeviceStatusResponse* respo
 }
 
 // ---------------------------------------------------------------------------
+// RecordInfo
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool ParseRecordType(std::string_view text, std::string* type, std::string* error) {
+  const std::string value = ToLowerAscii(TrimAscii(text));
+  if (value.empty()) {
+    *type = "all";
+    return true;
+  }
+  if (value != "all" && value != "time" && value != "alarm" && value != "manual") {
+    if (error != nullptr)
+      *error = "unsupported <Type>'" + value + "'</Type>";
+    return false;
+  }
+  *type = value;
+  return true;
+}
+
+bool ParseOptionalTime(const XmlNode& root, std::string_view name, std::int64_t* value,
+                       std::int64_t fallback, std::string* error) {
+  const XmlNode* child = root.Child(name);
+  if (child == nullptr) {
+    *value = fallback;
+    return true;
+  }
+  const std::string_view text = TrimAscii(child->text);
+  if (text.empty()) {
+    *value = fallback;
+    return true;
+  }
+  return ParseGbTime(text, value, error);
+}
+
+} // namespace
+
+std::string BuildRecordInfoQuery(const RecordInfoQuery& query) {
+  std::string out(kXmlHeader);
+  out += "<Query>\r\n";
+  AppendElement(&out, "  ", "CmdType", "RecordInfo");
+  AppendUintElement(&out, "  ", "SN", query.sn);
+  AppendElement(&out, "  ", "DeviceID", query.device_id);
+  AppendElement(&out, "  ", "StartTime", FormatGbTime(query.start_ms));
+  AppendElement(&out, "  ", "EndTime", FormatGbTime(query.end_ms));
+  if (!query.file_path.empty())
+    AppendElement(&out, "  ", "FilePath", query.file_path);
+  if (!query.address.empty())
+    AppendElement(&out, "  ", "Address", query.address);
+  AppendUintElement(&out, "  ", "Secrecy", static_cast<std::uint64_t>(query.secrecy));
+  AppendElement(&out, "  ", "Type", query.type.empty() ? "all" : query.type);
+  out += "</Query>\r\n";
+  return out;
+}
+
+bool ParseRecordInfoQuery(std::string_view xml, RecordInfoQuery* query, std::string* error) {
+  XmlNode root;
+  if (!ParseXmlDocument(xml, &root, error))
+    return false;
+  if (!RequireRoot(root, "Query", error))
+    return false;
+  if (!RequireCmdType(root, ManscdpCommand::kRecordInfo, error))
+    return false;
+
+  RecordInfoQuery parsed;
+  if (!ParseRequiredUint(root, "SN", &parsed.sn, error))
+    return false;
+  parsed.device_id = root.ChildText("DeviceID");
+  if (parsed.device_id.empty()) {
+    if (error != nullptr)
+      *error = "missing <DeviceID>";
+    return false;
+  }
+  if (!ParseOptionalTime(root, "StartTime", &parsed.start_ms, 0, error))
+    return false;
+  if (!ParseOptionalTime(root, "EndTime", &parsed.end_ms,
+                         std::numeric_limits<std::int64_t>::max(), error))
+    return false;
+  if (parsed.end_ms < parsed.start_ms) {
+    if (error != nullptr)
+      *error = "EndTime is before StartTime";
+    return false;
+  }
+  parsed.file_path = root.ChildText("FilePath");
+  parsed.address = root.ChildText("Address");
+  if (!ParseOptionalInt(root, "Secrecy", 0, &parsed.secrecy, error))
+    return false;
+  if (!ParseRecordType(root.ChildText("Type"), &parsed.type, error))
+    return false;
+
+  if (query != nullptr)
+    *query = std::move(parsed);
+  return true;
+}
+
+std::string BuildRecordInfoResponse(const RecordInfoResponse& response) {
+  std::string out(kXmlHeader);
+  out += "<Response>\r\n";
+  AppendElement(&out, "  ", "CmdType", "RecordInfo");
+  AppendUintElement(&out, "  ", "SN", response.sn);
+  AppendElement(&out, "  ", "DeviceID", response.device_id);
+  if (!response.name.empty())
+    AppendElement(&out, "  ", "Name", response.name);
+  AppendUintElement(&out, "  ", "SumNum", response.sum_num);
+  out += "  <RecordList Num=\"";
+  out += std::to_string(response.sum_num);
+  out += "\">\r\n";
+  for (const RecordItem& item : response.items) {
+    out += "    <Item>\r\n";
+    AppendElement(&out, "      ", "DeviceID", item.device_id);
+    if (!item.name.empty())
+      AppendElement(&out, "      ", "Name", item.name);
+    AppendElement(&out, "      ", "FilePath", item.file_path);
+    if (!item.address.empty())
+      AppendElement(&out, "      ", "Address", item.address);
+    AppendElement(&out, "      ", "StartTime", FormatGbTime(item.start_ms));
+    AppendElement(&out, "      ", "EndTime", FormatGbTime(item.end_ms));
+    AppendUintElement(&out, "      ", "Secrecy", static_cast<std::uint64_t>(item.secrecy));
+    AppendElement(&out, "      ", "Type", item.type);
+    AppendUintElement(&out, "      ", "FileSize", item.file_size);
+    out += "    </Item>\r\n";
+  }
+  out += "  </RecordList>\r\n";
+  out += "</Response>\r\n";
+  return out;
+}
+
+bool ParseRecordInfoResponse(std::string_view xml, RecordInfoResponse* response,
+                             std::string* error) {
+  XmlNode root;
+  if (!ParseXmlDocument(xml, &root, error))
+    return false;
+  if (!RequireRoot(root, "Response", error))
+    return false;
+  if (!RequireCmdType(root, ManscdpCommand::kRecordInfo, error))
+    return false;
+
+  RecordInfoResponse parsed;
+  if (!ParseRequiredUint(root, "SN", &parsed.sn, error))
+    return false;
+  parsed.device_id = root.ChildText("DeviceID");
+  parsed.name = root.ChildText("Name");
+  std::uint64_t sum = 0;
+  if (!ParseRequiredUint(root, "SumNum", &sum, error))
+    return false;
+  parsed.sum_num = static_cast<std::uint32_t>(sum);
+
+  const XmlNode* list = root.Child("RecordList");
+  if (list == nullptr) {
+    if (error != nullptr)
+      *error = "missing <RecordList>";
+    return false;
+  }
+  for (const XmlNode& node : list->children) {
+    if (node.name != "Item")
+      continue;
+    RecordItem item;
+    item.device_id = node.ChildText("DeviceID");
+    item.name = node.ChildText("Name");
+    item.file_path = node.ChildText("FilePath");
+    item.address = node.ChildText("Address");
+    if (!ParseOptionalTime(node, "StartTime", &item.start_ms, 0, error))
+      return false;
+    if (!ParseOptionalTime(node, "EndTime", &item.end_ms, 0, error))
+      return false;
+    if (!ParseOptionalInt(node, "Secrecy", 0, &item.secrecy, error))
+      return false;
+    if (!ParseRecordType(node.ChildText("Type"), &item.type, error))
+      return false;
+    const XmlNode* size = node.Child("FileSize");
+    if (size != nullptr && !TrimAscii(size->text).empty()) {
+      std::uint64_t bytes = 0;
+      if (!ParseUintText(size->text, &bytes, "FileSize", error))
+        return false;
+      item.file_size = bytes;
+    }
+    parsed.items.push_back(std::move(item));
+  }
+  if (parsed.items.size() != parsed.sum_num && error != nullptr) {
+    // SumNum is advisory in the standard, but a mismatch usually means a
+    // truncated response; report it without failing the parse.
+    *error = "SumNum does not match the number of <Item> elements";
+  }
+
+  if (response != nullptr)
+    *response = std::move(parsed);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Playback control
+// ---------------------------------------------------------------------------
+
+std::string BuildPlaybackControl(const PlaybackControl& control) {
+  std::string out(kXmlHeader);
+  out += "<Control>\r\n";
+  AppendElement(&out, "  ", "CmdType", "Playback");
+  AppendUintElement(&out, "  ", "SN", control.sn);
+  AppendElement(&out, "  ", "DeviceID", control.device_id);
+  char scale[32];
+  std::snprintf(scale, sizeof(scale), "%.2f", control.scale);
+  AppendElement(&out, "  ", "Scale", scale);
+  if (control.has_range) {
+    AppendElement(&out, "  ", "Range", FormatGbTime(control.range_start_ms) + "/" +
+                                        FormatGbTime(control.range_end_ms));
+  }
+  out += "</Control>\r\n";
+  return out;
+}
+
+bool ParsePlaybackControl(std::string_view xml, PlaybackControl* control, std::string* error) {
+  XmlNode root;
+  if (!ParseXmlDocument(xml, &root, error))
+    return false;
+  if (!RequireRoot(root, "Control", error))
+    return false;
+  if (!RequireCmdType(root, ManscdpCommand::kPlayback, error))
+    return false;
+
+  PlaybackControl parsed;
+  if (!ParseRequiredUint(root, "SN", &parsed.sn, error))
+    return false;
+  parsed.device_id = root.ChildText("DeviceID");
+
+  const XmlNode* scale_node = root.Child("Scale");
+  if (scale_node != nullptr && !TrimAscii(scale_node->text).empty()) {
+    const std::string text(TrimAscii(scale_node->text));
+    char* end = nullptr;
+    const double value = std::strtod(text.c_str(), &end);
+    if (end == nullptr || *end != '\0' || !std::isfinite(value) || std::fabs(value) > 16.0) {
+      if (error != nullptr)
+        *error = "invalid <Scale> value";
+      return false;
+    }
+    parsed.scale = value;
+    parsed.has_scale = true;
+  }
+
+  const XmlNode* range_node = root.Child("Range");
+  if (range_node != nullptr) {
+    const std::string_view range = TrimAscii(range_node->text);
+    if (!range.empty()) {
+      if (!ParseGbTimeRange(range, &parsed.range_start_ms, &parsed.range_end_ms, error))
+        return false;
+      if (parsed.range_end_ms != 0 && parsed.range_end_ms < parsed.range_start_ms) {
+        if (error != nullptr)
+          *error = "Range end is before its start";
+        return false;
+      }
+      parsed.has_range = true;
+    }
+  }
+
+  if (control != nullptr)
+    *control = std::move(parsed);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Keepalive
 // ---------------------------------------------------------------------------
 
@@ -1224,6 +1502,28 @@ void ManscdpResponder::set_status_source(StatusSource source) {
   status_source_ = std::move(source);
 }
 
+void ManscdpResponder::set_record_source(RecordSource source) {
+  record_source_ = std::move(source);
+}
+
+bool ManscdpResponder::BuildRecordInfo(const RecordInfoQuery& query,
+                                       std::string* response_body,
+                                       std::string* error) const {
+  if (!record_source_) {
+    if (error != nullptr)
+      *error = "RecordInfo was requested but no recording index is configured";
+    return false;
+  }
+  RecordInfoResponse response;
+  response.sn = query.sn;
+  response.device_id = query.device_id;
+  response.items = record_source_(query);
+  response.sum_num = static_cast<std::uint32_t>(response.items.size());
+  if (response_body != nullptr)
+    *response_body = BuildRecordInfoResponse(response);
+  return true;
+}
+
 CatalogMapResult ManscdpResponder::BuildCatalog() const {
   CatalogMapConfig config;
   config.device_id = config_.device_id;
@@ -1372,9 +1672,21 @@ bool ManscdpResponder::Handle(std::string_view body, std::string* response_body,
       *response_body = BuildDeviceStatusResponse(response);
     return true;
   }
+  case ManscdpCommand::kRecordInfo: {
+    RecordInfoQuery query;
+    if (!ParseRecordInfoQuery(body, &query, error))
+      return false;
+    return BuildRecordInfo(query, response_body, error);
+  }
   case ManscdpCommand::kKeepalive:
     // A keepalive travels device -> platform; the device does not answer it.
     return true;
+  case ManscdpCommand::kPlayback:
+    // Playback control arrives in a SIP INFO, not in a MESSAGE query; the
+    // media service handles it and answers the INFO directly.
+    if (error != nullptr)
+      *error = "Playback control must be sent in a SIP INFO";
+    return false;
   case ManscdpCommand::kAlarm:
   case ManscdpCommand::kUnknown:
     break;

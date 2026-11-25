@@ -334,10 +334,14 @@ if(UVNVR_ENABLE_GB28181)
   add_library(uvnvr_gb28181 STATIC
     src/gb28181/sip.cpp
     src/gb28181/manscdp.cpp
+    src/gb28181/time.cpp
     src/gb28181/ps.cpp
     src/gb28181/rtp.cpp
     src/gb28181/rtcp.cpp
     src/gb28181/media_session.cpp
+    src/gb28181/ts_ps.cpp
+    src/gb28181/playback.cpp
+    src/gb28181/service.cpp
   )
   target_include_directories(uvnvr_gb28181 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(uvnvr_gb28181 PUBLIC OpenSSL::Crypto ${UVP_UVCPP_TARGET})
@@ -352,6 +356,9 @@ if(UVNVR_ENABLE_GB28181)
     # need this as well, so it is PUBLIC.
     target_link_libraries(uvnvr_gb28181 PUBLIC ws2_32)
   endif()
+  # App wires the service only when UVNVR_ENABLE_GB28181 is on; with the
+  # default (OFF) the executable and its behaviour are unchanged.
+  target_link_libraries(uvnvr PRIVATE uvnvr_gb28181)
 
   add_executable(sip_reg_cli tools/sip_reg_cli/main.cpp)
   target_link_libraries(sip_reg_cli PRIVATE uvnvr_gb28181)

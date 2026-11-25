@@ -88,8 +88,10 @@ enum class ManscdpCommand {
   kCatalog,
   kDeviceInfo,
   kDeviceStatus,
+  kRecordInfo,
   kKeepalive,
   kAlarm,
+  kPlayback, // <Control><CmdType>Playback</CmdType> sent in a SIP INFO
 };
 
 std::string_view ManscdpCommandName(ManscdpCommand command);
@@ -213,6 +215,77 @@ bool ParseDeviceStatusResponse(std::string_view xml, DeviceStatusResponse* respo
                                std::string* error = nullptr);
 
 // ---------------------------------------------------------------------------
+// RecordInfo (录像查询)
+// ---------------------------------------------------------------------------
+
+// RecordInfo asks the device for the recording index of one device/channel in
+// a time range. `type` is one of "all", "time", "alarm" or "manual" (an empty
+// value is treated as "all").
+struct RecordInfoQuery {
+  std::uint64_t sn = 0;
+  std::string device_id;
+  std::int64_t start_ms = 0;
+  std::int64_t end_ms = 0;
+  std::string file_path;
+  std::string address;
+  int secrecy = 0;
+  std::string type = "all";
+};
+
+// One recording in a RecordInfo response. `type` uses the MANSCDP spelling
+// ("time", "alarm", "manual"), not the local database spelling
+// ("timed"/"event").
+struct RecordItem {
+  std::string device_id;
+  std::string name;
+  std::string file_path;
+  std::string address;
+  std::int64_t start_ms = 0;
+  std::int64_t end_ms = 0;
+  int secrecy = 0;
+  std::string type = "time";
+  std::uint64_t file_size = 0;
+};
+
+struct RecordInfoResponse {
+  std::uint64_t sn = 0;
+  std::string device_id;
+  std::string name;
+  std::uint32_t sum_num = 0;
+  std::vector<RecordItem> items;
+};
+
+std::string BuildRecordInfoQuery(const RecordInfoQuery& query);
+bool ParseRecordInfoQuery(std::string_view xml, RecordInfoQuery* query,
+                          std::string* error = nullptr);
+std::string BuildRecordInfoResponse(const RecordInfoResponse& response);
+bool ParseRecordInfoResponse(std::string_view xml, RecordInfoResponse* response,
+                             std::string* error = nullptr);
+
+// ---------------------------------------------------------------------------
+// Playback control (倍速 / 暂停 / 拖拽)
+// ---------------------------------------------------------------------------
+
+// The platform sends this document inside a SIP INFO to change an established
+// playback dialog. `scale` follows GB/T 28181: 0 pauses, positive values are
+// the forward rate (1.0 is real time). A negative scale would be reverse
+// playback; this implementation rejects it instead of silently playing
+// forward. An empty `range` leaves the current position alone.
+struct PlaybackControl {
+  std::uint64_t sn = 0;
+  std::string device_id;
+  double scale = 1.0;
+  bool has_scale = false;
+  std::int64_t range_start_ms = 0;
+  std::int64_t range_end_ms = 0;
+  bool has_range = false;
+};
+
+std::string BuildPlaybackControl(const PlaybackControl& control);
+bool ParsePlaybackControl(std::string_view xml, PlaybackControl* control,
+                          std::string* error = nullptr);
+
+// ---------------------------------------------------------------------------
 // Keepalive
 // ---------------------------------------------------------------------------
 
@@ -314,12 +387,17 @@ public:
   using GroupSource = std::function<std::vector<CatalogGroup>()>;
   using ChannelSource = std::function<std::vector<CatalogChannel>()>;
   using StatusSource = std::function<DeviceStatus()>;
+  // Receives a parsed RecordInfo query and returns the matching index rows.
+  // It is called on the SIP event-loop thread, so it must not block for long;
+  // the service implementation performs a bounded SQLite query.
+  using RecordSource = std::function<std::vector<RecordItem>(const RecordInfoQuery&)>;
 
   explicit ManscdpResponder(ManscdpDeviceConfig config);
 
   void set_group_source(GroupSource source);
   void set_channel_source(ChannelSource source);
   void set_status_source(StatusSource source);
+  void set_record_source(RecordSource source);
 
   // Returns true when `body` is a recognised MANSCDP command. `response_body`
   // is empty for Keepalive notifications, which the device does not answer.
@@ -338,10 +416,14 @@ private:
   DeviceInfo BuildDeviceInfo() const;
   DeviceStatus BuildDeviceStatus() const;
 
+  bool BuildRecordInfo(const RecordInfoQuery& query, std::string* response_body,
+                       std::string* error) const;
+
   ManscdpDeviceConfig config_;
   GroupSource group_source_;
   ChannelSource channel_source_;
   StatusSource status_source_;
+  RecordSource record_source_;
 };
 
 // Current local time in the DeviceStatus form. Exposed for tests and for

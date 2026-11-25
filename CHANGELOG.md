@@ -8,6 +8,17 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB/T 28181 录像查询与回放 (opt-in, P6.2d).** `RecordInfo` answers from the
+  local `recordings` index (including active `.part` segments) with the
+  channel's 20-digit identifier, time range and MANSCDP record type. Playback
+  INVITEs carrying `s=Playback` and `u=<channel>:<start>:<end>` are answered
+  with an RTP/PS dialog; SIP INFO `Control/Playback` implements `Scale`
+  (forward speed, `0` pause) and `Range` seek. Live preview and playback share
+  the same TS demuxer, PS muxer and RTP session path. Still behind
+  `-DUVNVR_ENABLE_GB28181=ON` (default off) and only started when
+  `gb28181.enabled=1`; existing preview/recording/ONVIF paths are unchanged.
+  See `docs/gb28181-playback.md`; the platform-side check is
+  `tests/integration/gb28181_record_playback.py`.
 - **GB/T 28181 MANSCDP codec and channel catalog (opt-in, P6.2b).** Catalog,
   DeviceInfo, DeviceStatus and Keepalive XML encoding/decoding, 20-digit
   identifier generation and validation, and a mapping from the local channels

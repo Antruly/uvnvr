@@ -53,4 +53,8 @@ if(UVNVR_GB28181_ENABLED)
   add_executable(gb28181_media_session_test gb28181_media_session_test.cpp)
   target_link_libraries(gb28181_media_session_test PRIVATE uvnvr_gb28181)
   add_test(NAME gb28181_media_session COMMAND gb28181_media_session_test)
+
+  add_executable(gb28181_record_playback_test gb28181_record_playback_test.cpp)
+  target_link_libraries(gb28181_record_playback_test PRIVATE uvnvr_gb28181)
+  add_test(NAME gb28181_record_playback COMMAND gb28181_record_playback_test)
 endif()
