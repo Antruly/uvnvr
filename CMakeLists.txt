@@ -390,9 +390,11 @@ else()
   message(STATUS "gb28181: disabled by UVNVR_ENABLE_GB28181=OFF")
 endif()
 
-# GB 35114 A-level module: SM3 access-unit digests and SM2 device signatures,
-# plus the standalone gb35114_verify tool. It is not linked into the server, so
-# the existing preview/recording/RTSP paths are unchanged when it is enabled.
+# GB 35114 module: SM3 access-unit digests and SM2 device signatures, SM2/SM3
+# signature negotiation and SM2-encrypted VKEK distribution with rotation and
+# replay protection. It is a standalone library and is not linked into the
+# server, so enabling it does not change the existing
+# preview/recording/RTSP/ONVIF/private-protocol paths.
 set(UVNVR_GB35114_ENABLED 0)
 if(UVNVR_ENABLE_GB35114)
   if(NOT UVNVR_GM_CRYPTO_ENABLED)
@@ -402,6 +404,7 @@ if(UVNVR_ENABLE_GB35114)
     set(UVNVR_GB35114_ENABLED 1)
     add_library(uvnvr_gb35114 STATIC
       src/gb35114/sign.cpp
+      src/gb35114/vkek.cpp
     )
     target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
@@ -417,7 +420,7 @@ if(UVNVR_ENABLE_GB35114)
     set_target_properties(gb35114_verify PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     install(TARGETS gb35114_verify RUNTIME DESTINATION bin)
-    message(STATUS "gb35114: enabled (A-level signing + gb35114_verify)")
+    message(STATUS "gb35114: enabled (A-level signing + VKEK negotiation + gb35114_verify)")
   endif()
 else()
   message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")

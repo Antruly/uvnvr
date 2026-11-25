@@ -85,4 +85,8 @@ if(UVNVR_GB35114_ENABLED)
   add_executable(gb35114_sign_test gb35114_sign_test.cpp)
   target_link_libraries(gb35114_sign_test PRIVATE uvnvr_gb35114)
   add_test(NAME gb35114_sign COMMAND gb35114_sign_test)
+
+  add_executable(gb35114_vkek_test gb35114_vkek_test.cpp)
+  target_link_libraries(gb35114_vkek_test PRIVATE uvnvr_gb35114)
+  add_test(NAME gb35114_vkek COMMAND gb35114_vkek_test)
 endif()
