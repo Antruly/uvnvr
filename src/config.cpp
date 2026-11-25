@@ -5,13 +5,40 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <iterator>
 #include <set>
 #include <string>
+#include <string_view>
 
 namespace uvnvr {
 namespace {
 
 using json = nlohmann::json;
+
+// Records keys the parser does not know. `prefix` is the dotted path of the
+// containing object ("" for the root), so "http" + "prot" becomes "http.prot".
+void CollectUnknownKeys(const json& object, std::string_view prefix,
+                        std::initializer_list<std::string_view> known,
+                        ConfigLoadReport* report) {
+  if (report == nullptr || !object.is_object())
+    return;
+  for (auto it = object.begin(); it != object.end(); ++it) {
+    bool recognized = false;
+    for (const std::string_view key : known) {
+      if (std::string_view(it.key()) == key) {
+        recognized = true;
+        break;
+      }
+    }
+    if (recognized)
+      continue;
+    if (prefix.empty())
+      report->unknown_keys.push_back(it.key());
+    else
+      report->unknown_keys.push_back(std::string(prefix) + "." + it.key());
+  }
+}
 
 bool ReadString(const json& object, const char* key, std::string* target, std::string* error) {
   const auto it = object.find(key);
@@ -90,11 +117,22 @@ std::vector<std::string> DefaultConfigCandidates() {
   return unique;
 }
 
-bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
+bool ApplyConfigJson(const json& document, Config* config, std::string* error,
+                     ConfigLoadReport* report) {
   if (!document.is_object()) {
     *error = "the configuration root must be a JSON object";
     return false;
   }
+
+  // `config` is what ConfigToJson emits for diagnostics, so a --print-config
+  // document can be fed back without a spurious unknown-key warning.
+  CollectUnknownKeys(document, "",
+                     {"port", "rtspPort", "privatePort", "privateTcpEnabled",
+                      "privateQuicEnabled", "dataDir", "host", "ffmpegPath", "logLevel",
+                      "cacheMb", "readaheadMb", "maintenance", "tlsSelfSigned", "tlsCert",
+                      "tlsKey", "tls", "http", "rtsp", "private", "ffmpeg", "logging",
+                      "storage", "config"},
+                     report);
 
   // Flat aliases keep hand-written configs short; the nested form below wins
   // when both are present.
@@ -116,19 +154,26 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
     return false;
   }
 
-  if (const auto tls = document.find("tls"); tls != document.end() && !ReadTls(*tls, config, error))
-    return false;
+  if (const auto tls = document.find("tls"); tls != document.end()) {
+    CollectUnknownKeys(*tls, "tls", {"cert", "key", "selfSigned"}, report);
+    if (!ReadTls(*tls, config, error))
+      return false;
+  }
 
   if (const auto http = document.find("http"); http != document.end()) {
     if (!http->is_object()) {
       *error = "http must be an object";
       return false;
     }
+    CollectUnknownKeys(*http, "http", {"port", "host", "tls"}, report);
     if (!ReadInt(*http, "port", &config->port, error) ||
         !ReadString(*http, "host", &config->host, error))
       return false;
-    if (const auto tls = http->find("tls"); tls != http->end() && !ReadTls(*tls, config, error))
-      return false;
+    if (const auto tls = http->find("tls"); tls != http->end()) {
+      CollectUnknownKeys(*tls, "http.tls", {"cert", "key", "selfSigned"}, report);
+      if (!ReadTls(*tls, config, error))
+        return false;
+    }
   }
 
   if (const auto rtsp = document.find("rtsp"); rtsp != document.end()) {
@@ -136,6 +181,7 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       *error = "rtsp must be an object";
       return false;
     }
+    CollectUnknownKeys(*rtsp, "rtsp", {"port"}, report);
     if (!ReadInt(*rtsp, "port", &config->rtsp_port, error))
       return false;
   }
@@ -147,6 +193,7 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       *error = "private must be an object";
       return false;
     }
+    CollectUnknownKeys(*private_section, "private", {"port", "tcp", "quic"}, report);
     if (!ReadInt(*private_section, "port", &config->private_port, error) ||
         !ReadBool(*private_section, "tcp", &config->private_tcp_enabled, error) ||
         !ReadBool(*private_section, "quic", &config->private_quic_enabled, error))
@@ -157,6 +204,7 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
     if (ffmpeg->is_string()) {
       config->ffmpeg_path = ffmpeg->get<std::string>();
     } else if (ffmpeg->is_object()) {
+      CollectUnknownKeys(*ffmpeg, "ffmpeg", {"path"}, report);
       if (!ReadString(*ffmpeg, "path", &config->ffmpeg_path, error))
         return false;
     } else {
@@ -170,6 +218,7 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       *error = "logging must be an object";
       return false;
     }
+    CollectUnknownKeys(*logging, "logging", {"level"}, report);
     if (!ReadString(*logging, "level", &config->log_level, error))
       return false;
   }
@@ -179,32 +228,49 @@ bool ApplyConfigJson(const json& document, Config* config, std::string* error) {
       *error = "storage must be an object";
       return false;
     }
+    CollectUnknownKeys(*storage, "storage", {"cacheMb", "readaheadMb"}, report);
     if (!ReadInt(*storage, "cacheMb", &config->cache_mb, error) ||
         !ReadInt(*storage, "readaheadMb", &config->readahead_mb, error))
       return false;
   }
 
+  if (const auto diagnostics = document.find("config"); diagnostics != document.end())
+    CollectUnknownKeys(*diagnostics, "config", {"path", "loaded"}, report);
+
   return true;
 }
 
-bool LoadConfigFile(const std::string& path, Config* config, std::string* error) {
-  std::ifstream input(path);
-  if (!input) {
-    if (error != nullptr)
-      *error = "cannot open configuration file " + path;
-    return false;
-  }
-  const json document = json::parse(input, nullptr, false);
+bool LoadConfigText(std::string_view contents, const std::string& path, Config* config,
+                    std::string* error, ConfigLoadReport* report) {
+  const json document = json::parse(contents.begin(), contents.end(), nullptr, false);
   if (document.is_discarded()) {
     if (error != nullptr)
       *error = "invalid JSON in configuration file " + path;
     return false;
   }
-  if (!ApplyConfigJson(document, config, error))
+  if (!ApplyConfigJson(document, config, error, report))
     return false;
   config->config_path = path;
   config->config_loaded = true;
   return true;
+}
+
+bool LoadConfigFile(const std::string& path, Config* config, std::string* error,
+                    ConfigLoadReport* report) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (error != nullptr)
+      *error = "cannot open configuration file " + path;
+    return false;
+  }
+  std::string contents((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    if (error != nullptr)
+      *error = "cannot read configuration file " + path;
+    return false;
+  }
+  return LoadConfigText(contents, path, config, error, report);
 }
 
 bool ValidateConfig(const Config& config, std::string* error) {

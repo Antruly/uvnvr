@@ -97,7 +97,8 @@ Flat aliases are accepted for hand-written files: `port`, `rtspPort`,
 `privatePort`, `privateTcpEnabled`, `privateQuicEnabled`, `dataDir`, `host`,
 `ffmpegPath`, `logLevel`, `maintenance`, `tlsCert`, `tlsKey` and
 `tlsSelfSigned`. The nested form wins when both are present. Unknown keys are
-ignored.
+ignored; builds with `UVNVR_ENABLE_CONFIG_INTEGRITY` also print a warning for
+each one.
 
 ## Environment variables
 
@@ -147,3 +148,47 @@ The service refuses to start (and `--print-config` exits non-zero) when:
 - only one of `tls.cert` / `tls.key` is set;
 - `logging.level` is not one of the accepted values;
 - the JSON is invalid or a value has the wrong type.
+
+## Configuration integrity (optional)
+
+Builds configured with `-DUVNVR_ENABLE_CONFIG_INTEGRITY=ON` can verify an SM3
+digest, or an SM2-signed digest, over the exact bytes of the configuration
+file before the service uses it. The option is off by default and requires the
+GM crypto library (`UVNVR_ENABLE_GM_CRYPTO`, enabled when OpenSSL 3 is found).
+
+A sidecar manifest defaults to `<config>.sm3` (for example
+`/etc/uvnvr/uvnvr.json.sm3`). Generate it on the machine that holds the
+signing key, then copy it next to the configuration file:
+
+```bash
+# Digest only (detects accidental or unauthorised edits)
+uvnvr --config /etc/uvnvr/uvnvr.json --write-config-digest
+
+# SM2 signed (also proves the digest came from the key holder)
+uvnvr --config /etc/uvnvr/uvnvr.json --sign-config release-key.pem
+
+# Verify at any time; exit 0 = ok, 1 = mismatch, 2 = cannot verify
+uvnvr --config /etc/uvnvr/uvnvr.json \
+      --config-public-key release-pub.pem --verify-config
+```
+
+At startup the mode is `warn` by default: a missing or mismatching manifest is
+reported on stderr and the service continues. Set `--config-integrity enforce`
+(or `UVNVR_CONFIG_INTEGRITY=enforce`) to refuse to start instead. With a signed
+manifest, supply the public key or certificate through `--config-public-key`
+or `UVNVR_CONFIG_PUBLIC_KEY`; a configured public key also rejects unsigned
+manifests so a signed deployment cannot be downgraded to digest-only.
+
+| Option / variable | Meaning |
+| --- | --- |
+| `--config-integrity` / `UVNVR_CONFIG_INTEGRITY` | `off`, `warn` (default) or `enforce` |
+| `--config-manifest` / `UVNVR_CONFIG_MANIFEST` | Manifest path; default `<config>.sm3` |
+| `--config-public-key` / `UVNVR_CONFIG_PUBLIC_KEY` | SM2 public key or PEM certificate |
+
+The digest covers the file byte-for-byte: reformatting it (even without a
+semantic change) requires regenerating the manifest. A digest-only manifest
+detects edits but is not proof against an attacker who can rewrite both files;
+use `--sign-config` and keep the private key off the device when that threat is
+in scope. In the same builds, keys that the parser does not recognise are
+reported as `configuration warning: unknown key "..." (ignored)`; unknown keys
+were already ignored before, the warning only makes a typo visible.

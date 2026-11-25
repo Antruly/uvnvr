@@ -25,3 +25,16 @@ if(UVNVR_SECURE_ENABLED)
   target_link_libraries(secure_test PRIVATE uvnvr_secure)
   add_test(NAME secure COMMAND secure_test)
 endif()
+
+if(UVNVR_CONFIG_INTEGRITY_ENABLED)
+  # config.cpp/platform.cpp are included so the unknown-key report is covered
+  # against the real parser, not a copy of the key list.
+  add_executable(config_integrity_test
+    config_integrity_test.cpp
+    "${CMAKE_SOURCE_DIR}/src/config.cpp"
+    "${CMAKE_SOURCE_DIR}/src/platform.cpp"
+  )
+  target_include_directories(config_integrity_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(config_integrity_test PRIVATE uvnvr_config_integrity)
+  add_test(NAME config_integrity COMMAND config_integrity_test)
+endif()
