@@ -33,4 +33,12 @@ if(UVNVR_GB28181_ENABLED)
     set_property(TARGET sip_test APPEND PROPERTY BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
   endif()
   add_test(NAME sip COMMAND sip_test)
+
+  add_executable(gb28181_manscdp_test gb28181_manscdp_test.cpp)
+  target_link_libraries(gb28181_manscdp_test PRIVATE uvnvr_gb28181)
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET gb28181_manscdp_test APPEND PROPERTY
+                 BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+  add_test(NAME gb28181_manscdp COMMAND gb28181_manscdp_test)
 endif()

@@ -2234,9 +2234,16 @@ struct SipUserAgent::Impl {
     if (message.method == SipMethod::kOptions) {
       SendSimpleResponse(message, 200, "OK");
       Event("answered inbound OPTIONS with 200 OK");
+    } else if (message.method == SipMethod::kMessage) {
+      // Acknowledge first: MANSCDP answers travel in a separate MESSAGE
+      // request, built by the callback through SendMessage().
+      SendSimpleResponse(message, 200, "OK");
+      Event("answered inbound MESSAGE with 200 OK");
+      if (callbacks.on_message)
+        callbacks.on_message(message);
     } else {
       Event("ignoring inbound " + std::string(SipMethodName(message.method)) +
-            " (MANSCDP command handling is not part of the SIP stack stage)");
+            " (INVITE/BYE handling is not part of this stage)");
     }
   }
 
@@ -2522,6 +2529,57 @@ struct SipUserAgent::Impl {
     Event("keepalive sent (SN=" + std::to_string(sn) + ")");
   }
 
+  bool SendMessage(std::string body, const std::string& content_type, std::string* error) {
+    if (!running) {
+      if (error)
+        *error = "SIP user agent is stopped";
+      return false;
+    }
+    if (!transport || !transport->connected()) {
+      if (error)
+        *error = "cannot send MESSAGE: transport is not connected";
+      return false;
+    }
+    UpdateLocalAddress();
+    EnsureIdentity();
+
+    SipUri registrar_uri;
+    std::string error_text;
+    if (!ParseSipUri(registrar, &registrar_uri, &error_text)) {
+      if (error)
+        *error = "invalid registrar URI: " + error_text;
+      return false;
+    }
+    const std::string to_uri = config.server_id.empty() ? MakeUri("", domain)
+                                                        : MakeUri(config.server_id, domain);
+    ++cseq;
+    SipMessage request;
+    request.is_request = true;
+    request.method = SipMethod::kMessage;
+    request.request_uri = registrar_uri;
+    request.AddHeader("Via", "SIP/2.0/" + TransportName() + " " +
+                                 FormatHostPort(local_ip, local_port) + ";rport;branch=z9hG4bK" +
+                                 RandomHex(16));
+    request.AddHeader("From", "<" + MakeUri(config.username, domain) + ">;tag=" + from_tag);
+    request.AddHeader("To", "<" + to_uri + ">");
+    request.AddHeader("Call-ID", call_id);
+    request.AddHeader("CSeq", std::to_string(cseq) + " MESSAGE");
+    request.AddHeader("Max-Forwards", "70");
+    request.AddHeader("User-Agent", "UvNVR-GB28181/0.1");
+    request.AddHeader("Content-Type", content_type);
+    request.body = std::move(body);
+    if (!AddAuthorization(&request, "MESSAGE", FormatSipUri(registrar_uri), &error_text)) {
+      if (error)
+        *error = "cannot build MESSAGE Digest Authorization: " + error_text;
+      return false;
+    }
+    if (!Emit(request.Serialize(), error))
+      return false;
+    Event("MESSAGE sent (CSeq " + std::to_string(cseq) + ", " +
+          std::to_string(request.body.size()) + " body bytes)");
+    return true;
+  }
+
   bool Emit(std::string raw, std::string* error) {
     ++sent_messages;
     if (callbacks.on_outbound)
@@ -2790,6 +2848,11 @@ bool SipUserAgent::Start(std::string* error) {
 
 void SipUserAgent::Stop() {
   impl_->Stop();
+}
+
+bool SipUserAgent::SendMessage(std::string body, std::string content_type,
+                               std::string* error) {
+  return impl_->SendMessage(std::move(body), content_type, error);
 }
 
 SipRegistrationState SipUserAgent::state() const {

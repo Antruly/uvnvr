@@ -321,14 +321,18 @@ else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
 endif()
 
-# GB/T 28181 SIP user agent: registration, Digest authentication, keepalive
-# and reconnect backoff. The SIP stack is self-hosted (no GPL/LGPL eXosip2),
-# and the module is not linked into the server yet, so enabling it cannot
-# change the existing preview/recording/ONVIF paths.
+# GB/T 28181 SIP user agent and MANSCDP codec: registration, Digest
+# authentication, keepalive, reconnect backoff, catalog/device XML and
+# MESSAGE dispatch. The SIP stack is self-hosted (no GPL/LGPL eXosip2), and the
+# module is not linked into the server yet, so enabling it cannot change the
+# existing preview/recording/ONVIF paths.
 set(UVNVR_GB28181_ENABLED 0)
 if(UVNVR_ENABLE_GB28181)
   set(UVNVR_GB28181_ENABLED 1)
-  add_library(uvnvr_gb28181 STATIC src/gb28181/sip.cpp)
+  add_library(uvnvr_gb28181 STATIC
+    src/gb28181/sip.cpp
+    src/gb28181/manscdp.cpp
+  )
   target_include_directories(uvnvr_gb28181 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(uvnvr_gb28181 PUBLIC OpenSSL::Crypto ${UVP_UVCPP_TARGET})
   target_compile_definitions(uvnvr_gb28181 PUBLIC UVNVR_ENABLE_GB28181=1)

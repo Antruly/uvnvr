@@ -8,6 +8,14 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **GB/T 28181 MANSCDP codec and channel catalog (opt-in, P6.2b).** Catalog,
+  DeviceInfo, DeviceStatus and Keepalive XML encoding/decoding, 20-digit
+  identifier generation and validation, and a mapping from the local channels
+  and channel groups to catalog items with `ParentID`. `ManscdpResponder`
+  answers inbound queries, and the SIP user agent now dispatches inbound
+  MESSAGE requests to a callback and can send the response MESSAGE back. Still
+  compiled only with `-DUVNVR_ENABLE_GB28181=ON`; default deployments are
+  unchanged. See `docs/gb28181-manscdp.md`.
 - **GB/T 28181 SIP user agent (opt-in, P6.2a).** A self-hosted SIP stack for
   the lower-device role: UDP/TCP transport on libuvcpp, REGISTER with Digest
   authentication and 401/407 retry, Expires refresh, MANSCDP-style Keepalive
