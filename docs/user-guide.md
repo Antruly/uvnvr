@@ -398,7 +398,8 @@ Open **Users**.
   storage, alerts, users, logs, system and maintenance.
 - API permissions cover `api.access`, `api.snapshot`, `api.stream`,
   `api.download`, `api.alerts` and `rtsp.access`.
-- Disabling a user invalidates their sessions at the next request.
+- Changing a user's password or role, or disabling the user, invalidates their
+  Web sessions and API tokens at the next request.
 
 Lockout defaults, all configurable in **System**:
 

@@ -287,7 +287,7 @@ RTSP 支持 Basic 与 Digest 鉴权（MD5、`qop=auth`），输出 H.264/H.265 �
 - 用户属于某个角色。内置 admin、operator、viewer；自定义角色可逐项勾选 Web 与 API 权限。
 - Web 权限覆盖仪表盘、预览、回放、下载、通道、计划、存储、预警、用户、日志、系统、运维。
 - API 权限覆盖 `api.access`、`api.snapshot`、`api.stream`、`api.download`、`api.alerts`、`rtsp.access`。
-- 禁用用户后，其会话在下一次请求时失效。
+- 修改用户口令或角色、禁用用户后，其 Web 会话与 API Token 在下一次请求时失效。
 
 锁定策略默认值（均可在 **系统设置** 修改）：
 

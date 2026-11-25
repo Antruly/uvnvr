@@ -1,5 +1,17 @@
 # Unit and integration tests.
 
+add_executable(session_revocation_test
+  session_revocation_test.cpp
+  "${CMAKE_SOURCE_DIR}/src/auth/session_revocation.cpp"
+)
+target_include_directories(session_revocation_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(session_revocation_test PRIVATE ${UVP_UVCPP_TARGET})
+if(UVNVR_LIBUVCPP_ROOT AND NOT WIN32)
+  set_target_properties(session_revocation_test PROPERTIES
+    BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+endif()
+add_test(NAME session_revocation COMMAND session_revocation_test)
+
 add_executable(ai_plate_post_test
   ai_plate_post_test.cpp
   "${CMAKE_SOURCE_DIR}/src/ai/plate_post.cpp"

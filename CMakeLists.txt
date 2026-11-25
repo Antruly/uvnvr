@@ -211,6 +211,7 @@ endforeach()
 add_executable(uvnvr
   src/main.cpp
   src/app.cpp
+  src/auth/session_revocation.cpp
   src/brand_http.cpp
   src/config.cpp
   src/detect.cpp

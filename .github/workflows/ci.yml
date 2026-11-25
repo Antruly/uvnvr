@@ -77,6 +77,9 @@ jobs:
       - name: M1 integration test
         run: bash tests/integration/m1_auth.sh ./build/uvnvr 18090
 
+      - name: Session revocation integration test
+        run: bash tests/integration/session_revocation.sh ./build/uvnvr 18110
+
       - name: Configuration integration test
         run: bash tests/integration/config.sh ./build/uvnvr 18200
 
