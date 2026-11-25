@@ -6,6 +6,7 @@
 | [`development-plan.md`](development-plan.md) | Architecture, technology choices, milestones, release plan |
 | [`uvp.md`](uvp.md) | How uvp-agents 0.4.0 was used to scaffold and verify the project |
 | [`architecture.md`](architecture.md) | Living architecture notes (expanded with the media core) |
+| [`secure-module.md`](secure-module.md) | Audit hash chain, firmware signatures and SM4 data-at-rest encryption |
 | [`api.md`](api.md) | REST/WebSocket/RTSP API reference (M4) |
 | [`deployment.md`](deployment.md) | Installation and operations guide (M5) |
 | [`configuration.md`](configuration.md) | Startup JSON file, ports, precedence and validation (0.2.0) |

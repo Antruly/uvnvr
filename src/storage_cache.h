@@ -43,6 +43,11 @@ public:
   Stats GetStats() const;
   void SetCapacity(size_t capacity_bytes);
 
+  // Optional key for ".enc" recording segments. Blocks are cached after
+  // decryption, so every reader shares the plaintext. An empty key disables
+  // decryption (and plaintext recordings are read normally either way).
+  void SetAtRestKey(std::vector<unsigned char> key);
+
 private:
   using Block = std::shared_ptr<std::vector<uint8_t>>;
   using Key = std::string;
@@ -54,6 +59,7 @@ private:
   void Insert(const Key& key, const Block& block);
 
   mutable std::mutex mutex_;
+  std::vector<unsigned char> at_rest_key_;
   size_t capacity_bytes_;
   size_t block_size_;
   size_t cached_bytes_ = 0;

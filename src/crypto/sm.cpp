@@ -2,7 +2,10 @@
 
 #include "crypto/crypto_internal.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <limits>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <utility>
@@ -285,6 +288,93 @@ bool Sm4CbcDecrypt(const Bytes& key, const Bytes& iv, const Bytes& ciphertext, B
   }
   result.resize(static_cast<std::size_t>(total));
   *plaintext = std::move(result);
+  return true;
+}
+
+namespace {
+
+void AdvanceCounter(unsigned char counter[kSm4BlockSize], std::uint64_t blocks) {
+  std::uint64_t high = 0;
+  std::uint64_t low = 0;
+  for (int i = 0; i < 8; ++i)
+    high = (high << 8) | counter[i];
+  for (int i = 8; i < 16; ++i)
+    low = (low << 8) | counter[i];
+  const std::uint64_t previous = low;
+  low += blocks;
+  if (low < previous)
+    ++high;
+  for (int i = 7; i >= 0; --i) {
+    counter[i] = static_cast<unsigned char>(high & 0xFF);
+    high >>= 8;
+  }
+  for (int i = 15; i >= 8; --i) {
+    counter[i] = static_cast<unsigned char>(low & 0xFF);
+    low >>= 8;
+  }
+}
+
+} // namespace
+
+bool Sm4CtrCrypt(const Bytes& key, const Bytes& iv, std::uint64_t offset, const Bytes& input,
+                 Bytes* output, std::string* error) {
+  if (!output) {
+    SetError(error, "SM4-CTR output is null");
+    return false;
+  }
+  if (!CheckSm4Inputs(key, iv, "CTR operation", error))
+    return false;
+  output->assign(input.size(), 0);
+  if (input.empty())
+    return true;
+
+  unsigned char counter[kSm4BlockSize];
+  std::memcpy(counter, iv.data(), kSm4BlockSize);
+  AdvanceCounter(counter, offset / kSm4BlockSize);
+  const std::size_t intra = static_cast<std::size_t>(offset % kSm4BlockSize);
+
+  internal::CipherCtxPtr context(EVP_CIPHER_CTX_new());
+  if (!context) {
+    SetError(error, "cannot allocate an SM4-CTR context");
+    return false;
+  }
+  if (EVP_EncryptInit_ex(context.get(), EVP_sm4_ctr(), nullptr, key.data(), counter) != 1) {
+    SetError(error, "cannot initialise SM4-CTR: " + internal::OpenSslErrors());
+    return false;
+  }
+
+  std::size_t processed = 0;
+  if (intra != 0) {
+    // Generate one keystream block and use the tail of it, so the bulk update
+    // starts at a block boundary of the already advanced counter.
+    unsigned char keystream[kSm4BlockSize] = {0};
+    int written = 0;
+    if (EVP_EncryptUpdate(context.get(), keystream, &written, keystream, kSm4BlockSize) != 1 ||
+        written != static_cast<int>(kSm4BlockSize)) {
+      SetError(error, "cannot generate the SM4-CTR keystream: " + internal::OpenSslErrors());
+      return false;
+    }
+    const std::size_t take =
+        std::min<std::size_t>(kSm4BlockSize - intra, input.size());
+    for (std::size_t i = 0; i < take; ++i)
+      (*output)[i] = static_cast<unsigned char>(input[i] ^ keystream[intra + i]);
+    processed = take;
+  }
+
+  if (processed < input.size()) {
+    const std::size_t remaining = input.size() - processed;
+    if (remaining > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      SetError(error, "SM4-CTR input is too large for one call");
+      return false;
+    }
+    int written = 0;
+    if (EVP_EncryptUpdate(context.get(), output->data() + processed, &written,
+                          input.data() + processed, static_cast<int>(remaining)) != 1 ||
+        written != static_cast<int>(remaining)) {
+      SetError(error, "SM4-CTR operation failed: " + internal::OpenSslErrors());
+      return false;
+    }
+  }
   return true;
 }
 

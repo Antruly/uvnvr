@@ -1,5 +1,9 @@
 #include "playback.h"
 
+#ifdef UVNVR_ENABLE_SECURE
+#include "secure/storage_crypto.h"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -60,8 +64,13 @@ bool IsKeyframePacket(const uint8_t* packet) {
 
 // Finds a keyframe near `approximate`, aligned to TS packets. Returns 0 when
 // no suitable packet is found close by, so the caller starts at the segment
-// boundary (which is keyframe-aligned by construction).
-int64_t FindKeyframeOffset(std::ifstream& file, int64_t approximate, int64_t file_size) {
+// boundary (which is keyframe-aligned by construction). Encrypted segments are
+// decrypted window by window at the same byte offset.
+int64_t FindKeyframeOffset(const std::string& path, int64_t approximate, int64_t file_size,
+                           const std::vector<unsigned char>& at_rest_key) {
+#ifndef UVNVR_ENABLE_SECURE
+  (void)at_rest_key;
+#endif
   if (approximate <= 0 || file_size <= 0)
     return 0;
   int64_t offset = approximate - approximate % kTsPacket;
@@ -69,15 +78,30 @@ int64_t FindKeyframeOffset(std::ifstream& file, int64_t approximate, int64_t fil
     offset = 0;
   if (offset >= file_size)
     return 0;
+  std::ifstream file(path, std::ios::binary);
+  if (!file)
+    return 0;
   file.clear();
   file.seekg(offset);
   std::vector<uint8_t> window(static_cast<size_t>(kTsPacket) * 2048);
   int64_t scanned = 0;
   while (file && scanned < kKeyframeScanLimit) {
     file.read(reinterpret_cast<char*>(window.data()), static_cast<std::streamsize>(window.size()));
-    const std::streamsize got = file.gcount();
+    std::streamsize got = file.gcount();
     if (got < kTsPacket)
       break;
+#ifdef UVNVR_ENABLE_SECURE
+    if (!at_rest_key.empty() && secure::IsEncryptedRecordingPath(path)) {
+      gm::Bytes ciphertext(window.begin(), window.begin() + got);
+      gm::Bytes plaintext;
+      std::string error;
+      if (!secure::DecryptRecordingRange(at_rest_key, path, static_cast<uint64_t>(offset),
+                                         ciphertext, &plaintext, &error)) {
+        return 0;
+      }
+      std::copy(plaintext.begin(), plaintext.end(), window.begin());
+    }
+#endif
     const size_t packets = static_cast<size_t>(got) / static_cast<size_t>(kTsPacket);
     for (size_t index = 0; index < packets; ++index) {
       const uint8_t* packet = window.data() + index * static_cast<size_t>(kTsPacket);
@@ -107,6 +131,7 @@ struct PlaybackService::Impl {
     BlockCache* cache = nullptr;
     size_t readahead_bytes = 0;
     ActiveFn active_provider;
+    std::vector<unsigned char> at_rest_key;
 
     void Post(const std::vector<uint8_t>& bytes) {
       auto copy = std::make_shared<std::vector<uint8_t>>(bytes);
@@ -137,13 +162,11 @@ struct PlaybackService::Impl {
         const double fraction = std::clamp(
             static_cast<double>(start_ms - segment.start_ms) / static_cast<double>(elapsed), 0.0,
             1.0);
-        std::ifstream scan_file(segment.part_path, std::ios::binary);
-        if (scan_file) {
-          const int64_t approximate = static_cast<int64_t>(fraction * initial_size);
-          const int64_t keyframe =
-              FindKeyframeOffset(scan_file, approximate, static_cast<int64_t>(initial_size));
-          offset = static_cast<uint64_t>(std::max<int64_t>(0, keyframe));
-        }
+        const int64_t approximate = static_cast<int64_t>(fraction * initial_size);
+        const int64_t keyframe =
+            FindKeyframeOffset(segment.part_path, approximate, static_cast<int64_t>(initial_size),
+                               at_rest_key);
+        offset = static_cast<uint64_t>(std::max<int64_t>(0, keyframe));
       }
       bool was_partial = true;
       while (alive.load()) {
@@ -167,6 +190,18 @@ struct PlaybackService::Impl {
           if (got == 0)
             break;
           buffer.resize(got);
+#ifdef UVNVR_ENABLE_SECURE
+          if (!at_rest_key.empty() && secure::IsEncryptedRecordingPath(path)) {
+            gm::Bytes ciphertext(buffer.begin(), buffer.end());
+            gm::Bytes plaintext;
+            std::string decrypt_error;
+            if (!secure::DecryptRecordingRange(at_rest_key, path, offset, ciphertext, &plaintext,
+                                               &decrypt_error)) {
+              break;
+            }
+            buffer.assign(plaintext.begin(), plaintext.end());
+          }
+#endif
           Post(buffer);
           offset += got;
           const int64_t elapsed = std::max<int64_t>(1, NowMs() - segment.start_ms);
@@ -238,18 +273,15 @@ struct PlaybackService::Impl {
         int64_t offset = 0;
         int64_t read_start_ms = segment_start;
         if (row == 0 && start_ms > segment_start && file_size > 0) {
-          std::ifstream scan_file(path, std::ios::binary);
-          if (scan_file) {
-            const double fraction = std::clamp(static_cast<double>(start_ms - segment_start) /
-                                                   static_cast<double>(duration_ms),
-                                               0.0, 1.0);
-            const int64_t approximate = static_cast<int64_t>(fraction * file_size);
-            offset = FindKeyframeOffset(scan_file, approximate, file_size);
-            if (offset <= 0)
-              offset = 0;
-            if (offset > 0)
-              read_start_ms = segment_start + static_cast<int64_t>(fraction * duration_ms);
-          }
+          const double fraction = std::clamp(static_cast<double>(start_ms - segment_start) /
+                                                 static_cast<double>(duration_ms),
+                                             0.0, 1.0);
+          const int64_t approximate = static_cast<int64_t>(fraction * file_size);
+          offset = FindKeyframeOffset(path, approximate, file_size, at_rest_key);
+          if (offset <= 0)
+            offset = 0;
+          if (offset > 0)
+            read_start_ms = segment_start + static_cast<int64_t>(fraction * duration_ms);
         }
         if (file_size <= 0)
           file_size = 1;
@@ -366,7 +398,14 @@ struct PlaybackService::Impl {
   uvcpp::uvcpp_db_pool* db;
   std::unique_ptr<BlockCache> cache;
   size_t readahead_bytes;
+  std::vector<unsigned char> at_rest_key;
   ActiveFn active_provider;
+
+  void SetAtRestKey(std::vector<unsigned char> key) {
+    at_rest_key = std::move(key);
+    if (cache)
+      cache->SetAtRestKey(at_rest_key);
+  }
 
   void Open(uvcpp::uvcpp_ws_connection* connection, int64_t channel_id, const std::string& stream,
             int64_t start_ms, int64_t end_ms, double speed) {
@@ -382,6 +421,7 @@ struct PlaybackService::Impl {
     session->cache = cache.get();
     session->readahead_bytes = readahead_bytes;
     session->active_provider = active_provider;
+    session->at_rest_key = at_rest_key;
     std::weak_ptr<Session> weak = session;
     connection->on_close([weak](uvcpp::ws_close_code, const std::string&) {
       if (auto self = weak.lock()) {
@@ -407,6 +447,10 @@ void PlaybackService::Open(uvcpp::uvcpp_ws_connection* connection, int64_t chann
 
 void PlaybackService::SetActiveProvider(ActiveFn provider) {
   impl_->active_provider = std::move(provider);
+}
+
+void PlaybackService::SetAtRestKey(std::vector<unsigned char> key) {
+  impl_->SetAtRestKey(std::move(key));
 }
 
 BlockCache::Stats PlaybackService::CacheStats() const {

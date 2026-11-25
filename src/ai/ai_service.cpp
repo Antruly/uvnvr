@@ -20,6 +20,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <opencv2/imgcodecs.hpp>
@@ -223,18 +224,29 @@ std::set<int64_t> IdWatchlist(const std::string& text) {
   return out;
 }
 
-bool WriteJpeg(const cv::Mat& image, const std::string& path) {
+using SnapshotSealFn =
+    std::function<bool(const std::string&, const std::string&, std::string*, std::string*)>;
+
+bool WriteJpeg(const cv::Mat& image, const std::string& path, const SnapshotSealFn& seal) {
   if (image.empty())
     return false;
   std::vector<unsigned char> encoded;
   const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 85};
   if (!cv::imencode(".jpg", image, encoded, params) || encoded.empty())
     return false;
+  std::string stored(encoded.begin(), encoded.end());
+  if (seal) {
+    const std::string plaintext = stored;
+    std::string error;
+    if (!seal(path, plaintext, &stored, &error)) {
+      std::fprintf(stderr, "ai: cannot seal snapshot %s: %s\n", path.c_str(), error.c_str());
+      return false;
+    }
+  }
   std::ofstream out(path, std::ios::binary);
   if (!out)
     return false;
-  out.write(reinterpret_cast<const char*>(encoded.data()),
-            static_cast<std::streamsize>(encoded.size()));
+  out.write(stored.data(), static_cast<std::streamsize>(stored.size()));
   return out.good();
 }
 
@@ -494,6 +506,7 @@ struct AiService::Impl {
         std::max(0.0, std::min(1.0, SettingDouble("ai.face.matchThreshold", 0.75)));
     settings.snapshot_retention_days = static_cast<int>(
         std::max<int64_t>(1, std::min<int64_t>(3650, SettingInt("ai.snapshotRetentionDays", 30))));
+    settings.snapshot_encrypt = SettingBool("ai.snapshot.encrypt", false);
     settings.dedup_seconds = static_cast<int>(
         std::max<int64_t>(0, std::min<int64_t>(3600, SettingInt("ai.dedupSeconds", 10))));
     settings.stub = SettingBool("ai.stub", false);
@@ -923,12 +936,12 @@ struct AiService::Impl {
     const std::string base = UniqueBase(directory, frame.ts_ms, suffix);
     const std::filesystem::path full = std::filesystem::path(directory) / (base + "_full.jpg");
     const std::filesystem::path crop = std::filesystem::path(directory) / (base + "_crop.jpg");
-    if (WriteJpeg(frame.bgr, full.string()))
+    if (WriteJpeg(frame.bgr, full.string(), opts.seal_snapshot))
       *full_path = full.string();
     const cv::Rect expanded = ExpandedBox(frame.bgr, box);
     if (expanded.width > 0 && expanded.height > 0) {
       const cv::Mat cropped = frame.bgr(expanded);
-      if (WriteJpeg(cropped, crop.string()))
+      if (WriteJpeg(cropped, crop.string(), opts.seal_snapshot))
         *crop_path = crop.string();
     }
   }
@@ -1434,6 +1447,16 @@ struct AiService::Impl {
         *error = "snapshot file is empty";
       return false;
     }
+    if (opts.open_snapshot) {
+      std::string plaintext;
+      std::string open_error;
+      if (!opts.open_snapshot(path, *bytes, &plaintext, &open_error)) {
+        if (error != nullptr)
+          *error = open_error.empty() ? "snapshot decryption failed" : open_error;
+        return false;
+      }
+      *bytes = std::move(plaintext);
+    }
     return true;
   }
 
@@ -1500,6 +1523,7 @@ json AiService::ConfigJson() const {
               {"minPlateConfidence", s.min_plate_confidence},
               {"minFaceQuality", s.min_face_quality},
               {"snapshotRetentionDays", s.snapshot_retention_days},
+              {"snapshotEncrypt", s.snapshot_encrypt},
               {"stub", s.stub},
               {"faceModelDir", s.face_model_dir},
               {"facePixelLevel", s.face_pixel_level},
@@ -1574,6 +1598,7 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   bool plate = true;
   bool face = true;
   bool stub = false;
+  bool snapshot_encrypt = false;
   int64_t interval = 1000;
   int64_t queue_depth = 8;
   int64_t plate_workers = 2;
@@ -1589,6 +1614,7 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   std::string face_watchlist;
   if (!read_bool("enabled", &enabled) || !read_bool("plateEnabled", &plate) ||
       !read_bool("faceEnabled", &face) || !read_bool("stub", &stub) ||
+      !read_bool("snapshotEncrypt", &snapshot_encrypt) ||
       !read_int("intervalMs", 250, 10000, &interval) ||
       !read_int("queueDepth", 1, 64, &queue_depth) ||
       !read_int("plateWorkers", 1, 16, &plate_workers) ||
@@ -1631,6 +1657,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     updates.push_back({"ai.snapshotRetentionDays", std::to_string(retention)});
   if (body.contains("stub"))
     updates.push_back({"ai.stub", stub ? "1" : "0"});
+  if (body.contains("snapshotEncrypt"))
+    updates.push_back({"ai.snapshot.encrypt", snapshot_encrypt ? "1" : "0"});
   if (body.contains("faceModelDir"))
     updates.push_back({"ai.face.modelDir", face_model_dir});
   if (body.contains("facePixelLevel"))

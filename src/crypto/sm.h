@@ -8,6 +8,7 @@
 // and GB 35114 media paths without coupling to the server.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,6 +41,15 @@ bool Sm4CbcEncrypt(const Bytes& key, const Bytes& iv, const Bytes& plaintext, By
                    std::string* error = nullptr);
 bool Sm4CbcDecrypt(const Bytes& key, const Bytes& iv, const Bytes& ciphertext, Bytes* plaintext,
                    std::string* error = nullptr);
+
+// SM4-CTR (GB/T 32907 counter mode). Encryption and decryption are the same
+// operation, the output has exactly the same length as the input, and `offset`
+// selects the keystream position in bytes. The offset form is what lets the
+// recording path decrypt an arbitrary block of a large file without keeping a
+// cipher context alive between reads. The 16-byte counter block is treated as
+// a big-endian integer and advanced by offset / 16 blocks.
+bool Sm4CtrCrypt(const Bytes& key, const Bytes& iv, std::uint64_t offset, const Bytes& input,
+                 Bytes* output, std::string* error = nullptr);
 
 // SM2 key pair encoded as PEM: the private key as PKCS#8 ("PRIVATE KEY") and the
 // public key as SubjectPublicKeyInfo ("PUBLIC KEY").

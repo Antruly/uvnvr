@@ -20,6 +20,9 @@ set(UVNVR_INSPIREFACE_ROOT "" CACHE PATH
     "InspireFace SDK root containing include/inspireface.h and lib/libInspireFace")
 option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (requires OpenSSL)"
        ON)
+# Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
+# Off by default: normal deployments keep their current storage format.
+option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -281,6 +284,37 @@ if(UVNVR_ENABLE_GM_CRYPTO)
   endif()
 else()
   message(STATUS "gm_crypto: disabled by UVNVR_ENABLE_GM_CRYPTO=OFF")
+endif()
+
+# Secure module: audit hash chain, firmware signature verification and
+# SM4 data-at-rest encryption. It depends on the GM crypto library; asking for
+# it without crypto is a configuration error rather than a silent downgrade.
+set(UVNVR_SECURE_ENABLED 0)
+if(UVNVR_ENABLE_SECURE)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "secure: requested but gm_crypto is unavailable; UVNVR_ENABLE_SECURE is forced OFF")
+  else()
+    set(UVNVR_SECURE_ENABLED 1)
+    add_library(uvnvr_secure STATIC
+      src/secure/audit_chain.cpp
+      src/secure/audit_store.cpp
+      src/secure/firmware.cpp
+      src/secure/storage_crypto.cpp
+    )
+    target_include_directories(uvnvr_secure PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_secure PUBLIC uvnvr_gm_crypto OpenSSL::Crypto ${UVP_UVCPP_TARGET})
+    target_compile_definitions(uvnvr_secure PUBLIC UVNVR_ENABLE_SECURE=1)
+    if(MSVC)
+      target_compile_options(uvnvr_secure PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_secure PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    target_link_libraries(uvnvr PRIVATE uvnvr_secure)
+    message(STATUS "secure: enabled")
+  endif()
+else()
+  message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
 endif()
 
 if(WIN32)

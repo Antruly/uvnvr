@@ -18,6 +18,7 @@ struct AiSettings {
   double min_face_quality = 0.3;
   double face_match_threshold = 0.75;
   int snapshot_retention_days = 30;
+  bool snapshot_encrypt = false;
   int dedup_seconds = 10;
   bool stub = false;
   // InspireFace resource-pack directory (relative paths resolve under data_dir)

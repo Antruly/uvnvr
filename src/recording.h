@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <db/uvcpp_db_pool.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,6 +22,15 @@ public:
   void Start();
   void Stop();
   void OnTs(int64_t channel_id, const std::string& stream, const uint8_t* data, size_t len);
+
+  // Optional at-rest encryption. `encryptor` reads `plain_path` and writes the
+  // encrypted stream to `final_path`; it is called on the recorder thread when
+  // a segment is finalized. When storage.encrypt is on the index row points at
+  // a ".ts.enc" file. Must be called before Start().
+  using AtRestEncryptor =
+      std::function<bool(const std::string& plain_path, const std::string& final_path,
+                         std::string* error)>;
+  void SetAtRestEncryptor(AtRestEncryptor encryptor);
 
   // Starts or extends an event clip for every stream the channel's active
   // event plan covers. Called for motion/person/tamper/intrusion alerts.

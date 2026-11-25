@@ -3,10 +3,16 @@
 #include "platform.h"
 #include "service.h"
 
+#ifdef UVNVR_ENABLE_SECURE
+#include "secure/audit_store.h"
+#include "secure/firmware.h"
+#endif
+
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -28,6 +34,9 @@ struct Options {
   bool fatal = false;
   bool service = false;
   bool open_browser = false;
+  bool verify_audit = false;
+  std::string verify_firmware;
+  std::string firmware_key;
   std::string service_action;
 };
 
@@ -100,6 +109,9 @@ void PrintUsage(const char* argv0) {
             << "  --service          Run as a Windows service (SCM entry point)\n"
             << "  --open             Open the web UI in the default browser after startup\n"
             << "  --print-config     Print the effective configuration and exit\n"
+            << "  --verify-audit     Verify the SM3 audit chain in the configured database\n"
+            << "  --verify-firmware <package> <public-key.pem>\n"
+            << "                     Verify a signed firmware package and exit\n"
             << "  --version          Print version and exit\n"
             << "  --help             Print this help and exit\n\n"
             << "Configuration file:\n"
@@ -122,8 +134,25 @@ void PrintUsage(const char* argv0) {
             << "  UVNVR_TLS_KEY      PEM private key\n";
 }
 
-bool ParsePort(std::string_view text, int* port) {
-  int value = 0;
+#ifdef UVNVR_ENABLE_SECURE
+bool ReadTextFile(const std::string& path, std::string* contents, std::string* error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (error != nullptr)
+      *error = "cannot open " + path;
+    return false;
+  }
+  contents->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    if (error != nullptr)
+      *error = "cannot read " + path;
+    return false;
+  }
+  return true;
+}
+#endif
+
+bool ParsePort(std::string_view text, int* port) {  int value = 0;
   const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
   if (result.ec != std::errc() || result.ptr != text.data() + text.size() || value < 1 ||
       value > 65535) {
@@ -333,6 +362,18 @@ Options ParseOptions(int argc, char** argv) {
       options.service = true;
     } else if (arg == "--open") {
       options.open_browser = true;
+    } else if (arg == "--verify-audit") {
+      options.verify_audit = true;
+    } else if (arg == "--verify-firmware") {
+      if (!TakeValue(argc, argv, &i, "--verify-firmware", &value) || value.empty()) {
+        options.help = true;
+      } else {
+        options.verify_firmware = value;
+        if (!TakeValue(argc, argv, &i, "--verify-firmware", &value) || value.empty())
+          options.help = true;
+        else
+          options.firmware_key = value;
+      }
     } else if (arg == "--service-action") {
       if (!TakeValue(argc, argv, &i, "--service-action", &value))
         options.help = true;
@@ -428,6 +469,62 @@ int main(int argc, char** argv) {
   if (options.print_config) {
     std::cout << uvnvr::ConfigToJson(options.config).dump(2) << "\n";
     return 0;
+  }
+
+  if (options.verify_audit) {
+#ifdef UVNVR_ENABLE_SECURE
+    std::string db_path = options.config.db_path;
+    if (db_path.empty())
+      db_path = (std::filesystem::path(options.config.data_dir) / "uvnvr.db").string();
+    uvnvr::secure::AuditVerification verification;
+    std::string error;
+    if (!uvnvr::secure::VerifyAuditDatabase(db_path, &verification, &error)) {
+      std::cerr << "audit verify: " << error << "\n";
+      return 2;
+    }
+    if (!verification.ok) {
+      std::cout << "FAIL " << db_path << ": " << verification.message << "\n"
+                << "  broken index: " << verification.broken_index
+                << "  entry id: " << verification.broken_id << "\n";
+      if (!verification.expected_hash.empty())
+        std::cout << "  expected hash: " << verification.expected_hash << "\n";
+      if (!verification.actual_hash.empty())
+        std::cout << "  actual hash:   " << verification.actual_hash << "\n";
+      return 1;
+    }
+    std::cout << "OK " << db_path << ": " << verification.checked << " chained entries verified";
+    if (verification.skipped_legacy > 0)
+      std::cout << " (" << verification.skipped_legacy << " legacy rows skipped)";
+    std::cout << "\n";
+    return 0;
+#else
+    std::cerr << "audit verify: this build was configured without UVNVR_ENABLE_SECURE\n";
+    return 2;
+#endif
+  }
+
+  if (!options.verify_firmware.empty()) {
+#ifdef UVNVR_ENABLE_SECURE
+    std::string key_pem;
+    std::string error;
+    if (!ReadTextFile(options.firmware_key, &key_pem, &error)) {
+      std::cerr << "firmware verify: " << error << "\n";
+      return 2;
+    }
+    uvnvr::secure::FirmwarePackage package;
+    if (!uvnvr::secure::VerifyFirmwareFile(options.verify_firmware, key_pem, "", &package,
+                                           &error)) {
+      std::cerr << "firmware verify: " << error << "\n";
+      return 1;
+    }
+    std::cout << "OK product=" << package.product << " version=" << package.version
+              << " payload=" << package.payload.size() << " bytes"
+              << " sm3=" << package.payload_sm3 << "\n";
+    return 0;
+#else
+    std::cerr << "firmware verify: this build was configured without UVNVR_ENABLE_SECURE\n";
+    return 2;
+#endif
   }
 
   if (!options.service_action.empty()) {

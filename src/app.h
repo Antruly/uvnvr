@@ -24,6 +24,10 @@
 #include <vector>
 #include <webapp/uvcpp_web_app.h>
 
+#ifdef UVNVR_ENABLE_SECURE
+#include "crypto/sm.h"
+#endif
+
 namespace uvnvr {
 
 #if UVNVR_ENABLE_AI
@@ -219,6 +223,26 @@ private:
              const std::string& error_code, const std::string& detail);
   void CleanupAudit();
   void CleanupAuditLocked();
+
+#ifdef UVNVR_ENABLE_SECURE
+  // Loads the device certificate and derives the SM4 storage key. Missing or
+  // malformed material disables encryption with a diagnostic instead of
+  // preventing the service from starting.
+  void InitializeSecureStorage();
+  bool SealSnapshotBytes(const std::string& path, const std::string& plaintext,
+                         std::string* stored, std::string* error);
+  bool OpenSnapshotBytes(const std::string& path, const std::string& stored,
+                         std::string* plaintext, std::string* error);
+  bool WriteSnapshotFile(const std::string& path, const std::string& plaintext,
+                         std::string* error);
+  bool ReadSnapshotFile(const std::string& path, std::string* plaintext, std::string* error);
+  // Re-reads the first/last chained hashes into system_meta after a delete.
+  void RefreshAuditChainMeta();
+  std::mutex audit_chain_mutex_;
+  std::string device_cert_path_;
+  gm::Bytes at_rest_key_;
+  bool at_rest_key_ready_ = false;
+#endif
 
   LoginResult Login(const std::string& username, const std::string& password, const std::string& ip,
                     const std::string& ua);

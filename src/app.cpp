@@ -13,6 +13,13 @@
 #include "platform.h"
 #include "service.h"
 
+#ifdef UVNVR_ENABLE_SECURE
+#include "secure/audit_chain.h"
+#include "secure/audit_store.h"
+#include "secure/firmware.h"
+#include "secure/storage_crypto.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -997,7 +1004,9 @@ bool App::Migrate(std::string* error) {
       "result TEXT NOT NULL,"
       "error_code TEXT,"
       "detail TEXT,"
-      "request_id TEXT)",
+      "request_id TEXT,"
+      "prev_hash TEXT NOT NULL DEFAULT '',"
+      "entry_hash TEXT NOT NULL DEFAULT '')",
       "CREATE TABLE IF NOT EXISTS system_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS channels ("
       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -1178,6 +1187,34 @@ bool App::Migrate(std::string* error) {
       }
     }
   }
+
+  // Existing audit rows keep empty hashes. When the chain is enabled the new
+  // rows form a chain from the first entry written after the upgrade; the
+  // verifier treats the leading hash-less rows as legacy.
+  {
+    uvcpp::uvcpp_db_table columns;
+    if (Query("PRAGMA table_info(audit_log)", {}, &columns, error)) {
+      bool has_prev = false;
+      bool has_entry = false;
+      for (size_t row = 0; row < columns.rows().size(); ++row) {
+        const std::string name = TableText(columns, row, "name");
+        if (name == "prev_hash")
+          has_prev = true;
+        if (name == "entry_hash")
+          has_entry = true;
+      }
+      if (!has_prev &&
+          !Exec("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''", {}, nullptr,
+                error)) {
+        return false;
+      }
+      if (!has_entry &&
+          !Exec("ALTER TABLE audit_log ADD COLUMN entry_hash TEXT NOT NULL DEFAULT ''", {},
+                nullptr, error)) {
+        return false;
+      }
+    }
+  }
   {
     uvcpp::uvcpp_db_table columns;
     if (Query("PRAGMA table_info(users)", {}, &columns, error)) {
@@ -1221,6 +1258,11 @@ bool App::Migrate(std::string* error) {
       {"security.api_lock_minutes", "10"},
       {"security.api_locked_until", "0"},
       {"audit.retention_days", "180"},
+      {"audit.chain", "1"},
+      {"secure.device_cert", ""},
+      {"secure.firmware.public_key", ""},
+      {"ai.snapshot.encrypt", "0"},
+      {"storage.encrypt", "0"},
       {"system.timezone", "UTC"},
       {"system.language", "auto"},
       {"system.gpu_enabled", "1"},
@@ -1366,6 +1408,10 @@ bool App::Init(std::string* error) {
   }
   EnsureDefaults();
 
+#ifdef UVNVR_ENABLE_SECURE
+  InitializeSecureStorage();
+#endif
+
   setup_required_ = CountUsers() == 0;
   CleanupAudit();
   return true;
@@ -1385,8 +1431,153 @@ void App::CleanupAuditLocked() {
   if (!Exec("DELETE FROM audit_log WHERE ts < ?", params, nullptr, &error)) {
     std::fprintf(stderr, "audit cleanup failed: %s\n", error.c_str());
   }
+#ifdef UVNVR_ENABLE_SECURE
+  {
+    std::lock_guard<std::mutex> chain_lock(audit_chain_mutex_);
+    RefreshAuditChainMeta();
+  }
+#endif
   last_audit_cleanup_ = NowSeconds();
 }
+
+#ifdef UVNVR_ENABLE_SECURE
+void App::InitializeSecureStorage() {
+  device_cert_path_ = GetSetting("secure.device_cert", "");
+  if (device_cert_path_.empty())
+    device_cert_path_ = (std::filesystem::path(config_.data_dir) / "device_cert.pem").string();
+  at_rest_key_.clear();
+  at_rest_key_ready_ = false;
+  if (!std::filesystem::exists(device_cert_path_)) {
+    std::fprintf(stderr, "secure: device certificate %s not found; at-rest encryption is "
+                         "unavailable\n",
+                 device_cert_path_.c_str());
+    if (GetSettingInt("ai.snapshot.encrypt", 0) != 0 || GetSettingInt("storage.encrypt", 0) != 0) {
+      std::fprintf(stderr,
+                   "secure: encryption is enabled but no key is available; encrypted writes "
+                   "will be rejected until the certificate is provisioned\n");
+    }
+    return;
+  }
+  std::string error;
+  if (!secure::DeriveStorageKeyFromFile(device_cert_path_, &at_rest_key_, &error)) {
+    std::fprintf(stderr, "secure: cannot derive the at-rest key: %s\n", error.c_str());
+    at_rest_key_.clear();
+    return;
+  }
+  at_rest_key_ready_ = true;
+  std::printf("secure: at-rest key derived from %s\n", device_cert_path_.c_str());
+}
+
+bool App::SealSnapshotBytes(const std::string& path, const std::string& plaintext,
+                            std::string* stored, std::string* error) {
+  if (GetSettingInt("ai.snapshot.encrypt", 0) == 0) {
+    *stored = plaintext;
+    return true;
+  }
+  if (!at_rest_key_ready_) {
+    if (error != nullptr)
+      *error = "snapshot encryption is enabled but no device certificate is available";
+    return false;
+  }
+  gm::Bytes sealed;
+  gm::Bytes plain(plaintext.begin(), plaintext.end());
+  if (!secure::SealBlob(plain, at_rest_key_, &sealed, error)) {
+    if (error != nullptr && error->empty())
+      *error = "cannot encrypt snapshot " + path;
+    return false;
+  }
+  stored->assign(reinterpret_cast<const char*>(sealed.data()), sealed.size());
+  return true;
+}
+
+bool App::OpenSnapshotBytes(const std::string& path, const std::string& stored,
+                            std::string* plaintext, std::string* error) {
+  gm::Bytes input(stored.begin(), stored.end());
+  if (!secure::IsSealedBlob(input)) {
+    // Snapshots written before encryption was enabled stay readable.
+    *plaintext = stored;
+    return true;
+  }
+  if (!at_rest_key_ready_) {
+    if (error != nullptr)
+      *error = "snapshot " + path + " is encrypted but no device certificate is available";
+    return false;
+  }
+  gm::Bytes plain;
+  if (!secure::OpenBlob(input, at_rest_key_, &plain, error))
+    return false;
+  plaintext->assign(reinterpret_cast<const char*>(plain.data()), plain.size());
+  return true;
+}
+
+bool App::WriteSnapshotFile(const std::string& path, const std::string& plaintext,
+                            std::string* error) {
+  std::string stored;
+  if (!SealSnapshotBytes(path, plaintext, &stored, error))
+    return false;
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    if (error != nullptr)
+      *error = "cannot create " + path;
+    return false;
+  }
+  output.write(stored.data(), static_cast<std::streamsize>(stored.size()));
+  if (!output.good()) {
+    if (error != nullptr)
+      *error = "cannot write " + path;
+    return false;
+  }
+  return true;
+}
+
+bool App::ReadSnapshotFile(const std::string& path, std::string* plaintext, std::string* error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (error != nullptr)
+      *error = "snapshot file is missing";
+    return false;
+  }
+  std::string stored((std::istreambuf_iterator<char>(input)),
+                     std::istreambuf_iterator<char>());
+  if (stored.empty()) {
+    if (error != nullptr)
+      *error = "snapshot file is empty";
+    return false;
+  }
+  return OpenSnapshotBytes(path, stored, plaintext, error);
+}
+
+void App::RefreshAuditChainMeta() {
+  std::string anchor;
+  std::string head;
+  uvcpp::uvcpp_db_table table;
+  std::string error;
+  if (Query("SELECT prev_hash FROM audit_log WHERE entry_hash <> '' ORDER BY id ASC LIMIT 1", {},
+            &table, &error) &&
+      !table.empty()) {
+    anchor = TableText(table, 0, "prev_hash");
+  }
+  table = uvcpp::uvcpp_db_table{};
+  error.clear();
+  if (Query("SELECT entry_hash FROM audit_log WHERE entry_hash <> '' ORDER BY id DESC LIMIT 1", {},
+            &table, &error) &&
+      !table.empty()) {
+    head = TableText(table, 0, "entry_hash");
+  }
+  const auto write_meta = [this](const char* key, const std::string& value) {
+    uvcpp::uvcpp_db_params params;
+    params.add(key);
+    params.add(value);
+    std::string write_error;
+    if (!Exec("INSERT OR REPLACE INTO system_meta(key, value) VALUES(?, ?)", params, nullptr,
+              &write_error)) {
+      std::fprintf(stderr, "audit chain meta write failed: %s\n", write_error.c_str());
+    }
+  };
+  write_meta("audit_chain_anchor", anchor);
+  write_meta("audit_chain_head", head);
+}
+#endif
 
 void App::Audit(const std::string& category, const std::string& level, const std::string& actor,
                 const std::string& ip, const std::string& ua, const std::string& object_type,
@@ -1407,6 +1598,65 @@ void App::Audit(const std::string& category, const std::string& level, const std
   params.add(detail.empty() ? "{}" : detail);
   params.add("");
   std::string error;
+#ifdef UVNVR_ENABLE_SECURE
+  const bool chained = GetSettingInt("audit.chain", 1) != 0;
+  if (chained) {
+    {
+      std::lock_guard<std::mutex> lock(audit_chain_mutex_);
+      std::string previous;
+      uvcpp::uvcpp_db_table table;
+      if (Query("SELECT entry_hash FROM audit_log WHERE entry_hash <> '' ORDER BY id DESC LIMIT 1",
+                {}, &table, &error) &&
+          !table.empty()) {
+        previous = TableText(table, 0, "entry_hash");
+      }
+      secure::AuditRecord record;
+      record.ts = NowSeconds();
+      record.category = category;
+      record.level = level;
+      record.actor = actor;
+      record.ip = ip;
+      record.user_agent = ua;
+      record.object_type = object_type;
+      record.object_id = object_id;
+      record.action = action;
+      record.result = result;
+      record.error_code = error_code;
+      record.detail = detail.empty() ? "{}" : detail;
+      secure::AppendToAuditChain(previous, &record);
+      // Replace the timestamp parameter so the hashed value and the stored
+      // value are identical even if the second crossed a second boundary.
+      params = uvcpp::uvcpp_db_params{};
+      params.add(record.ts);
+      params.add(category);
+      params.add(level);
+      params.add(actor);
+      params.add(ip);
+      params.add(ua);
+      params.add(object_type);
+      params.add(object_id);
+      params.add(action);
+      params.add(result);
+      params.add(error_code);
+      params.add(record.detail);
+      params.add("");
+      params.add(record.prev_hash);
+      params.add(record.entry_hash);
+      if (!Exec("INSERT INTO audit_log(ts, category, level, actor, ip, user_agent, object_type, "
+                "object_id, action, result, error_code, detail, request_id, prev_hash, "
+                "entry_hash) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params, nullptr, &error)) {
+        std::fprintf(stderr, "audit write failed: %s\n", error.c_str());
+        return;
+      }
+      RefreshAuditChainMeta();
+    }
+    if (NowSeconds() - last_audit_cleanup_.load() > 86400) {
+      CleanupAudit();
+    }
+    return;
+  }
+#endif
   if (!Exec("INSERT INTO audit_log(ts, category, level, actor, ip, user_agent, object_type, "
             "object_id, action, result, error_code, detail, request_id) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2298,6 +2548,16 @@ int App::Run() {
   media_->Start();
   SyncAllMedia();
   recording_ = std::make_unique<RecordingService>(&db_, config_.data_dir);
+#ifdef UVNVR_ENABLE_SECURE
+  if (at_rest_key_ready_) {
+    const gm::Bytes key = at_rest_key_;
+    recording_->SetAtRestEncryptor(
+        [key](const std::string& plain_path, const std::string& final_path,
+              std::string* error) {
+          return secure::EncryptRecordingFile(plain_path, final_path, key, error);
+        });
+  }
+#endif
   media_->SetDataSink(
       [this](int64_t channel_id, const std::string& stream, const uint8_t* data, size_t len) {
         if (recording_)
@@ -2307,6 +2567,10 @@ int App::Run() {
   playback_ = std::make_unique<PlaybackService>(
       &web_, &db_, static_cast<size_t>(config_.cache_mb) * 1024 * 1024,
       static_cast<size_t>(config_.readahead_mb) * 1024 * 1024);
+#ifdef UVNVR_ENABLE_SECURE
+  if (at_rest_key_ready_)
+    playback_->SetAtRestKey(at_rest_key_);
+#endif
   playback_->SetActiveProvider([this] {
     return recording_ ? recording_->ActiveSegments()
                       : std::vector<RecordingService::ActiveSegment>();
@@ -2345,6 +2609,16 @@ int App::Run() {
                const std::string& message, const std::string& snapshot_path) {
           RaiseAlert(channel_id, type, level, message, snapshot_path);
         };
+#ifdef UVNVR_ENABLE_SECURE
+    options.seal_snapshot = [this](const std::string& path, const std::string& plaintext,
+                                   std::string* stored, std::string* error) {
+      return SealSnapshotBytes(path, plaintext, stored, error);
+    };
+    options.open_snapshot = [this](const std::string& path, const std::string& stored,
+                                   std::string* plaintext, std::string* error) {
+      return OpenSnapshotBytes(path, stored, plaintext, error);
+    };
+#endif
     ai_ = std::make_unique<AiService>(std::move(options));
     ai_->Start();
   }
@@ -2775,6 +3049,25 @@ void App::RegisterCoreRoutes() {
                          }
                          return true;
                        };
+                       auto update_bool = [&](const char* group, const char* key,
+                                              const char* setting_key) -> bool {
+                         const auto group_it = body.find(group);
+                         if (group_it == body.end() || !group_it->is_object())
+                           return true;
+                         const auto it = group_it->find(key);
+                         if (it == group_it->end())
+                           return true;
+                         if (!it->is_boolean()) {
+                           *error = std::string(key) + " must be a boolean";
+                           return false;
+                         }
+                         std::string db_error;
+                         if (!SetSetting(setting_key, it->get<bool>() ? "1" : "0", &db_error)) {
+                           *error = db_error;
+                           return false;
+                         }
+                         return true;
+                       };
                        if (!update_int("security", "webMaxFailures", 1, 1000,
                                        "security.web_max_failures") ||
                            !update_int("security", "webLockMinutes", 1, 1440,
@@ -2783,7 +3076,11 @@ void App::RegisterCoreRoutes() {
                                        "security.api_max_failures") ||
                            !update_int("security", "apiLockMinutes", 1, 1440,
                                        "security.api_lock_minutes") ||
-                           !update_int("audit", "retentionDays", 1, 3650, "audit.retention_days")) {
+                           !update_int("audit", "retentionDays", 1, 3650, "audit.retention_days") ||
+                           !update_bool("audit", "chain", "audit.chain") ||
+                           !update_bool("secure", "snapshotEncrypt", "ai.snapshot.encrypt") ||
+                           !update_bool("secure", "storageEncrypt", "storage.encrypt") ||
+                           !update_bool("secure", "auditChain", "audit.chain")) {
                          return;
                        }
                        if (!UpdateEventSettings(body, &*error) ||
@@ -3221,7 +3518,12 @@ json App::SettingsJson() {
                         {"webLockMinutes", GetSettingInt("security.web_lock_minutes", 10)},
                         {"apiMaxFailures", GetSettingInt("security.api_max_failures", 100)},
                         {"apiLockMinutes", GetSettingInt("security.api_lock_minutes", 10)}}},
-      {"audit", json{{"retentionDays", GetSettingInt("audit.retention_days", 180)}}},
+      {"audit", json{{"retentionDays", GetSettingInt("audit.retention_days", 180)},
+                     {"chain", GetSettingInt("audit.chain", 1) != 0}}},
+      {"secure", json{{"deviceCertificate", GetSetting("secure.device_cert", "")},
+                      {"firmwarePublicKey", GetSetting("secure.firmware.public_key", "")},
+                      {"snapshotEncrypt", GetSettingInt("ai.snapshot.encrypt", 0) != 0},
+                      {"storageEncrypt", GetSettingInt("storage.encrypt", 0) != 0}}},
       {"event", json{{"enabled", GetSettingInt("event.enabled", 1) != 0},
                      {"preSeconds", GetSettingInt("event.pre_seconds", 10)},
                      {"postSeconds", GetSettingInt("event.post_seconds", 30)},
@@ -9187,8 +9489,16 @@ void App::MonitorRun() {
             snapshot_path =
                 (alert_dir / (std::to_string(channel.id) + "_" + std::to_string(now) + ".jpg"))
                     .string();
+#ifdef UVNVR_ENABLE_SECURE
+            std::string snapshot_error;
+            if (!WriteSnapshotFile(snapshot_path, jpeg, &snapshot_error)) {
+              std::fprintf(stderr, "alert snapshot write failed: %s\n", snapshot_error.c_str());
+              snapshot_path.clear();
+            }
+#else
             std::ofstream output(snapshot_path, std::ios::binary);
             output.write(jpeg.data(), static_cast<std::streamsize>(jpeg.size()));
+#endif
           }
           RaiseAlert(channel.id, "motion", "warning", "Motion detected on channel " + channel.name,
                      snapshot_path);
@@ -9433,6 +9743,12 @@ void App::RegisterAlertRoutes() {
                          *message = "alert has no snapshot";
                          return;
                        }
+#ifdef UVNVR_ENABLE_SECURE
+                       if (!ReadSnapshotFile(path, payload.get(), message.get())) {
+                         *status = 404;
+                         return;
+                       }
+#else
                        std::ifstream file(path, std::ios::binary);
                        if (!file) {
                          *status = 404;
@@ -9441,6 +9757,7 @@ void App::RegisterAlertRoutes() {
                        }
                        payload->assign(std::istreambuf_iterator<char>(file),
                                        std::istreambuf_iterator<char>());
+#endif
                      },
                      [payload, status, message, &resp, next] {
                        if (*status != 200) {
@@ -10188,6 +10505,114 @@ void App::RegisterSystemRoutes() {
                 });
           },
           "system.manage"));
+
+#ifdef UVNVR_ENABLE_SECURE
+  // Firmware upgrade entry. The request body is the signed package itself
+  // (application/octet-stream). Verification is the upgrade gate: an invalid
+  // signature never reaches the staging area, and every attempt is audited.
+  web_.post(
+      "/api/v1/system/firmware/verify",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            const std::string body = req.body_str();
+            if (body.empty() || body.size() > 16u * 1024u * 1024u) {
+              Audit("system", "warning", actor.username, ip, ua, "firmware", "", "upgrade",
+                    "failure", "invalid_package", R"({"error":"empty or oversized package"})");
+              SendError(resp, 400, "invalid_firmware",
+                        "the firmware package must be between 1 byte and 16 MiB");
+              next();
+              return;
+            }
+
+            std::string key_path = GetSetting("secure.firmware.public_key", "");
+            if (key_path.empty())
+              key_path =
+                  (std::filesystem::path(config_.data_dir) / "firmware_pub.pem").string();
+            std::ifstream key_file(key_path, std::ios::binary);
+            std::string key_pem;
+            if (key_file) {
+              key_pem.assign(std::istreambuf_iterator<char>(key_file),
+                             std::istreambuf_iterator<char>());
+            }
+            if (key_pem.empty()) {
+              const std::string detail =
+                  json{{"error", "firmware signing key is unavailable"},
+                       {"path", key_path}}
+                      .dump();
+              Audit("system", "error", actor.username, ip, ua, "firmware", "", "upgrade",
+                    "failure", "firmware_key_unavailable", detail);
+              SendError(resp, 503, "firmware_key_unavailable",
+                        "configure secure.firmware.public_key or install " + key_path);
+              next();
+              return;
+            }
+
+            gm::Bytes package(body.begin(), body.end());
+            secure::FirmwarePackage parsed;
+            std::string error;
+            if (!secure::VerifyFirmwarePackage(package, key_pem, "uvnvr", &parsed, &error)) {
+              Audit("system", "error", actor.username, ip, ua, "firmware", "", "upgrade",
+                    "failure", "invalid_signature", json{{"error", error}}.dump());
+              SendError(resp, 400, "invalid_firmware", error);
+              next();
+              return;
+            }
+
+            const std::filesystem::path staging_dir =
+                std::filesystem::path(config_.data_dir) / "firmware";
+            std::error_code create_error;
+            std::filesystem::create_directories(staging_dir, create_error);
+            const std::filesystem::path staged = staging_dir / "staged.bin";
+            std::ofstream staged_file(staged, std::ios::binary | std::ios::trunc);
+            if (create_error || !staged_file) {
+              const std::string detail =
+                  json{{"error", "cannot stage the verified package"},
+                       {"path", staged.string()}}
+                      .dump();
+              Audit("system", "error", actor.username, ip, ua, "firmware", "", "upgrade",
+                    "failure", "firmware_stage_failed", detail);
+              SendError(resp, 500, "firmware_stage_failed",
+                        "the package verified but could not be staged");
+              next();
+              return;
+            }
+            if (!parsed.payload.empty()) {
+              staged_file.write(reinterpret_cast<const char*>(parsed.payload.data()),
+                                static_cast<std::streamsize>(parsed.payload.size()));
+            }
+            staged_file.close();
+            if (!staged_file.good()) {
+              Audit("system", "error", actor.username, ip, ua, "firmware", "", "upgrade",
+                    "failure", "firmware_stage_failed",
+                    R"({"error":"cannot write the staged package"})");
+              SendError(resp, 500, "firmware_stage_failed",
+                        "the package verified but could not be staged");
+              next();
+              return;
+            }
+
+            json detail{{"product", parsed.product},
+                        {"version", parsed.version},
+                        {"payloadBytes", parsed.payload.size()},
+                        {"payloadSm3", parsed.payload_sm3},
+                        {"stagedPath", staged.string()}};
+            Audit("system", "info", actor.username, ip, ua, "firmware", "", "upgrade",
+                  "success", "", detail.dump());
+            SendJson(resp, 200, json{{"verified", true},
+                                     {"product", parsed.product},
+                                     {"version", parsed.version},
+                                     {"createdAt", parsed.created_at},
+                                     {"payloadBytes", parsed.payload.size()},
+                                     {"payloadSm3", parsed.payload_sm3},
+                                     {"stagedPath", staged.string()}});
+            next();
+          },
+          "system.manage"));
+#endif
 }
 
 // ---------------------------------------------------------------------------

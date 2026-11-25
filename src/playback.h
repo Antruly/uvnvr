@@ -35,6 +35,11 @@ public:
   using ActiveFn = std::function<std::vector<RecordingService::ActiveSegment>()>;
   void SetActiveProvider(ActiveFn provider);
 
+  // Key used to decrypt ".enc" recording segments. Pass the derived storage
+  // key when the secure module is available; an empty key leaves plaintext
+  // recordings untouched.
+  void SetAtRestKey(std::vector<unsigned char> key);
+
   BlockCache::Stats CacheStats() const;
 
 private:

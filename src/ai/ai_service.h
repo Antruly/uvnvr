@@ -30,11 +30,19 @@ public:
     std::string data_dir;
     // Broadcasts one JSON message on /ws/events.
     std::function<void(const nlohmann::json&)> broadcast;
-    // Inserts an alerts row for channel_id; arguments are type, level, message
-    // and the full snapshot path (may be empty).
+    // Insert a snapshot path; may be empty.
     std::function<void(int64_t, const std::string&, const std::string&, const std::string&,
                        const std::string&)>
         raise_alert;
+    // Optional data-at-rest hooks supplied when the secure module is compiled
+    // in. `seal_snapshot` replaces the bytes written to disk (or returns the
+    // input unchanged when encryption is off); `open_snapshot` reverses it and
+    // also passes legacy plaintext through. Both receive the on-disk path so
+    // key derivation can bind to it.
+    std::function<bool(const std::string&, const std::string&, std::string*, std::string*)>
+        seal_snapshot;
+    std::function<bool(const std::string&, const std::string&, std::string*, std::string*)>
+        open_snapshot;
   };
 
   explicit AiService(Options options);

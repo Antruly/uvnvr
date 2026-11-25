@@ -128,6 +128,7 @@ struct RecordingService::Impl {
     std::string codec;
     std::string path;
     std::string part_path;
+    bool encrypt = false;
     uv_file fd = -1;
   };
 
@@ -168,6 +169,7 @@ struct RecordingService::Impl {
       bool active = false;
       std::string path;
       std::string part_path;
+      std::string final_path;
       std::string codec;
       int64_t bytes = 0;
       int64_t start_ms = 0;
@@ -181,12 +183,14 @@ struct RecordingService::Impl {
       if (has_segment) {
         status.path = segment.path;
         status.part_path = segment.part_path;
+        status.final_path = segment.path;
         status.codec = segment.codec;
         status.bytes = segment.bytes;
         status.start_ms = segment.start_ms;
       } else {
         status.path.clear();
         status.part_path.clear();
+        status.final_path.clear();
         status.codec.clear();
         status.bytes = 0;
         status.start_ms = 0;
@@ -400,6 +404,18 @@ struct RecordingService::Impl {
                                (event_mode ? "_event" : "") + "_" + std::to_string(now_ms) + "_" +
                                std::to_string(value.seq);
       value.path = (dir / (base + ".ts")).string();
+      const bool want_encrypt = GetSettingInt(owner->db, "storage.encrypt", 0) != 0;
+      if (want_encrypt && owner->at_rest_encryptor == nullptr) {
+        std::fprintf(stderr,
+                     "[recording] storage.encrypt is enabled but no device certificate is "
+                     "available; refusing to write plaintext segments\n");
+        has_segment = false;
+        RefreshStatus();
+        return;
+      }
+      value.encrypt = want_encrypt;
+      if (want_encrypt)
+        value.path += ".enc";
       value.part_path = (dir / (base + ".ts.part")).string();
       value.fd = OpenFile(value.part_path);
       if (value.fd < 0) {
@@ -436,7 +452,22 @@ struct RecordingService::Impl {
         RefreshStatus();
         return;
       }
-      if (!RenameFile(segment.part_path, segment.path)) {
+      if (segment.encrypt) {
+        std::string encrypt_error;
+        if (!owner->at_rest_encryptor ||
+            !owner->at_rest_encryptor(segment.part_path, segment.path, &encrypt_error)) {
+          std::fprintf(stderr, "[recording] cannot encrypt %s: %s\n",
+                       segment.part_path.c_str(), encrypt_error.c_str());
+          RemoveFile(segment.part_path);
+          has_segment = false;
+          segment = Segment{};
+          RefreshStatus();
+          return;
+        }
+        // The plaintext .part must not survive the switch to the encrypted
+        // segment; the index row will only reference segment.path.
+        RemoveFile(segment.part_path);
+      } else if (!RenameFile(segment.part_path, segment.path)) {
         std::fprintf(stderr, "[recording] cannot finalize %s\n", segment.part_path.c_str());
         RemoveFile(segment.part_path);
         has_segment = false;
@@ -596,6 +627,7 @@ struct RecordingService::Impl {
 
   uvcpp::uvcpp_db_pool* db;
   std::string data_dir;
+  RecordingService::AtRestEncryptor at_rest_encryptor;
   std::atomic<bool> stopping{false};
   std::thread scheduler;
   std::mutex mutex;
@@ -900,6 +932,8 @@ struct RecordingService::Impl {
           snapshot.part_path.compare(snapshot.part_path.size() - 5, 5, ".part") == 0) {
         segment.final_path = snapshot.part_path.substr(0, snapshot.part_path.size() - 5);
       }
+      if (!snapshot.final_path.empty())
+        segment.final_path = snapshot.final_path;
       segment.start_ms = snapshot.start_ms;
       segment.bytes = snapshot.bytes;
       segment.codec = snapshot.codec;
@@ -1071,6 +1105,10 @@ void RecordingService::Stop() {
 
 void RecordingService::OnEvent(int64_t channel_id) {
   impl_->OnEvent(channel_id);
+}
+
+void RecordingService::SetAtRestEncryptor(AtRestEncryptor encryptor) {
+  impl_->at_rest_encryptor = std::move(encryptor);
 }
 
 std::vector<RecordingService::ActiveSegment> RecordingService::ActiveSegments() {

@@ -1,5 +1,9 @@
 #include "storage_cache.h"
 
+#ifdef UVNVR_ENABLE_SECURE
+#include "secure/storage_crypto.h"
+#endif
+
 #include <algorithm>
 #include <fstream>
 #include <utility>
@@ -36,6 +40,26 @@ BlockCache::Block BlockCache::LoadBlock(const std::string& path, uint64_t block,
   } else {
     data->resize(static_cast<size_t>(got));
   }
+#ifdef UVNVR_ENABLE_SECURE
+  std::vector<unsigned char> at_rest_key;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    at_rest_key = at_rest_key_;
+  }
+  if (!data->empty() && !at_rest_key.empty() &&
+      secure::IsEncryptedRecordingPath(path)) {
+    gm::Bytes ciphertext(data->begin(), data->end());
+    gm::Bytes plaintext;
+    std::string decrypt_error;
+    if (!secure::DecryptRecordingRange(at_rest_key, path, offset, ciphertext, &plaintext,
+                                       &decrypt_error)) {
+      if (error != nullptr)
+        *error = decrypt_error;
+      return nullptr;
+    }
+    data->assign(plaintext.begin(), plaintext.end());
+  }
+#endif
   if (error != nullptr)
     error->clear();
   return data;
@@ -150,6 +174,11 @@ BlockCache::Stats BlockCache::GetStats() const {
   stats.capacity_bytes = capacity_bytes_;
   stats.block_size = block_size_;
   return stats;
+}
+
+void BlockCache::SetAtRestKey(std::vector<unsigned char> key) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  at_rest_key_ = std::move(key);
 }
 
 void BlockCache::SetCapacity(size_t capacity_bytes) {
