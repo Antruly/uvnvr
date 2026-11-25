@@ -74,7 +74,9 @@ Global settings live in the existing `settings` table and are managed through
 | `stub` | `ai.stub` | `0` | bool |
 | `faceModelDir` | `ai.face.modelDir` | `<data_dir>/models/inspireface` | resource pack file, or a directory containing one |
 | `facePixelLevel` | `ai.face.pixelLevel` | `-1` | `-1` (SDK default) or 160–1280 |
-| `plateWatchlist` | `ai.plate.watchlist` | empty | comma/space separated plates |
+| `plateWatchlist` | `ai.plate.watchlist` | empty | legacy alert list; read as a blacklist while `ai.plate.blacklist` is empty |
+| `plateBlacklist` | `ai.plate.blacklist` | empty | comma/space separated plates that raise an alert |
+| `plateWhitelist` | `ai.plate.whitelist` | empty | comma/space separated plates that never raise an alert (wins over the blacklist) |
 | `faceWatchlist` | `ai.face.watchlist` | empty | comma separated `ai_faces.id` |
 | `faceMatchThreshold` | `ai.face.matchThreshold` | `0.75` | 0–1 |
 | `dedupSeconds` | `ai.dedupSeconds` | `10` | 0–3600 |
@@ -210,15 +212,41 @@ still yields one event per `ai.faceDedupSeconds` rather than never again.
 
 ## Alerts
 
-* `ai.plate.watchlist` contains comma/space-separated plates. A hit produces
-  `alert=true` in the WebSocket message and inserts an `alerts` row with
-  `type='ai_plate'`, the channel id, the normalised plate in the message and
-  the full snapshot path.
-* `ai.face.watchlist` contains `ai_faces.id` values. If the best cosine match
-  is at least `ai.face.matchThreshold` and its id is on the list, the event gets
-  `alert=true` and an `alerts` row with `type='ai_face'`.
+Plate rules have a blacklist and a whitelist. Both accept comma/semicolon/space
+separated plates and are normalised with the same rules as detections, so
+`京a·12345` on the list matches the normalised `京A12345`.
 
-Existing alert acknowledgement (`POST /api/v1/alerts/:id/ack`) works unchanged.
+* A **blacklist** hit inserts an `alerts` row with `type='ai_plate'`, links it
+  to the `ai_plate_events` row (`source_type='plate'`, `source_id`), and pushes
+  the alert on `/ws/events`. The `ai.plate` message carries `alert=true` and
+  `list="black"`.
+* A **whitelist** hit never alerts, even when the plate is also blacklisted.
+  The `ai.plate` message carries `alert=false` and `list="white"` so the reason
+  is visible in the UI.
+* A plate on neither list is still persisted and pushed, with `alert=false`
+  and an empty `list`.
+
+`ai.plate.watchlist` is the pre-blacklist setting. When
+`ai.plate.blacklist` is empty it is used as the blacklist, so upgrades keep
+the old behaviour; once a blacklist is configured the new key wins.
+
+`ai.face.watchlist` contains `ai_faces.id` values. Every face is compared with
+the whole library (1:N, cosine similarity) and the best entry is stored in
+`ai_face_events.matched_face_id`/`matched_score`. If that score reaches
+`ai.face.matchThreshold` and the id is on the watchlist, the event gets
+`alert=true` and an `alerts` row with `type='ai_face'`, linked to the
+`ai_face_events` row (`source_type='face'`, `source_id`).
+
+`POST /api/v1/ai/faces/search` exposes the same 1:N search for a supplied
+feature vector, returning the best `limit` entries with their score and whether
+each one reached `threshold`.
+
+Alert rows carry `source_type`/`source_id` and a `sourceUrl` for the AI crop
+snapshot, so the alert page can show the recognition image next to the alert.
+Acknowledgement (`POST /api/v1/alerts/:id/ack`) accepts an optional
+`{"note":"..."}` and records `acknowledged_at`, `acknowledged_by` and
+`ack_note`; the audit log keeps the operator and note. Existing alert
+acknowledgement behaviour is unchanged.
 
 ## Stub and build options
 

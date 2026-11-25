@@ -7,6 +7,14 @@ add_executable(ai_plate_post_test
 target_include_directories(ai_plate_post_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME ai_plate_post COMMAND ai_plate_post_test)
 
+add_executable(ai_rules_test
+  ai_rules_test.cpp
+  "${CMAKE_SOURCE_DIR}/src/ai/ai_rules.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ai/plate_post.cpp"
+)
+target_include_directories(ai_rules_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME ai_rules COMMAND ai_rules_test)
+
 add_executable(ai_snapshot_quota_test
   ai_snapshot_quota_test.cpp
   "${CMAKE_SOURCE_DIR}/src/ai/snapshot_quota.cpp"

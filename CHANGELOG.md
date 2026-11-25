@@ -8,6 +8,17 @@ All notable changes to UvNVR are documented here. The format follows
 
 ### Added
 
+- **AI alert rules.** Plate recognition now supports a blacklist and a
+  whitelist (`ai.plate.blacklist` / `ai.plate.whitelist`); whitelist hits never
+  alert, blacklist hits insert an `alerts` row linked to the
+  `ai_plate_events` row and push it on `/ws/events`. The legacy
+  `ai.plate.watchlist` is still read as a blacklist for existing installs.
+  Face recognition keeps its 1:N cosine match with `ai.face.matchThreshold`
+  and adds `POST /api/v1/ai/faces/search` for explicit 1:N searches.
+- **Alert acknowledgement flow.** Alerts carry `source_type`/`source_id`,
+  snapshot and source URLs; `POST /api/v1/alerts/{id}/ack` accepts an optional
+  note and records the operator and timestamp. The alerts page shows AI
+  thumbnails, source-event badges, type filters and the acknowledgement note.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry

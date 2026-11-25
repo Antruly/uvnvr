@@ -235,6 +235,7 @@ add_executable(uvnvr
 if(UVNVR_AI_ENABLED)
   target_sources(uvnvr PRIVATE
     src/ai/ai_engine.cpp
+    src/ai/ai_rules.cpp
     src/ai/ai_service.cpp
     src/ai/snapshot_quota.cpp
   )

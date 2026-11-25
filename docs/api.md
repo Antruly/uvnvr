@@ -159,6 +159,22 @@ Alert messages are emitted as soon as the alert row is written, and channel
 messages when the online/offline state changes. The Alerts page refreshes itself
 while this socket is connected.
 
+### Alerts
+
+`GET /api/v1/alerts` accepts `level`, `acknowledged` (`0`/`1`) and `type`
+(for example `ai_plate`, `ai_face`, `motion`) filters and returns at most 300
+rows, newest first. Each row includes `snapshotUrl`, `sourceType`
+(`plate`/`face` for AI alerts, otherwise empty), `sourceId`, `sourceUrl`
+(crop snapshot of the source AI event), `acknowledgedAt`, `acknowledgedBy` and
+`note`.
+
+`POST /api/v1/alerts/{id}/ack` acknowledges one alert. The body is optional:
+`{"note":"..."}` (up to 2000 characters) is stored in `ack_note` and recorded
+in the audit log together with the operator and timestamp. The response is
+`{"ok":true,"acknowledged":true,"acknowledgedAt":...,"acknowledgedBy":"...","note":"..."}`;
+an unknown id returns 404. `GET /api/v1/alerts/{id}/snapshot` still serves the
+alert's full snapshot, including AI snapshots.
+
 ## Downloads and export
 
 `GET /api/v1/recordings` returns `path`, `codec`, `startMs`, `endMs`,
@@ -571,7 +587,7 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/ai/config` | Global AI settings plus `running`. |
-| `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `snapshotMaxPerDay`, `snapshotMaxTotalMb`, `snapshotMinFreeMb`, `stub`, `plateWatchlist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`, `faceDedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
+| `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `snapshotMaxPerDay`, `snapshotMaxTotalMb`, `snapshotMinFreeMb`, `stub`, `plateWatchlist`, `plateBlacklist`, `plateWhitelist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`, `faceDedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
 | `GET /api/v1/channels/{id}/ai` | Per-channel switches, interval override, ROI and the effective state. |
 | `PUT /api/v1/channels/{id}/ai` | Partial update of `{plateEnabled, faceEnabled, intervalMs}`; `intervalMs=0` inherits the global value. Hot-reloads. |
 | `PUT /api/v1/ai/channels` | `{channelIds:[...], plateEnabled, faceEnabled}` bulk switch. |
@@ -582,6 +598,7 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 | `GET /api/v1/ai/stats` | `{enabled,running,plate:{workers,processed,failed,dropped,avgMs,fps},face:{...,deduped},snapshots:{today,bytes,skipped,blocked},channels:[{id,name,plate,face}]}`. |
 | `POST /api/v1/ai/test` | `{channelId, type?}` grabs one current frame and runs the configured engines; returns boxes, normalised text and elapsed milliseconds. |
 | `GET /api/v1/ai/faces`, `POST /api/v1/ai/faces`, `PUT/DELETE /api/v1/ai/faces/{id}` | Local face library CRUD (`name`, `note`, optional `feature` number array and `imagePath`). |
+| `POST /api/v1/ai/faces/search` | 1:N cosine search: `{feature:[numbers], threshold?:0..1, limit?:1..50}`; returns `{threshold,librarySize,matched,items:[{id,name,score,matched}]}`. |
 
 Times in these endpoints are epoch **seconds**. Example event item:
 
