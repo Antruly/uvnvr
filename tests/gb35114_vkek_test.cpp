@@ -533,6 +533,17 @@ void TestRotationRetiresOldKey() {
                  fixture.manager.ProcessVkekDelivery(wire, nullptr, &error),
                  VkekStatus::kKeyExpired);
 
+  DeliveryOptions empty_window = DefaultDelivery(fixture, handshake, Pattern(16, 0x38));
+  empty_window.key_id = 3;
+  empty_window.key_version = 3;
+  empty_window.sequence = 3;
+  empty_window.not_before_ms = 0;
+  empty_window.not_after_ms = 0;
+  if (MakeDelivery(fixture, empty_window, &wire))
+    ExpectStatus("empty/negative VKEK window rejected",
+                 fixture.manager.ProcessVkekDelivery(wire, nullptr, &error),
+                 VkekStatus::kInvalidKey);
+
   DeliveryOptions not_yet = DefaultDelivery(fixture, handshake, Pattern(16, 0x36));
   not_yet.key_id = 3;
   not_yet.key_version = 3;

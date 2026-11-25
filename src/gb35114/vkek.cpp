@@ -1140,9 +1140,10 @@ VkekStatus VkekManager::ProcessVkekDelivery(const gm::Bytes& wire, gm::Bytes* ac
                        "the VKEK signature is invalid: " + detail, error);
 
   const std::int64_t now = impl_->NowMs();
-  if (delivery.not_before_ms >= delivery.not_after_ms)
+  if (delivery.not_before_ms <= 0 || delivery.not_after_ms <= 0 ||
+      delivery.not_before_ms >= delivery.not_after_ms)
     return impl_->Fail(VkekStatus::kInvalidKey, true, true,
-                       "the VKEK validity window is empty or inverted", error);
+                       "the VKEK validity window is empty, inverted or negative", error);
   if (now < delivery.not_before_ms)
     return impl_->Fail(VkekStatus::kInvalidKey, true, true, "the VKEK is not valid yet", error);
   if (now > delivery.not_after_ms)
