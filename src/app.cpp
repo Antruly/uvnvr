@@ -1108,6 +1108,8 @@ bool App::Migrate(std::string* error) {
       "interval_ms INTEGER NOT NULL DEFAULT 0,"
       "plate_roi TEXT NOT NULL DEFAULT '',"
       "face_roi TEXT NOT NULL DEFAULT '',"
+      "min_plate_confidence REAL NOT NULL DEFAULT -1,"
+      "min_face_quality REAL NOT NULL DEFAULT -1,"
       "updated_at INTEGER NOT NULL DEFAULT 0)",
       "CREATE TABLE IF NOT EXISTS ai_plate_events ("
       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -1169,6 +1171,36 @@ bool App::Migrate(std::string* error) {
   for (const auto& sql : statements) {
     if (!Exec(sql, {}, nullptr, error))
       return false;
+  }
+
+  // Existing databases predate per-channel AI sensitivity overrides. A
+  // negative default means "inherit the global ai.minPlateConfidence /
+  // ai.minFaceQuality", which keeps old rows behaving exactly as before.
+  {
+    uvcpp::uvcpp_db_table columns;
+    if (Query("PRAGMA table_info(ai_channel_settings)", {}, &columns, error)) {
+      bool has_plate_sensitivity = false;
+      bool has_face_sensitivity = false;
+      for (size_t row = 0; row < columns.rows().size(); ++row) {
+        const std::string name = TableText(columns, row, "name");
+        if (name == "min_plate_confidence")
+          has_plate_sensitivity = true;
+        if (name == "min_face_quality")
+          has_face_sensitivity = true;
+      }
+      if (!has_plate_sensitivity &&
+          !Exec("ALTER TABLE ai_channel_settings ADD COLUMN min_plate_confidence REAL NOT NULL "
+                "DEFAULT -1",
+                {}, nullptr, error)) {
+        return false;
+      }
+      if (!has_face_sensitivity &&
+          !Exec("ALTER TABLE ai_channel_settings ADD COLUMN min_face_quality REAL NOT NULL "
+                "DEFAULT -1",
+                {}, nullptr, error)) {
+        return false;
+      }
+    }
   }
 
   // Existing databases predate per-token API scopes.
@@ -6174,6 +6206,10 @@ void App::RegisterChannelRoutes() {
                 [this, op, &resp, next] {
                   if (op->ok && op->data.contains("id")) {
                     SyncMediaChannel(op->data["id"].get<int64_t>());
+#if UVNVR_ENABLE_AI
+                    if (ai_)
+                      ai_->RefreshChannels();
+#endif
                   }
                   SendOp(resp, *op);
                   next();
@@ -6343,8 +6379,13 @@ void App::RegisterChannelRoutes() {
                   op->data = json{{"id", channel_id}, {"name", name}, {"groupId", group_id}};
                 },
                 [this, op, channel_id, &resp, next] {
-                  if (op->ok)
+                  if (op->ok) {
                     SyncMediaChannel(channel_id);
+#if UVNVR_ENABLE_AI
+                    if (ai_)
+                      ai_->RefreshChannels();
+#endif
+                  }
                   SendOp(resp, *op);
                   next();
                 });
@@ -6401,6 +6442,10 @@ void App::RegisterChannelRoutes() {
                            media_->Remove(channel_id);
                          if (onvif_events_)
                            onvif_events_->Remove(channel_id);
+#if UVNVR_ENABLE_AI
+                         if (ai_)
+                           ai_->RefreshChannels();
+#endif
                        }
                        SendOp(resp, *op);
                        next();
@@ -6795,6 +6840,10 @@ void App::RegisterChannelRoutes() {
                         if (op->ok) {
                           for (const int64_t target : targets)
                             SyncMediaChannel(target);
+#if UVNVR_ENABLE_AI
+                          if (ai_)
+                            ai_->RefreshChannels();
+#endif
                         }
                         SendOp(resp, *op);
                         next();
@@ -10000,12 +10049,20 @@ void App::RegisterAiRoutes() {
                    }
                  }
                  const std::string plate = req.query("plate") ? *req.query("plate") : "";
+                 int64_t matched_face_id = 0;
+                 if (const std::string* value = req.query("matchedFaceId")) {
+                   if (!ParseIntParam(value, &matched_face_id) || matched_face_id <= 0) {
+                     SendError(resp, 400, "invalid_face_id", "matchedFaceId must be positive");
+                     next();
+                     return;
+                   }
+                 }
                  auto result = std::make_shared<json>();
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, type, channel_id, from, to, plate, limit, offset, result, error,
-                          ok] {
-                   *result = ai_->QueryEvents(type, channel_id, from, to, plate,
+                 RunWork([this, type, channel_id, from, to, plate, matched_face_id, limit, offset,
+                          result, error, ok] {
+                   *result = ai_->QueryEvents(type, channel_id, from, to, plate, matched_face_id,
                                               static_cast<int>(limit),
                                               static_cast<int>(offset), error.get());
                    *ok = !result->is_null();

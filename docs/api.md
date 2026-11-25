@@ -572,10 +572,10 @@ Reading uses `alert.view`; changing configuration uses `channel.manage`.
 |---|---|
 | `GET /api/v1/ai/config` | Global AI settings plus `running`. |
 | `PUT /api/v1/ai/config` | Partial update (`enabled`, `plateEnabled`, `faceEnabled`, `intervalMs`, `queueDepth`, `plateWorkers`, `faceWorkers`, `minPlateConfidence`, `minFaceQuality`, `snapshotRetentionDays`, `snapshotMaxPerDay`, `snapshotMaxTotalMb`, `snapshotMinFreeMb`, `stub`, `plateWatchlist`, `faceWatchlist`, `faceMatchThreshold`, `dedupSeconds`, `faceDedupSeconds`). Range violations return 400. Changes hot-reload the pipeline. |
-| `GET /api/v1/channels/{id}/ai` | Per-channel switches, interval override, ROI and the effective state. |
-| `PUT /api/v1/channels/{id}/ai` | Partial update of `{plateEnabled, faceEnabled, intervalMs}`; `intervalMs=0` inherits the global value. Hot-reloads. |
+| `GET /api/v1/channels/{id}/ai` | Per-channel switches, interval/sensitivity overrides, ROI and the effective state. |
+| `PUT /api/v1/channels/{id}/ai` | Partial update of `{plateEnabled, faceEnabled, intervalMs, minPlateConfidence, minFaceQuality}`; `intervalMs=0` inherits the global value and `null` thresholds inherit the global sensitivity. Hot-reloads. |
 | `PUT /api/v1/ai/channels` | `{channelIds:[...], plateEnabled, faceEnabled}` bulk switch. |
-| `GET /api/v1/ai/events` | `type=plate\|face` (default `plate`), `channelId`, `from`, `to`, `plate`, `limit` (1–500, default 50), `offset`. Returns `{total,items}` newest first. |
+| `GET /api/v1/ai/events` | `type=plate\|face` (default `plate`), `channelId`, `from`, `to`, `plate`, `matchedFaceId` (face events for one face-library identity), `limit` (1–500, default 50), `offset`. Returns `{total,items}` newest first. |
 | `GET /api/v1/ai/events/{id}` | One event; add `?type=face`. |
 | `GET /api/v1/ai/events/{id}/snapshot` | `type=plate\|face`, `kind=full\|crop`; returns `image/jpeg` after authentication. |
 | `GET /api/v1/ai/plates` | `plate`, optional `from`/`to`; at most 200 trajectory rows with channel names. |

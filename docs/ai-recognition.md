@@ -90,10 +90,14 @@ Per-channel overrides live in `ai_channel_settings`:
 | `plate_enabled` / `face_enabled` | this channel's switches (default off) |
 | `interval_ms` | `0` inherits `ai.intervalMs`; otherwise 250–10000 |
 | `plate_roi` / `face_roi` | `x,y,w,h` in percent of the frame; empty = full frame |
+| `min_plate_confidence` | per-channel plate threshold; `-1` inherits `ai.minPlateConfidence` |
+| `min_face_quality` | per-channel face threshold; `-1` inherits `ai.minFaceQuality` |
 
 Both global switches and the channel switch must be on for capture to start.
 The global config is read at `Start`/`Reload`; changing one channel restarts the
-pipeline, so the new state is effective immediately.
+pipeline, so the new state is effective immediately. Sensitivity overrides are
+copied into each queued frame, so a per-channel threshold only affects that
+channel's detections.
 
 ## API
 
@@ -104,10 +108,10 @@ permission column is the UvNVR permission checked after authentication.
 |---|---|---|---|
 | GET | `/api/v1/ai/config` | `alert.view` | global config + `running` |
 | PUT | `/api/v1/ai/config` | `channel.manage` | validate and persist, hot reload |
-| GET | `/api/v1/channels/:id/ai` | `alert.view` | channel switches and effective state |
-| PUT | `/api/v1/channels/:id/ai` | `channel.manage` | `{plateEnabled,faceEnabled,intervalMs}` (partial), hot reload |
+| GET | `/api/v1/channels/:id/ai` | `alert.view` | channel switches, sensitivity overrides and effective state |
+| PUT | `/api/v1/channels/:id/ai` | `channel.manage` | `{plateEnabled,faceEnabled,intervalMs,minPlateConfidence,minFaceQuality}` (partial), hot reload |
 | PUT | `/api/v1/ai/channels` | `channel.manage` | `{channelIds:[],plateEnabled,faceEnabled}` |
-| GET | `/api/v1/ai/events` | `alert.view` | `type=plate\|face&channelId=&from=&to=&plate=&limit=&offset=` |
+| GET | `/api/v1/ai/events` | `alert.view` | `type=plate\|face&channelId=&from=&to=&plate=&matchedFaceId=&limit=&offset=` |
 | GET | `/api/v1/ai/events/:id` | `alert.view` | one event (`type` query) |
 | GET | `/api/v1/ai/events/:id/snapshot` | `alert.view` | `type=plate\|face&kind=full\|crop`, `image/jpeg` |
 | GET | `/api/v1/ai/plates` | `alert.view` | trajectory for one plate, up to 200 rows |
@@ -119,7 +123,20 @@ permission column is the UvNVR permission checked after authentication.
 | DELETE | `/api/v1/ai/faces/:id` | `channel.manage` | delete |
 
 `from`/`to` are epoch **seconds**. Event `ts` is also seconds. `limit` defaults
-to 50 and is capped at 500.
+to 50 and is capped at 500. `matchedFaceId` restricts face events to a local
+face-library identity; use it together with a face selected from
+`GET /api/v1/ai/faces`.
+
+### Web UI
+
+Two authenticated pages use these endpoints:
+
+* `/ai-events` — combined or per-type event list with channel/time/plate and
+  face-library filters, server-side paging for a single type, an event detail
+  dialog (full and cropped snapshot, metadata) and a plate trajectory lookup.
+* `/ai-settings` — global AI defaults plus a per-channel row for the plate/face
+  switches, interval override and sensitivity overrides. Every row can be saved
+  on its own; the bulk bar writes both switches for the selected channels.
 
 ### WebSocket messages
 
