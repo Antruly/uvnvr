@@ -28,6 +28,10 @@ option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption mo
 # deployments do not join a GB/T 28181 platform and no existing
 # preview/recording/ONVIF path changes when it is enabled.
 option(UVNVR_ENABLE_GB28181 "Build the GB/T 28181 SIP, MANSCDP and PS/RTP modules" OFF)
+# GB 35114 A-level/B-level video protection: SM3/SM2 frame signatures, VKEK
+# negotiation, SM4 stream encryption and the optional GM/T 0024 TLS adapter.
+# Off by default; requires the GM crypto library.
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 video security modules" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -384,6 +388,39 @@ if(UVNVR_ENABLE_GB28181)
   message(STATUS "gb28181: enabled (SIP, MANSCDP, PS/RTP and media dialogs)")
 else()
   message(STATUS "gb28181: disabled by UVNVR_ENABLE_GB28181=OFF")
+endif()
+
+# GB 35114 A-level module: SM3 access-unit digests and SM2 device signatures,
+# plus the standalone gb35114_verify tool. It is not linked into the server, so
+# the existing preview/recording/RTSP paths are unchanged when it is enabled.
+set(UVNVR_GB35114_ENABLED 0)
+if(UVNVR_ENABLE_GB35114)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "gb35114: requested but gm_crypto is unavailable; UVNVR_ENABLE_GB35114 is forced OFF")
+  else()
+    set(UVNVR_GB35114_ENABLED 1)
+    add_library(uvnvr_gb35114 STATIC
+      src/gb35114/sign.cpp
+    )
+    target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_gb35114 PUBLIC UVNVR_ENABLE_GB35114=1)
+    if(MSVC)
+      target_compile_options(uvnvr_gb35114 PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_gb35114 PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(gb35114_verify tools/gb35114_verify/main.cpp)
+    target_link_libraries(gb35114_verify PRIVATE uvnvr_gb35114)
+    set_target_properties(gb35114_verify PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    install(TARGETS gb35114_verify RUNTIME DESTINATION bin)
+    message(STATUS "gb35114: enabled (A-level signing + gb35114_verify)")
+  endif()
+else()
+  message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")
 endif()
 
 if(WIN32)

@@ -69,6 +69,15 @@ All notable changes to UvNVR are documented here. The format follows
   platform-side integration script validate all three transports and decode
   the received PS with ffmpeg. Still behind `-DUVNVR_ENABLE_GB28181=ON`
   (default off) and not linked into the server. See `docs/gb28181-ps-rtp.md`.
+- **GB 35114 A-level I-frame signatures.** `src/gb35114/sign.{h,cpp}` demuxes
+  MPEG-TS or Annex B H.264 into access units, digests each key frame with SM3
+  and signs the canonical binding (channel, frame index, PTS, size, digest)
+  with the device SM2 key. Records travel in an independent 88-byte-headered
+  stream, so the media bytes are unchanged; `tools/gb35114_verify` signs a
+  recording into a sidecar, verifies it against a public key or device
+  certificate, and detects a one-byte change. The module is behind
+  `UVNVR_ENABLE_GB35114` (default OFF) and is not linked into the server. See
+  `docs/gb35114-a-sign.md`.
 - **Parallel LAN discovery.** The scan endpoint now sends ONVIF
   WS-Discovery, Hikvision SADP and Dahua DHDiscover probes at the same time and
   collects replies for one configurable window (default 4 s). Results carry
