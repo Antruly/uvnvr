@@ -33,6 +33,12 @@ option(UVNVR_ENABLE_GB28181 "Build the GB/T 28181 SIP, MANSCDP and PS/RTP module
 # negotiation, SM4 stream encryption and the optional GM/T 0024 TLS adapter.
 # Off by default; requires the GM crypto library.
 option(UVNVR_ENABLE_GB35114 "Build the GB 35114 video security modules" OFF)
+# GM/T 0024 (TLCP) and RFC 8998 GM TLS 1.3 signalling adapter. OpenSSL 3 has
+# the SM algorithms but not the GB/T 38636 cipher suites; this backend needs
+# Tongsuo (Apache-2.0). Off by default so normal deployments are unchanged.
+option(UVNVR_ENABLE_GM_TLS "Build the GM/T 0024 signalling adapter (requires Tongsuo)" OFF)
+set(UVNVR_GM_TLS_ROOT "" CACHE PATH
+    "Tongsuo installation root containing include/openssl/ntls.h and lib[/64]/libssl")
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -435,6 +441,86 @@ if(UVNVR_ENABLE_GB35114)
   endif()
 else()
   message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")
+endif()
+
+# GM/T 0024 signalling adapter. This is intentionally a standalone library and
+# CLI probe; it is not linked into the uvnvr server, so the existing RTSP,
+# ONVIF, private-protocol and HTTPS paths keep using the system OpenSSL. A
+# Tongsuo build is found explicitly by UVNVR_GM_TLS_ROOT (or TONGSUO_ROOT) to
+# avoid silently linking the system OpenSSL, which has no NTLS cipher suites.
+set(UVNVR_GM_TLS_ENABLED 0)
+if(UVNVR_ENABLE_GM_TLS)
+  set(_uvnvr_gm_tls_roots)
+  if(UVNVR_GM_TLS_ROOT)
+    list(APPEND _uvnvr_gm_tls_roots "${UVNVR_GM_TLS_ROOT}")
+  endif()
+  foreach(_uvnvr_gm_tls_env TONGSUO_ROOT TONGSUO_INSTALL_ROOT)
+    if(DEFINED ENV{${_uvnvr_gm_tls_env}} AND NOT "$ENV{${_uvnvr_gm_tls_env}}" STREQUAL "")
+      list(APPEND _uvnvr_gm_tls_roots "$ENV{${_uvnvr_gm_tls_env}}")
+    endif()
+  endforeach()
+
+  find_path(UVNVR_GM_TLS_INCLUDE_DIR NAMES openssl/ntls.h
+            PATHS ${_uvnvr_gm_tls_roots} PATH_SUFFIXES include NO_DEFAULT_PATH)
+  if(UVNVR_GM_TLS_INCLUDE_DIR)
+    get_filename_component(_uvnvr_gm_tls_prefix "${UVNVR_GM_TLS_INCLUDE_DIR}" DIRECTORY)
+    find_library(UVNVR_GM_TLS_SSL_LIBRARY NAMES ssl libssl
+                 PATHS "${_uvnvr_gm_tls_prefix}" PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
+    find_library(UVNVR_GM_TLS_CRYPTO_LIBRARY NAMES crypto libcrypto
+                 PATHS "${_uvnvr_gm_tls_prefix}" PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
+  endif()
+
+  if(UVNVR_GM_TLS_INCLUDE_DIR AND UVNVR_GM_TLS_SSL_LIBRARY AND UVNVR_GM_TLS_CRYPTO_LIBRARY)
+    # Confirm the headers really are Tongsuo (not stock OpenSSL, which lacks
+    # the GM/T 0024 cipher suites and the NTLS methods).
+    file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/opensslv.h" _uvnvr_gm_tls_version_header)
+    file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/opensslconf.h" _uvnvr_gm_tls_conf_header)
+    set(_uvnvr_gm_tls_config_header "")
+    if(EXISTS "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/configuration.h")
+      file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/configuration.h"
+           _uvnvr_gm_tls_config_header)
+    endif()
+    if(NOT _uvnvr_gm_tls_version_header MATCHES "TONGSUO_VERSION_MAJOR")
+      message(STATUS
+        "gm_tls: ${UVNVR_GM_TLS_INCLUDE_DIR} is not a Tongsuo installation; UVNVR_ENABLE_GM_TLS is forced OFF")
+    elseif(_uvnvr_gm_tls_conf_header MATCHES "OPENSSL_NO_NTLS" OR
+           _uvnvr_gm_tls_config_header MATCHES "define OPENSSL_NO_NTLS")
+      message(STATUS
+        "gm_tls: Tongsuo was built without NTLS; UVNVR_ENABLE_GM_TLS is forced OFF")
+    else()
+      find_package(Threads REQUIRED)
+      set(UVNVR_GM_TLS_ENABLED 1)
+      add_library(uvnvr_gm_tls STATIC src/gb35114/tls_gm.cpp)
+      target_include_directories(uvnvr_gm_tls
+        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src" "${UVNVR_GM_TLS_INCLUDE_DIR}")
+      target_link_libraries(uvnvr_gm_tls
+        PUBLIC "${UVNVR_GM_TLS_SSL_LIBRARY}"
+               "${UVNVR_GM_TLS_CRYPTO_LIBRARY}"
+               Threads::Threads
+               ${CMAKE_DL_LIBS})
+      if(WIN32)
+        target_link_libraries(uvnvr_gm_tls PUBLIC ws2_32 crypt32 bcrypt)
+      endif()
+      target_compile_definitions(uvnvr_gm_tls PUBLIC UVNVR_ENABLE_GM_TLS=1)
+      if(MSVC)
+        target_compile_options(uvnvr_gm_tls PRIVATE /W4 /permissive- /utf-8)
+      else()
+        target_compile_options(uvnvr_gm_tls PRIVATE -Wall -Wextra -Wpedantic)
+      endif()
+
+      add_executable(gm_tls_cli tools/gm_tls_cli/main.cpp)
+      target_link_libraries(gm_tls_cli PRIVATE uvnvr_gm_tls)
+      set_target_properties(gm_tls_cli PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+      message(STATUS
+        "gm_tls: enabled (Tongsuo ${UVNVR_GM_TLS_SSL_LIBRARY}, headers ${UVNVR_GM_TLS_INCLUDE_DIR})")
+    endif()
+  else()
+    message(STATUS
+      "gm_tls: Tongsuo not found; set UVNVR_GM_TLS_ROOT to its install prefix. UVNVR_ENABLE_GM_TLS is forced OFF")
+  endif()
+else()
+  message(STATUS "gm_tls: disabled by UVNVR_ENABLE_GM_TLS=OFF")
 endif()
 
 if(WIN32)
