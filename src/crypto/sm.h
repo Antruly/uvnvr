@@ -75,6 +75,17 @@ bool Sm2Verify(std::string_view public_key_pem, std::string_view message, const 
 bool Sm2Verify(std::string_view public_key_pem, std::string_view message, std::string_view user_id,
                const Bytes& signature, std::string* error = nullptr);
 
+// SM2 public-key encryption (GB/T 32918.4) with the SM3 KDF. `public_key_pem`
+// is a SubjectPublicKeyInfo ("PUBLIC KEY"); `private_key_pem` is PKCS#8. The
+// ciphertext is the ASN.1 DER structure produced by OpenSSL 3 (C1 coordinates,
+// C3 digest, C2 masked plaintext) and interoperates with
+// `openssl pkeyutl -encrypt/-decrypt`. This is the primitive used for VKEK
+// distribution in GB 35114.
+bool Sm2Encrypt(std::string_view public_key_pem, const Bytes& plaintext, Bytes* ciphertext,
+                std::string* error = nullptr);
+bool Sm2Decrypt(std::string_view private_key_pem, const Bytes& ciphertext, Bytes* plaintext,
+                std::string* error = nullptr);
+
 // Verifies with the public key of an X.509 certificate, in PEM or DER form.
 bool Sm2VerifyCertificate(std::string_view certificate_pem, std::string_view message,
                           const Bytes& signature, std::string* error = nullptr);

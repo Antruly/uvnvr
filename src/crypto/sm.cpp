@@ -354,8 +354,7 @@ bool Sm4CtrCrypt(const Bytes& key, const Bytes& iv, std::uint64_t offset, const 
       SetError(error, "cannot generate the SM4-CTR keystream: " + internal::OpenSslErrors());
       return false;
     }
-    const std::size_t take =
-        std::min<std::size_t>(kSm4BlockSize - intra, input.size());
+    const std::size_t take = std::min<std::size_t>(kSm4BlockSize - intra, input.size());
     for (std::size_t i = 0; i < take; ++i)
       (*output)[i] = static_cast<unsigned char>(input[i] ^ keystream[intra + i]);
     processed = take;
@@ -441,6 +440,88 @@ bool Sm2Verify(std::string_view public_key_pem, std::string_view message, std::s
   if (!key)
     return false;
   return DigestVerify(key.get(), message, true, user_id, signature, error);
+}
+
+bool Sm2Encrypt(std::string_view public_key_pem, const Bytes& plaintext, Bytes* ciphertext,
+                std::string* error) {
+  if (!ciphertext) {
+    SetError(error, "SM2 ciphertext output is null");
+    return false;
+  }
+  if (plaintext.empty()) {
+    SetError(error, "SM2 encryption requires a non-empty plaintext");
+    return false;
+  }
+  internal::PkeyPtr key = internal::LoadPublicKeyPem(public_key_pem, error);
+  if (!key)
+    return false;
+  if (!IsSm2Key(key.get())) {
+    SetError(error, "the supplied public key is not an SM2 key");
+    return false;
+  }
+
+  internal::PkeyCtxPtr context(EVP_PKEY_CTX_new(key.get(), nullptr));
+  if (!context || EVP_PKEY_encrypt_init(context.get()) != 1) {
+    SetError(error, "cannot initialise SM2 encryption: " + internal::OpenSslErrors());
+    return false;
+  }
+
+  std::size_t length = 0;
+  if (EVP_PKEY_encrypt(context.get(), nullptr, &length, plaintext.data(), plaintext.size()) != 1) {
+    SetError(error, "cannot size the SM2 ciphertext: " + internal::OpenSslErrors());
+    return false;
+  }
+  Bytes result(length);
+  if (EVP_PKEY_encrypt(context.get(), result.data(), &length, plaintext.data(), plaintext.size()) !=
+      1) {
+    SetError(error, "cannot produce the SM2 ciphertext: " + internal::OpenSslErrors());
+    return false;
+  }
+  result.resize(length);
+  *ciphertext = std::move(result);
+  return true;
+}
+
+bool Sm2Decrypt(std::string_view private_key_pem, const Bytes& ciphertext, Bytes* plaintext,
+                std::string* error) {
+  if (!plaintext) {
+    SetError(error, "SM2 plaintext output is null");
+    return false;
+  }
+  if (ciphertext.empty()) {
+    SetError(error, "SM2 ciphertext is empty");
+    return false;
+  }
+  internal::PkeyPtr key = internal::LoadPrivateKeyPem(private_key_pem, error);
+  if (!key)
+    return false;
+  if (!IsSm2Key(key.get())) {
+    SetError(error, "the supplied private key is not an SM2 key");
+    return false;
+  }
+
+  internal::PkeyCtxPtr context(EVP_PKEY_CTX_new(key.get(), nullptr));
+  if (!context || EVP_PKEY_decrypt_init(context.get()) != 1) {
+    SetError(error, "cannot initialise SM2 decryption: " + internal::OpenSslErrors());
+    return false;
+  }
+
+  std::size_t length = 0;
+  if (EVP_PKEY_decrypt(context.get(), nullptr, &length, ciphertext.data(), ciphertext.size()) !=
+      1) {
+    SetError(error, "cannot size the SM2 plaintext: " + internal::OpenSslErrors());
+    return false;
+  }
+  Bytes result(length);
+  if (EVP_PKEY_decrypt(context.get(), result.data(), &length, ciphertext.data(),
+                       ciphertext.size()) != 1) {
+    SetError(error, "SM2 decryption failed (wrong key or corrupted ciphertext)");
+    ClearOpenSslErrors();
+    return false;
+  }
+  result.resize(length);
+  *plaintext = std::move(result);
+  return true;
 }
 
 bool Sm2VerifyCertificate(std::string_view certificate_pem, std::string_view message,

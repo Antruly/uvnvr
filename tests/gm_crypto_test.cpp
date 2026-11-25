@@ -330,6 +330,7 @@ void RunSm2Tests(const std::filesystem::path& artifacts, Sm2Artifacts* out) {
   using uvnvr::gm::Sm2Verify;
   using uvnvr::gm::Sm2VerifyCertificate;
   using uvnvr::gm::Sm2VerifyCertificateDer;
+  using uvnvr::gm::ToHex;
 
   std::string error;
   if (!GenerateSm2KeyPair(&out->key_pair, &error)) {
@@ -391,6 +392,52 @@ void RunSm2Tests(const std::filesystem::path& artifacts, Sm2Artifacts* out) {
   GenerateSm2KeyPair(&other, &error);
   ExpectBool("SM2 verify rejects the wrong public key",
              Sm2Verify(other.public_key_pem, out->message, out->signature, &error), false);
+
+  // SM2 public-key encryption, the primitive used to wrap a VKEK.
+  Bytes vkek(16);
+  for (std::size_t i = 0; i < vkek.size(); ++i)
+    vkek[i] = static_cast<unsigned char>(0x40 + i);
+  Bytes encrypted_vkek;
+  ExpectBool("SM2 encrypt",
+             uvnvr::gm::Sm2Encrypt(out->key_pair.public_key_pem, vkek, &encrypted_vkek, &error),
+             true);
+  ExpectBool("SM2 ciphertext is non-empty", encrypted_vkek.empty(), false);
+
+  Bytes decrypted_vkek;
+  ExpectBool(
+      "SM2 decrypt",
+      uvnvr::gm::Sm2Decrypt(out->key_pair.private_key_pem, encrypted_vkek, &decrypted_vkek, &error),
+      true);
+  Expect("SM2 encryption round-trip", ToHex(decrypted_vkek), ToHex(vkek));
+
+  Bytes tampered_ciphertext = encrypted_vkek;
+  tampered_ciphertext.back() ^= 0x01;
+  Bytes unused_plaintext;
+  ExpectBool("SM2 decrypt rejects a modified ciphertext",
+             uvnvr::gm::Sm2Decrypt(out->key_pair.private_key_pem, tampered_ciphertext,
+                                   &unused_plaintext, &error),
+             false);
+  ExpectBool(
+      "SM2 decrypt rejects the wrong private key",
+      uvnvr::gm::Sm2Decrypt(other.private_key_pem, encrypted_vkek, &unused_plaintext, &error),
+      false);
+  ExpectBool(
+      "SM2 encrypt rejects an empty plaintext",
+      uvnvr::gm::Sm2Encrypt(out->key_pair.public_key_pem, Bytes{}, &unused_plaintext, &error),
+      false);
+
+  WriteAll(artifacts / "sm2_vkek_plain.bin", vkek);
+  WriteAll(artifacts / "sm2_vkek_cipher.der", encrypted_vkek);
+
+  // The negotiation exchanges SM3(DER certificate) so the platform can choose
+  // the enrolled device certificate.
+  Bytes fingerprint;
+  ExpectBool("certificate fingerprint",
+             uvnvr::gm::CertificateFingerprintSm3(out->certificate_pem, &fingerprint, &error),
+             true);
+  ExpectSize("certificate fingerprint size", fingerprint.size(), uvnvr::gm::kSm3DigestSize);
+  Expect("certificate fingerprint is SM3(DER)", ToHex(fingerprint),
+         ToHex(uvnvr::gm::Sm3(out->certificate_der.data(), out->certificate_der.size())));
 
   WriteAll(artifacts / "sm2_key.pem", out->key_pair.private_key_pem);
   WriteAll(artifacts / "sm2_pub.pem", out->key_pair.public_key_pem);
@@ -738,14 +785,62 @@ int RunVerify(const char* key_path, const char* message_path, const char* signat
   return 0;
 }
 
+int RunEncrypt(const char* key_path, const char* plain_path, const char* cipher_path) {
+  const std::string key = ReadAll(key_path);
+  const std::string plain_text = ReadAll(plain_path);
+  if (key.empty() || plain_text.empty()) {
+    std::fprintf(stderr, "cannot read the public key or plaintext\n");
+    return 2;
+  }
+  uvnvr::gm::Bytes plaintext(plain_text.begin(), plain_text.end());
+  uvnvr::gm::Bytes ciphertext;
+  std::string error;
+  if (!uvnvr::gm::Sm2Encrypt(key, plaintext, &ciphertext, &error)) {
+    std::fprintf(stderr, "encrypt failed: %s\n", error.c_str());
+    return 1;
+  }
+  if (!WriteAll(cipher_path, ciphertext)) {
+    std::fprintf(stderr, "cannot write %s\n", cipher_path);
+    return 2;
+  }
+  std::printf("encrypted %zu plaintext bytes, %zu ciphertext bytes\n", plaintext.size(),
+              ciphertext.size());
+  return 0;
+}
+
+int RunDecrypt(const char* key_path, const char* cipher_path, const char* plain_path) {
+  const std::string key = ReadAll(key_path);
+  const std::string cipher_text = ReadAll(cipher_path);
+  if (key.empty() || cipher_text.empty()) {
+    std::fprintf(stderr, "cannot read the private key or ciphertext\n");
+    return 2;
+  }
+  const uvnvr::gm::Bytes ciphertext(cipher_text.begin(), cipher_text.end());
+  uvnvr::gm::Bytes plaintext;
+  std::string error;
+  if (!uvnvr::gm::Sm2Decrypt(key, ciphertext, &plaintext, &error)) {
+    std::fprintf(stderr, "decrypt failed: %s\n", error.c_str());
+    return 1;
+  }
+  if (!WriteAll(plain_path, plaintext)) {
+    std::fprintf(stderr, "cannot write %s\n", plain_path);
+    return 2;
+  }
+  std::printf("decrypted %zu ciphertext bytes, %zu plaintext bytes\n", ciphertext.size(),
+              plaintext.size());
+  return 0;
+}
+
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
                "usage:\n"
-               "  %s                                   run the unit tests\n"
-               "  %s --digest <file>                   print the SM3 hex digest\n"
-               "  %s --sign <key.pem> <msg> <sig-out>  sign a file with SM2/SM3\n"
-               "  %s --verify <key.pem> <msg> <sig>    verify a signature with SM2/SM3\n",
-               program, program, program, program);
+               "  %s                                      run the unit tests\n"
+               "  %s --digest <file>                      print the SM3 hex digest\n"
+               "  %s --sign <key.pem> <msg> <sig-out>     sign a file with SM2/SM3\n"
+               "  %s --verify <key.pem> <msg> <sig>       verify a signature with SM2/SM3\n"
+               "  %s --encrypt <pub.pem> <plain> <out>    encrypt a file with SM2\n"
+               "  %s --decrypt <key.pem> <cipher> <out>   decrypt a file with SM2\n",
+               program, program, program, program, program, program);
 }
 
 } // namespace
@@ -759,6 +854,10 @@ int main(int argc, char** argv) {
       return RunSign(argv[2], argv[3], argv[4]);
     if (mode == "--verify" && argc == 5)
       return RunVerify(argv[2], argv[3], argv[4]);
+    if (mode == "--encrypt" && argc == 5)
+      return RunEncrypt(argv[2], argv[3], argv[4]);
+    if (mode == "--decrypt" && argc == 5)
+      return RunDecrypt(argv[2], argv[3], argv[4]);
     PrintUsage(argv[0]);
     return 2;
   }

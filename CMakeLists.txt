@@ -23,6 +23,9 @@ option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (re
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
+# GB 35114 A-level signature negotiation and VKEK distribution. Off by default
+# and not linked into the server; requires the GM crypto library.
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 VKEK/signature-negotiation module" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -316,6 +319,34 @@ if(UVNVR_ENABLE_SECURE)
   endif()
 else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
+endif()
+
+# GB 35114 module: SM2/SM3 signature negotiation and SM2-encrypted VKEK
+# distribution with rotation/replay protection. It is a standalone library and
+# is not linked into the server, so enabling it does not change the existing
+# preview/recording/RTSP/ONVIF/private-protocol paths.
+set(UVNVR_GB35114_ENABLED 0)
+if(UVNVR_ENABLE_GB35114)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "gb35114: requested but gm_crypto is unavailable; UVNVR_ENABLE_GB35114 is forced OFF")
+  else()
+    set(UVNVR_GB35114_ENABLED 1)
+    add_library(uvnvr_gb35114 STATIC
+      src/gb35114/vkek.cpp
+    )
+    target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_gb35114 PUBLIC UVNVR_ENABLE_GB35114=1)
+    if(MSVC)
+      target_compile_options(uvnvr_gb35114 PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_gb35114 PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    message(STATUS "gb35114: enabled (VKEK distribution + signature negotiation)")
+  endif()
+else()
+  message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")
 endif()
 
 if(WIN32)
