@@ -20,6 +20,7 @@ set(UVNVR_INSPIREFACE_ROOT "" CACHE PATH
     "InspireFace SDK root containing include/inspireface.h and lib/libInspireFace")
 option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (requires OpenSSL)"
        ON)
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 B-level video encryption module" OFF)
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
@@ -285,6 +286,47 @@ if(UVNVR_ENABLE_GM_CRYPTO)
   endif()
 else()
   message(STATUS "gm_crypto: disabled by UVNVR_ENABLE_GM_CRYPTO=OFF")
+endif()
+
+# GB 35114 B level: VKEK distribution and SM4 encryption of the H.264 ES.
+# The module is a standalone static library plus a platform-side CLI; it does
+# not link into the server, and the server's preview/recording/ONVIF paths are
+# untouched. The GB/T 28181 PS/RTP pipeline (a separate work item) calls
+# SealEsStream() between ES extraction and PS muxing.
+set(UVNVR_GB35114_ENABLED 0)
+if(UVNVR_ENABLE_GB35114)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "gb35114: requested but gm_crypto is unavailable; UVNVR_ENABLE_GB35114 is forced OFF")
+  else()
+    set(UVNVR_GB35114_ENABLED 1)
+    add_library(uvnvr_gb35114 STATIC
+      src/gb35114/vkek.cpp
+      src/gb35114/es_crypto.cpp
+    )
+    target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_gb35114 PUBLIC UVNVR_ENABLE_GB35114=1)
+    if(MSVC)
+      target_compile_options(uvnvr_gb35114 PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_gb35114 PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(gb35114_cli tools/gb35114_cli/main.cpp)
+    target_link_libraries(gb35114_cli PRIVATE uvnvr_gb35114)
+    set_target_properties(gb35114_cli PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    if(MSVC)
+      target_compile_options(gb35114_cli PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(gb35114_cli PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    install(TARGETS gb35114_cli RUNTIME DESTINATION bin)
+    message(STATUS "gb35114: enabled (B-level video encryption, gb35114_cli)")
+  endif()
+else()
+  message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")
 endif()
 
 # Secure module: audit hash chain, firmware signature verification and

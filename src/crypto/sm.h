@@ -51,6 +51,28 @@ bool Sm4CbcDecrypt(const Bytes& key, const Bytes& iv, const Bytes& ciphertext, B
 bool Sm4CtrCrypt(const Bytes& key, const Bytes& iv, std::uint64_t offset, const Bytes& input,
                  Bytes* output, std::string* error = nullptr);
 
+// SM2 public-key encryption (GB/T 32918.4), as used by GB 35114 to wrap the
+// VKEK. The wire form is the concatenation C1 || C3 || C2 required by the
+// standard: C1 is the uncompressed point 0x04 || X || Y (65 bytes), C3 is the
+// 32-byte SM3 digest and C2 is the ciphertext (same length as the plaintext).
+// OpenSSL produces/consumes an ASN.1 SEQUENCE internally; the conversion stays
+// inside this module so callers only ever see the standard wire form.
+bool Sm2Encrypt(std::string_view public_key_pem, const Bytes& plaintext, Bytes* ciphertext,
+                std::string* error = nullptr);
+bool Sm2EncryptCertificate(std::string_view certificate_pem, const Bytes& plaintext,
+                           Bytes* ciphertext, std::string* error = nullptr);
+bool Sm2Decrypt(std::string_view private_key_pem, const Bytes& ciphertext, Bytes* plaintext,
+                std::string* error = nullptr);
+
+// HMAC-SM3 (RFC 2104 with SM3 as the hash). The keyed hash is used by the
+// GB 35114 key derivation and frame authentication.
+Bytes HmacSm3(const Bytes& key, const void* data, std::size_t size);
+Bytes HmacSm3(const Bytes& key, const Bytes& data);
+std::string HmacSm3Hex(const Bytes& key, const Bytes& data);
+
+// Cryptographically secure random bytes from the OpenSSL CSPRNG.
+bool RandomBytes(std::size_t size, Bytes* output, std::string* error = nullptr);
+
 // SM2 key pair encoded as PEM: the private key as PKCS#8 ("PRIVATE KEY") and the
 // public key as SubjectPublicKeyInfo ("PUBLIC KEY").
 struct Sm2KeyPair {

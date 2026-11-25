@@ -8,6 +8,9 @@
 #include <limits>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/x509.h>
 #include <utility>
 
 namespace uvnvr::gm {
@@ -40,6 +43,258 @@ bool CheckSm4Inputs(const Bytes& key, const Bytes& iv, const char* operation, st
 
 bool IsSm2Key(EVP_PKEY* key) {
   return key && EVP_PKEY_is_a(key, "SM2") == 1;
+}
+
+// ---- SM2 ciphertext wire form -----------------------------------------
+//
+// GB/T 32918.4 encrypts to C1 || C3 || C2. OpenSSL's EVP_PKEY_encrypt() emits
+// the equivalent ASN.1 structure
+//
+//   SEQUENCE { INTEGER x, INTEGER y, OCTET STRING c3, OCTET STRING c2 }
+//
+// and EVP_PKEY_decrypt() expects it again. The helpers below are the only
+// place that knows about that encoding.
+
+constexpr std::size_t kSm2CoordinateSize = 32;
+constexpr std::size_t kSm2C1Size = 1 + 2 * kSm2CoordinateSize;
+constexpr std::size_t kSm2C3Size = 32;
+
+void AppendDerLength(Bytes* out, std::size_t length) {
+  if (length < 0x80) {
+    out->push_back(static_cast<unsigned char>(length));
+    return;
+  }
+  unsigned char buffer[sizeof(std::size_t)];
+  std::size_t count = 0;
+  while (length != 0) {
+    buffer[count++] = static_cast<unsigned char>(length & 0xFF);
+    length >>= 8;
+  }
+  out->push_back(static_cast<unsigned char>(0x80 | count));
+  while (count != 0)
+    out->push_back(buffer[--count]);
+}
+
+void AppendDerInteger(Bytes* out, const unsigned char* value, std::size_t size) {
+  std::size_t start = 0;
+  while (start + 1 < size && value[start] == 0)
+    ++start;
+  const unsigned char* data = value + start;
+  const std::size_t length = size - start;
+  out->push_back(0x02);
+  if ((data[0] & 0x80) != 0) {
+    AppendDerLength(out, length + 1);
+    out->push_back(0x00);
+  } else {
+    AppendDerLength(out, length);
+  }
+  out->insert(out->end(), data, data + length);
+}
+
+void AppendDerOctetString(Bytes* out, const unsigned char* value, std::size_t size) {
+  out->push_back(0x04);
+  AppendDerLength(out, size);
+  out->insert(out->end(), value, value + size);
+}
+
+bool ReadDerElement(const unsigned char** cursor, const unsigned char* end, unsigned char* tag,
+                    const unsigned char** value, std::size_t* length) {
+  const unsigned char* p = *cursor;
+  if (p >= end)
+    return false;
+  *tag = *p++;
+  if (p >= end)
+    return false;
+  std::size_t element_length = 0;
+  if ((*p & 0x80) != 0) {
+    const std::size_t count = static_cast<std::size_t>(*p++ & 0x7F);
+    if (count == 0 || count > sizeof(std::size_t) || static_cast<std::size_t>(end - p) < count) {
+      return false;
+    }
+    for (std::size_t i = 0; i < count; ++i)
+      element_length = (element_length << 8) | *p++;
+  } else {
+    element_length = *p++;
+  }
+  if (static_cast<std::size_t>(end - p) < element_length)
+    return false;
+  *value = p;
+  *length = element_length;
+  *cursor = p + element_length;
+  return true;
+}
+
+bool CopyPaddedCoordinate(const unsigned char* value, std::size_t size, unsigned char* out,
+                          std::string* error) {
+  std::size_t start = 0;
+  while (start < size && value[start] == 0)
+    ++start;
+  const std::size_t significant = size - start;
+  if (significant > kSm2CoordinateSize) {
+    SetError(error, "SM2 ciphertext point is outside the P-256 field");
+    return false;
+  }
+  std::memset(out, 0, kSm2CoordinateSize);
+  std::memcpy(out + (kSm2CoordinateSize - significant), value + start, significant);
+  return true;
+}
+
+bool DerToRawCiphertext(const Bytes& der, Bytes* raw, std::string* error) {
+  const unsigned char* cursor = der.data();
+  const unsigned char* end = der.data() + der.size();
+  unsigned char tag = 0;
+  const unsigned char* sequence = nullptr;
+  std::size_t sequence_length = 0;
+  if (!ReadDerElement(&cursor, end, &tag, &sequence, &sequence_length) || tag != 0x30 ||
+      cursor != end) {
+    SetError(error, "SM2 ciphertext is not a DER SEQUENCE");
+    return false;
+  }
+
+  const unsigned char* p = sequence;
+  const unsigned char* sequence_end = sequence + sequence_length;
+  const unsigned char* x = nullptr;
+  const unsigned char* y = nullptr;
+  const unsigned char* c3 = nullptr;
+  const unsigned char* c2 = nullptr;
+  std::size_t x_length = 0;
+  std::size_t y_length = 0;
+  std::size_t c3_length = 0;
+  std::size_t c2_length = 0;
+  if (!ReadDerElement(&p, sequence_end, &tag, &x, &x_length) || tag != 0x02 ||
+      !ReadDerElement(&p, sequence_end, &tag, &y, &y_length) || tag != 0x02 ||
+      !ReadDerElement(&p, sequence_end, &tag, &c3, &c3_length) || tag != 0x04 ||
+      !ReadDerElement(&p, sequence_end, &tag, &c2, &c2_length) || tag != 0x04 ||
+      p != sequence_end) {
+    SetError(error, "SM2 ciphertext SEQUENCE has an unexpected structure");
+    return false;
+  }
+  // A DER INTEGER carries a leading zero when the high bit is set, so 33
+  // content bytes are normal for a 32-byte coordinate.
+  if (x_length == 0 || x_length > kSm2CoordinateSize + 1 || y_length == 0 ||
+      y_length > kSm2CoordinateSize + 1) {
+    SetError(error, "SM2 ciphertext point is outside the P-256 field");
+    return false;
+  }
+  if (c3_length != kSm2C3Size) {
+    SetError(error, "SM2 ciphertext C3 must be 32 bytes");
+    return false;
+  }
+  if (c2_length == 0) {
+    SetError(error, "SM2 ciphertext C2 is empty");
+    return false;
+  }
+
+  raw->resize(kSm2C1Size + kSm2C3Size + c2_length);
+  (*raw)[0] = 0x04;
+  if (!CopyPaddedCoordinate(x, x_length, raw->data() + 1, error) ||
+      !CopyPaddedCoordinate(y, y_length, raw->data() + 1 + kSm2CoordinateSize, error)) {
+    return false;
+  }
+  std::memcpy(raw->data() + kSm2C1Size, c3, kSm2C3Size);
+  std::memcpy(raw->data() + kSm2C1Size + kSm2C3Size, c2, c2_length);
+  return true;
+}
+
+bool RawToDerCiphertext(const Bytes& raw, Bytes* der, std::string* error) {
+  if (raw.size() <= kSm2C1Size + kSm2C3Size) {
+    SetError(error, "SM2 C1||C3||C2 ciphertext is too short");
+    return false;
+  }
+  if (raw[0] != 0x04) {
+    SetError(error, "SM2 C1 is not an uncompressed point");
+    return false;
+  }
+
+  const unsigned char* x = raw.data() + 1;
+  const unsigned char* y = x + kSm2CoordinateSize;
+  const unsigned char* c3 = y + kSm2CoordinateSize;
+  const unsigned char* c2 = c3 + kSm2C3Size;
+  const std::size_t c2_length = raw.size() - (kSm2C1Size + kSm2C3Size);
+
+  Bytes content;
+  content.reserve(raw.size() + 16);
+  AppendDerInteger(&content, x, kSm2CoordinateSize);
+  AppendDerInteger(&content, y, kSm2CoordinateSize);
+  AppendDerOctetString(&content, c3, kSm2C3Size);
+  AppendDerOctetString(&content, c2, c2_length);
+
+  der->clear();
+  der->reserve(content.size() + 8);
+  der->push_back(0x30);
+  AppendDerLength(der, content.size());
+  der->insert(der->end(), content.begin(), content.end());
+  return true;
+}
+
+bool EncryptWithKey(EVP_PKEY* key, const Bytes& plaintext, Bytes* ciphertext, std::string* error) {
+  if (!ciphertext) {
+    SetError(error, "SM2 ciphertext output is null");
+    return false;
+  }
+  if (!IsSm2Key(key)) {
+    SetError(error, "the supplied public key is not an SM2 key");
+    return false;
+  }
+  if (plaintext.empty()) {
+    SetError(error, "SM2 encryption requires a non-empty plaintext");
+    return false;
+  }
+
+  internal::PkeyCtxPtr context(EVP_PKEY_CTX_new(key, nullptr));
+  if (!context || EVP_PKEY_encrypt_init(context.get()) != 1) {
+    SetError(error, "cannot initialise SM2 encryption: " + internal::OpenSslErrors());
+    return false;
+  }
+  std::size_t length = 0;
+  if (EVP_PKEY_encrypt(context.get(), nullptr, &length, plaintext.data(), plaintext.size()) != 1) {
+    SetError(error, "cannot size the SM2 ciphertext: " + internal::OpenSslErrors());
+    return false;
+  }
+  Bytes der(length);
+  if (EVP_PKEY_encrypt(context.get(), der.data(), &length, plaintext.data(), plaintext.size()) !=
+      1) {
+    SetError(error, "SM2 encryption failed: " + internal::OpenSslErrors());
+    return false;
+  }
+  der.resize(length);
+  return DerToRawCiphertext(der, ciphertext, error);
+}
+
+bool DecryptWithKey(EVP_PKEY* key, const Bytes& ciphertext, Bytes* plaintext, std::string* error) {
+  if (!plaintext) {
+    SetError(error, "SM2 plaintext output is null");
+    return false;
+  }
+  if (!IsSm2Key(key)) {
+    SetError(error, "the supplied private key is not an SM2 key");
+    return false;
+  }
+
+  Bytes der;
+  if (!RawToDerCiphertext(ciphertext, &der, error))
+    return false;
+
+  internal::PkeyCtxPtr context(EVP_PKEY_CTX_new(key, nullptr));
+  if (!context || EVP_PKEY_decrypt_init(context.get()) != 1) {
+    SetError(error, "cannot initialise SM2 decryption: " + internal::OpenSslErrors());
+    return false;
+  }
+  std::size_t length = 0;
+  if (EVP_PKEY_decrypt(context.get(), nullptr, &length, der.data(), der.size()) != 1) {
+    SetError(error, "SM2 decryption failed (wrong private key or corrupted ciphertext)");
+    ClearOpenSslErrors();
+    return false;
+  }
+  Bytes result(length);
+  if (EVP_PKEY_decrypt(context.get(), result.data(), &length, der.data(), der.size()) != 1) {
+    SetError(error, "SM2 decryption failed (wrong private key or corrupted ciphertext)");
+    ClearOpenSslErrors();
+    return false;
+  }
+  result.resize(length);
+  *plaintext = std::move(result);
+  return true;
 }
 
 bool DigestSign(EVP_PKEY* key, std::string_view message, bool use_user_id, std::string_view user_id,
@@ -374,6 +629,79 @@ bool Sm4CtrCrypt(const Bytes& key, const Bytes& iv, std::uint64_t offset, const 
       SetError(error, "SM4-CTR operation failed: " + internal::OpenSslErrors());
       return false;
     }
+  }
+  return true;
+}
+
+bool Sm2Encrypt(std::string_view public_key_pem, const Bytes& plaintext, Bytes* ciphertext,
+                std::string* error) {
+  internal::PkeyPtr key = internal::LoadPublicKeyPem(public_key_pem, error);
+  if (!key)
+    return false;
+  return EncryptWithKey(key.get(), plaintext, ciphertext, error);
+}
+
+bool Sm2EncryptCertificate(std::string_view certificate_pem, const Bytes& plaintext,
+                           Bytes* ciphertext, std::string* error) {
+  internal::X509Ptr certificate = internal::LoadCertificatePem(certificate_pem, error);
+  if (!certificate)
+    return false;
+  internal::PkeyPtr key(X509_get_pubkey(certificate.get()));
+  if (!key) {
+    SetError(error,
+             "cannot extract the public key from the certificate: " + internal::OpenSslErrors());
+    return false;
+  }
+  return EncryptWithKey(key.get(), plaintext, ciphertext, error);
+}
+
+bool Sm2Decrypt(std::string_view private_key_pem, const Bytes& ciphertext, Bytes* plaintext,
+                std::string* error) {
+  internal::PkeyPtr key = internal::LoadPrivateKeyPem(private_key_pem, error);
+  if (!key)
+    return false;
+  return DecryptWithKey(key.get(), ciphertext, plaintext, error);
+}
+
+Bytes HmacSm3(const Bytes& key, const void* data, std::size_t size) {
+  if (key.empty()) {
+    ClearOpenSslErrors();
+    return {};
+  }
+  static const unsigned char kEmpty = 0;
+  const unsigned char* input = data ? static_cast<const unsigned char*>(data) : &kEmpty;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int length = 0;
+  if (!HMAC(EVP_sm3(), key.data(), static_cast<int>(key.size()), input, size, digest, &length)) {
+    ClearOpenSslErrors();
+    return {};
+  }
+  return Bytes(digest, digest + length);
+}
+
+Bytes HmacSm3(const Bytes& key, const Bytes& data) {
+  return HmacSm3(key, data.data(), data.size());
+}
+
+std::string HmacSm3Hex(const Bytes& key, const Bytes& data) {
+  return ToHex(HmacSm3(key, data));
+}
+
+bool RandomBytes(std::size_t size, Bytes* output, std::string* error) {
+  if (!output) {
+    SetError(error, "random byte output is null");
+    return false;
+  }
+  if (size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    SetError(error, "random byte request is too large");
+    return false;
+  }
+  output->resize(size);
+  if (size == 0)
+    return true;
+  if (RAND_bytes(output->data(), static_cast<int>(size)) != 1) {
+    SetError(error, "cannot obtain random bytes: " + internal::OpenSslErrors());
+    return false;
   }
   return true;
 }
