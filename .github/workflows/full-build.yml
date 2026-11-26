@@ -235,6 +235,7 @@ jobs:
       - name: Configure
         run: |
           UVCPP_DIR=$(find /tmp/uvcpp -maxdepth 1 -mindepth 1 -type d | head -1)
+          echo "UVCPP_DIR=$UVCPP_DIR" >> "$GITHUB_ENV"
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DUVNVR_LIBUVCPP_ROOT="$(cygpath -w "$UVCPP_DIR")" \
