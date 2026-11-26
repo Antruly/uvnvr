@@ -140,3 +140,119 @@ jobs:
             uvnvr-*-full-linux-x64.tar.gz
             uvnvr-*-full-linux-x64.tar.gz.sha256
           if-no-files-found: error
+
+  windows-x64-full:
+    name: Windows x64 full
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-opencv
+            mingw-w64-x86_64-libuv
+            mingw-w64-x86_64-openssl
+            unzip
+            zip
+
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Fetch libuvcpp
+        run: |
+          curl -fL --retry 3 --max-time 300 -o /tmp/uvcpp.zip \
+            https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip
+          unzip -q /tmp/uvcpp.zip -d /tmp/uvcpp
+
+      - name: Build MNN
+        run: |
+          curl -fL --retry 3 --max-time 600 -o /tmp/mnn.zip \
+            https://gitee.com/alibaba/MNN/repository/archive/master.zip
+          unzip -q /tmp/mnn.zip -d /tmp/mnn-src
+          MNN_DIR=$(find /tmp/mnn-src -maxdepth 1 -mindepth 1 -type d | head -1)
+          cmake -S "$MNN_DIR" -B "$MNN_DIR/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMNN_BUILD_SHARED_LIBS=ON \
+            -DMNN_BUILD_TEST=OFF -DMNN_BUILD_TOOLS=OFF -DMNN_BUILD_CONVERTER=OFF
+          cmake --build "$MNN_DIR/build" -j"$(nproc)"
+          echo "MNN_DIR=$MNN_DIR" >> "$GITHUB_ENV"
+
+      - name: Fetch models
+        run: |
+          mkdir -p /tmp/models/hyperlpr3 /tmp/models/face
+          for f in b320_backbone_h b320_header_h b640x_backbone_h b640x_head_h \
+                   litemodel_cls_96xh rpv3_mdict_160h; do
+            curl -fsSL --retry 3 --max-time 180 \
+              -o "/tmp/models/hyperlpr3/$f.mnn" \
+              "https://raw.githubusercontent.com/szad670401/HyperLPR/master/resource/models/r2_mobile/$f.mnn"
+          done
+
+      - name: Fetch InspireFace
+        run: |
+          curl -fL --retry 3 --max-time 300 -o /tmp/if.zip \
+            https://github.com/HyperInspire/InspireFace/releases/download/v1.2.4/inspireface-windows-x64-1.2.4.zip
+          unzip -q /tmp/if.zip -d /tmp/if
+          echo "IF_ROOT=$(find /tmp/if -maxdepth 2 -name InspireFace -type d | head -1)" >> "$GITHUB_ENV"
+          curl -fL --retry 3 --max-time 300 -o /tmp/models/face/Pikachu \
+            https://github.com/HyperInspire/InspireFace/releases/download/v1.x/Pikachu
+
+      - name: Configure
+        run: |
+          UVCPP_DIR=$(find /tmp/uvcpp -maxdepth 1 -mindepth 1 -type d | head -1)
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$(cygpath -w "$UVCPP_DIR")" \
+            -DUVNVR_BUILD_TESTS=OFF -DUVNVR_BUILD_TOOLS=ON -DUVNVR_BUILD_SDK=OFF \
+            -DUVNVR_ENABLE_GB28181=ON -DUVNVR_ENABLE_GB35114=ON \
+            -DUVNVR_ENABLE_SECURE=ON -DUVNVR_ENABLE_CHANNEL_ACL=ON \
+            -DUVNVR_ENABLE_CONFIG_INTEGRITY=ON \
+            -DUVNVR_ENABLE_AI=ON -DUVNVR_ENABLE_HYPERLPR=ON \
+            -DUVNVR_MNN_ROOT="$(cygpath -w "$MNN_DIR")" \
+            -DUVNVR_ENABLE_INSPIREFACE=ON \
+            -DUVNVR_INSPIREFACE_ROOT="$(cygpath -w "$IF_ROOT")"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Package
+        run: |
+          OUT=/tmp/uvnvr-full-win
+          mkdir -p "$OUT"/{bin,models/hyperlpr3,models/face,share/uvnvr/frontend}
+          cp build/uvnvr.exe build/hlpr_cli.exe "$OUT/bin/"
+          for dll in $(ldd build/uvnvr.exe | awk '/=> \/mingw64/ {print $3}'); do
+            cp "$dll" "$OUT/bin/"
+          done
+          cp "$MNN_DIR"/build/libMNN.dll "$OUT/bin/"
+          cp "$IF_ROOT"/lib/libInspireFace.dll "$OUT/bin/"
+          cp /tmp/models/hyperlpr3/*.mnn "$OUT/models/hyperlpr3/"
+          cp /tmp/models/face/Pikachu "$OUT/models/face/Pikachu"
+          cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/"
+          cd /tmp && zip -qr uvnvr-full-windows-x64.zip uvnvr-full-win
+          sha256sum uvnvr-full-windows-x64.zip > uvnvr-full-windows-x64.zip.sha256
+          cat uvnvr-full-windows-x64.zip.sha256
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: uvnvr-full-windows-x64
+          path: |
+            /tmp/uvnvr-full-windows-x64.zip
+            /tmp/uvnvr-full-windows-x64.zip.sha256
+          if-no-files-found: error
