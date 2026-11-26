@@ -281,11 +281,14 @@ jobs:
           missing=0
           for exe in "$OUT"/bin/*.exe; do
             for name in $(objdump -p "$exe" | awk '/DLL Name:/ {print $3}'); do
-              case "$name" in
-                KERNEL32.dll|USER32.dll|ADVAPI32.dll|CRYPT32.dll|WS2_32.dll|SHELL32.dll| \
-                ole32.dll|OLE32.dll|msvcrt.dll|api-ms-*|bcrypt.dll|iphlpapi.dll|userenv.dll| \
-                wtsapi32.dll|gdi32.dll|comctl32.dll|SHLWAPI.dll|WINMM.dll|dbghelp.dll|pdh.dll| \
-                psapi.dll|secur32.dll|version.dll|winhttp.dll|wininet.dll|ntdll.dll|NETAPI32.dll)
+              # Windows imports are spelled in upper case; compare lower case.
+              name_lc=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+              case "$name_lc" in
+                kernel32.dll|user32.dll|advapi32.dll|crypt32.dll|ws2_32.dll|shell32.dll| \
+                ole32.dll|msvcrt.dll|api-ms-*|bcrypt.dll|iphlpapi.dll|userenv.dll| \
+                wtsapi32.dll|gdi32.dll|comctl32.dll|shlwapi.dll|winmm.dll|dbghelp.dll| \
+                pdh.dll|psapi.dll|secur32.dll|version.dll|winhttp.dll|wininet.dll| \
+                ntdll.dll|netapi32.dll|msvcp*.dll|vcruntime*.dll)
                   continue ;;
               esac
               if [ ! -f "$OUT/bin/$name" ]; then
