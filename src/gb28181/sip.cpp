@@ -2236,7 +2236,7 @@ struct SipUserAgent::Impl {
       Event("answered inbound OPTIONS with 200 OK");
     } else if (message.method == SipMethod::kMessage) {
       // Acknowledge first: MANSCDP answers travel in a separate MESSAGE
-      // request, built by the callback through SendMessage().
+      // request, built by the callback through SendSipMessage().
       SendSimpleResponse(message, 200, "OK");
       Event("answered inbound MESSAGE with 200 OK");
       if (callbacks.on_message)
@@ -3020,7 +3020,7 @@ void SipUserAgent::Stop() {
   impl_->Stop();
 }
 
-bool SipUserAgent::SendMessage(std::string body, std::string content_type,
+bool SipUserAgent::SendSipMessage(std::string body, std::string content_type,
                                std::string* error) {
   return impl_->SendMessage(std::move(body), content_type, error);
 }

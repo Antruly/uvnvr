@@ -238,7 +238,7 @@ struct SipUaCallbacks {
   std::function<void(const std::string& raw, const std::string& peer)> on_inbound;
   // Called after an inbound MESSAGE request has been acknowledged with
   // 200 OK. The callback runs on the event-loop thread and may call
-  // SendMessage() to return a MANSCDP response. It must not block.
+  // SendSipMessage() to return a MANSCDP response. It must not block.
   std::function<void(const SipMessage&)> on_message;
   // Media dialog requests. The user agent does not answer INVITE/INFO by
   // itself: the callback must call SendResponse() with the appropriate status
@@ -304,7 +304,7 @@ class SipUserAgent {
   // is not retransmitted or tracked, so it must not be used for REGISTER or
   // Keepalive. Returns false when the transport is not ready or no Digest
   // authorization can be built.
-  bool SendMessage(std::string body,
+  bool SendSipMessage(std::string body,
                    std::string content_type = "Application/MANSCDP+xml",
                    std::string* error = nullptr);
 

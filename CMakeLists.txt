@@ -66,6 +66,18 @@ set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
 find_package(PkgConfig QUIET)
 find_package(OpenSSL REQUIRED)
 
+# A static OpenSSL/Tongsuo build on MinGW needs the Winsock and Win32 helpers
+# *after* libcrypto.a on the link line, so hang them off the imported targets
+# instead of the executable.
+if(WIN32 AND NOT MSVC)
+  foreach(_uvnvr_ssl_target OpenSSL::SSL OpenSSL::Crypto)
+    if(TARGET ${_uvnvr_ssl_target})
+      set_property(TARGET ${_uvnvr_ssl_target} APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+        ws2_32 crypt32 advapi32 user32 gdi32 iphlpapi bcrypt)
+    endif()
+  endforeach()
+endif()
+
 # AI recognition needs OpenCV core/imgproc/imgcodecs. It is optional: when the
 # headers are missing the module is not compiled and the rest of the service
 # builds and runs normally. Windows builds look in the local MinGW prefix used
@@ -168,9 +180,9 @@ if(UVNVR_ENABLE_HYPERLPR)
   if(NOT UVNVR_AI_ENABLED)
     message(STATUS
       "ai: HyperLPR3 requested but AI/OpenCV is unavailable; falling back to the stub plate engine")
-  elseif(WIN32)
+  elseif(MSVC)
     message(STATUS
-      "ai: HyperLPR3 requested on Windows but MNN is not wired up for MinGW yet; falling back to the stub plate engine")
+      "ai: HyperLPR3 needs a MinGW toolchain on Windows; falling back to the stub plate engine")
   else()
     set(_uvnvr_mnn_roots)
     if(UVNVR_MNN_ROOT)
@@ -188,8 +200,11 @@ if(UVNVR_ENABLE_HYPERLPR)
     if(NOT UVNVR_MNN_INCLUDE_DIR)
       find_path(UVNVR_MNN_INCLUDE_DIR NAMES MNN/Interpreter.hpp)
     endif()
+    # MNN keeps the library in a build directory; accept the layout used by
+    # the Linux and the MinGW builds so one UVNVR_MNN_ROOT works for both.
     find_library(UVNVR_MNN_LIBRARY NAMES MNN
-                 PATHS ${_uvnvr_mnn_roots} PATH_SUFFIXES build-linux lib build .
+                 PATHS ${_uvnvr_mnn_roots}
+                 PATH_SUFFIXES build-linux build-mingw build lib .
                  NO_DEFAULT_PATH)
     if(NOT UVNVR_MNN_LIBRARY)
       find_library(UVNVR_MNN_LIBRARY NAMES MNN)
@@ -757,7 +772,9 @@ if(WIN32)
   target_compile_definitions(uvnvr PRIVATE NOMINMAX)
   # wtsapi32/userenv let the service launch an interactive console instance
   # after it is unregistered (session 0 isolation).
-  target_link_libraries(uvnvr PRIVATE ws2_32 wtsapi32 userenv advapi32 shell32)
+  # A static Tongsuo/OpenSSL build also pulls in the Winsock/crypto helpers.
+  target_link_libraries(uvnvr PRIVATE ws2_32 wtsapi32 userenv advapi32 shell32
+                                         crypt32 bcrypt iphlpapi user32 gdi32)
 endif()
 
 # The release archive is a shared library outside the normal loader path.

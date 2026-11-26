@@ -415,7 +415,7 @@ struct Gb28181Service::Impl {
     }
     if (response.empty())
       return;
-    if (ua && !ua->SendMessage(response, std::string(kManscdpContentType), &error))
+    if (ua && !ua->SendSipMessage(response, std::string(kManscdpContentType), &error))
       Log("cannot send MANSCDP response: " + error);
     else
       ++messages_out;
@@ -599,7 +599,7 @@ struct Gb28181Service::Impl {
 
     if (ua) {
       std::string error;
-      if (!ua->SendMessage(body, std::string(kManscdpContentType), &error)) {
+      if (!ua->SendSipMessage(body, std::string(kManscdpContentType), &error)) {
         Log("cannot send Alarm MESSAGE: " + error);
       } else {
         ++messages_out;
