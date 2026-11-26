@@ -72,10 +72,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/models/hyperlpr3" "$RUNNER_TEMP/models/face"
           for f in b320_backbone_h b320_header_h b640x_backbone_h b640x_head_h \
                    litemodel_cls_96xh rpv3_mdict_160h; do
+            # raw.githubusercontent.com is a CDN and does not hit the API rate
+            # limit the way the contents endpoint does.
             curl -fsSL --retry 3 --max-time 180 \
-              -H "Accept: application/vnd.github.raw" \
               -o "$RUNNER_TEMP/models/hyperlpr3/$f.mnn" \
-              "https://api.github.com/repos/szad670401/HyperLPR/contents/resource/models/r2_mobile/$f.mnn?ref=master"
+              "https://raw.githubusercontent.com/szad670401/HyperLPR/master/resource/models/r2_mobile/$f.mnn"
           done
           ls -l "$RUNNER_TEMP/models/hyperlpr3"
 
