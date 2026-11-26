@@ -107,9 +107,39 @@ src/
 
 依赖顺序：**28181 先于 35114**——VKEK 与签名协商都跑在 SIP 信令上，没有 28181 就没有 35114 的载体。
 
+## 3.1 国密 TLS 验证记录（Tongsuo）
+
+构建方式（Linux x64，本地已验证）：
+
+```bash
+git clone --depth 1 https://gitee.com/mirrors/Tongsuo.git
+cd Tongsuo && ./config --prefix="$PWD/../tongsuo-install" enable-ntls no-tests shared
+make -j"$(nproc)" && make install_sw
+
+cmake -S . -B build-gmtls -DCMAKE_BUILD_TYPE=Release \
+      -DUVNVR_ENABLE_GM_TLS=ON -DUVNVR_GM_TLS_ROOT=<tongsuo-install> \
+      -DUVNVR_BUILD_TESTS=ON
+cmake --build build-gmtls -j4
+LD_LIBRARY_PATH=<tongsuo-install>/lib64 ./build-gmtls/tests/gm_tls_test
+```
+
+`gm_tls_test` 的实际输出（Tongsuo 8.5.0 / OpenSSL 3.5.4 底座）：
+
+```text
+backend=Tongsuo version=Tongsuo 8.5.0 tlcp=yes gm_tls13=yes
+tlcp:  protocol=NTLSv1.1 cipher=ECDHE-SM2-SM4-CBC-SM3 peer=CN=localhost,O=UvNVR Lab,C=CN
+tls13: protocol=TLSv1.3 cipher=TLS_SM4_GCM_SM3      peer=CN=localhost,O=UvNVR Lab,C=CN
+gm_tls: all checks passed
+```
+
+CI 中的 `gm-tls` 作业会现场编译 Tongsuo 并断言这两个套件名，防止适配层悄悄回退到普通
+OpenSSL。`UVNVR_ENABLE_GM_TLS` 默认 OFF，带不动 Tongsuo 的构建不受影响。
+
 ## 4. 已知风险
 
-1. **国密 TLS**：OpenSSL 3 只有算法，无 GM/T 0024 套件；需 Tongsuo/GmSSL，并解决 MinGW 交叉编译。
+1. **国密 TLS**：OpenSSL 3 只有算法，无 GM/T 0024 套件。已用 **Tongsuo 8.5.0**
+   （Apache-2.0）验证 Linux 侧，见下方「国密 TLS 验证记录」；MinGW 交叉编译仍是
+   开放项。
 2. **PS 封装**是工作量最大的一块（时间戳、I 帧对齐、TCP 主动/被动模式差异）。
 3. **证书与检测**是外部流程，周期长，需提前准备材料。
 4. GA/T 2155.2 的条目以正式标准文本为准，本文件的矩阵需在拿到标准全文后逐条校对。

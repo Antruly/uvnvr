@@ -159,3 +159,51 @@ jobs:
           name: uvnvr-server-log
           path: ${{ runner.temp }}/uvnvr.log
           if-no-files-found: ignore
+
+  gm-tls:
+    name: Linux x64 (GM/T 0024 via Tongsuo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build pkg-config unzip libuv1-dev
+
+      - name: Build Tongsuo
+        run: |
+          git clone --depth 1 https://github.com/Tongsuo-Project/Tongsuo.git "$RUNNER_TEMP/tongsuo"
+          cd "$RUNNER_TEMP/tongsuo"
+          ./config --prefix="$RUNNER_TEMP/tongsuo-install" enable-ntls no-tests shared
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Fetch libuvcpp 1.8.1
+        run: |
+          curl -fL --retry 3 --max-time 180 \
+            -o "$RUNNER_TEMP/libuvcpp.zip" \
+            https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-linux-x64.zip
+          unzip -q "$RUNNER_TEMP/libuvcpp.zip" -d "$RUNNER_TEMP/uvcpp"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-gm -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$RUNNER_TEMP/uvcpp/libuvcpp-1.8.1-linux-x64" \
+            -DUVNVR_ENABLE_GM_TLS=ON \
+            -DUVNVR_GM_TLS_ROOT="$RUNNER_TEMP/tongsuo-install" \
+            -DUVNVR_BUILD_TESTS=ON \
+            -DUVNVR_BUILD_SDK=OFF
+
+      - name: Build
+        run: cmake --build build-gm --parallel
+
+      - name: GM TLS handshake test
+        env:
+          LD_LIBRARY_PATH: ${{ runner.temp }}/tongsuo-install/lib64:${{ runner.temp }}/tongsuo-install/lib
+        run: |
+          ./build-gm/tests/gm_tls_test | tee "$RUNNER_TEMP/gm_tls.log"
+          grep -q "cipher=ECDHE-SM2-SM4-CBC-SM3" "$RUNNER_TEMP/gm_tls.log"
+          grep -q "cipher=TLS_SM4_GCM_SM3" "$RUNNER_TEMP/gm_tls.log"
