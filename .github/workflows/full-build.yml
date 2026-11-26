@@ -255,11 +255,22 @@ jobs:
           OUT="$RUNNER_TEMP/uvnvr-full-win"
           mkdir -p "$OUT"/{bin,models/hyperlpr3,models/face,share/uvnvr/frontend}
           cp build/uvnvr.exe build/hlpr_cli.exe "$OUT/bin/"
-          # OpenCV 5 pulls a deep dependency chain (tbb, jxl, OpenEXR, ...);
-          # copy the whole closure, not just the exe's direct imports.
-          ntldd -R build/uvnvr.exe build/hlpr_cli.exe \
-            | awk '/=> \/mingw64/ {print $3}' | sort -u \
-            | while read -r dll; do cp "$dll" "$OUT/bin/"; done
+          # OpenCV 5 pulls a deep dependency chain (tbb, jxl, OpenEXR, ...), so
+          # walk the imports until nothing new appears instead of copying only
+          # the executable's direct dependencies.
+          changed=1
+          while [ "$changed" = 1 ]; do
+            changed=0
+            for f in "$OUT"/bin/*.exe "$OUT"/bin/*.dll; do
+              for dll in $(ldd "$f" 2>/dev/null | awk '/mingw64/ {print $3}'); do
+                base=$(basename "$dll")
+                if [ ! -f "$OUT/bin/$base" ]; then
+                  cp "$dll" "$OUT/bin/" && changed=1
+                fi
+              done
+            done
+          done
+          ls "$OUT/bin" | wc -l
           cp "$MNN_DIR"/build/libMNN.dll "$OUT/bin/"
           cp "$IF_ROOT"/lib/libInspireFace.dll "$OUT/bin/"
           cp /tmp/models/hyperlpr3/*.mnn "$OUT/models/hyperlpr3/"
