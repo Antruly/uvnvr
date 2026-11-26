@@ -2441,6 +2441,7 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
   }
   if (normalized_type == "face" || normalized_type == "both") {
     const int64_t started = NowMs();
+    engine_config.model_dir = runtime.face_model_dir;
     std::unique_ptr<AiEngine> engine = CreateFaceEngine(engine_config, error);
     if (!engine)
       return json();
