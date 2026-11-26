@@ -751,9 +751,15 @@ find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(LIBUV QUIET IMPORTED_TARGET libuv)
 endif()
+# The GB/T 28181 transport calls libuv directly as well, so it carries the
+# dependency rather than relying on the executable's link order.
+set(UVNVR_UV_LINK_TARGET "")
 if(TARGET PkgConfig::LIBUV)
-  target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} PkgConfig::LIBUV OpenSSL::Crypto
-                                     OpenSSL::SSL)
+  set(UVNVR_UV_LINK_TARGET PkgConfig::LIBUV)
+endif()
+if(UVNVR_UV_LINK_TARGET)
+  target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} ${UVNVR_UV_LINK_TARGET}
+                                     OpenSSL::Crypto OpenSSL::SSL)
 else()
   # MSVC builds get libuv through the libuvcpp archive; only add an explicit
   # library when one is available.
@@ -766,6 +772,14 @@ else()
     target_link_libraries(uvnvr PRIVATE ${UVP_UVCPP_TARGET} OpenSSL::Crypto OpenSSL::SSL)
   endif()
 endif()
+if(TARGET uvnvr_gb28181)
+  if(UVNVR_UV_LINK_TARGET)
+    target_link_libraries(uvnvr_gb28181 PUBLIC ${UVNVR_UV_LINK_TARGET})
+  elseif(UV_LIBRARY)
+    target_link_libraries(uvnvr_gb28181 PUBLIC ${UV_LIBRARY})
+  endif()
+endif()
+
 if(WIN32)
   # uvcpp's Windows headers pull in <windows.h>; keep its min/max macros from
   # breaking std::min/std::max in this project (MSVC sees C2589 otherwise).
