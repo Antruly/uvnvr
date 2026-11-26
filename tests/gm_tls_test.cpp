@@ -2,9 +2,9 @@
 //
 // The tests build a small SM2 PKI (a self-signed CA issuing a signing leaf and
 // an encryption leaf), run a TLCP (GB/T 38636-2020) handshake and an RFC 8998
-// TLS 1.3 handshake over a socketpair, and check the negotiated cipher suite,
-// peer verification and a small application data exchange. No network access
-// or provisioned certificates are needed.
+// TLS 1.3 handshake over a loopback TCP connection, and check the negotiated
+// cipher suite, peer verification and a small application data exchange. No
+// external network access or provisioned certificates are needed.
 
 #include "gb35114/tls_gm.h"
 
@@ -15,6 +15,8 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,10 +25,17 @@
 #include <string>
 #include <thread>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// wincrypt.h (pulled in by the Winsock headers) defines X509_NAME as a macro
+// for a certificate-name string type, which collides with OpenSSL's typedef.
+#undef X509_NAME
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <csignal>
 #endif
 
 namespace {
@@ -77,6 +86,96 @@ std::string BioToString(BIO* bio) {
   if (!memory || !memory->data || !memory->length)
     return {};
   return std::string(memory->data, memory->length);
+}
+
+#ifdef _WIN32
+using SockLen = int;
+using SocketHandle = SOCKET;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+constexpr int kShutdownBoth = SD_BOTH;
+#else
+using SockLen = socklen_t;
+using SocketHandle = int;
+constexpr SocketHandle kInvalidSocket = -1;
+constexpr int kShutdownBoth = SHUT_RDWR;
+#endif
+
+// Winsock has to be initialised process-wide on Windows; POSIX sockets need no
+// equivalent. Keeping it in an RAII object pairs every WSAStartup with a
+// WSACleanup even when a test bails out early.
+struct WinsockGuard {
+  WinsockGuard(const WinsockGuard&) = delete;
+  WinsockGuard& operator=(const WinsockGuard&) = delete;
+#ifdef _WIN32
+  WinsockGuard() : ready(WSAStartup(MAKEWORD(2, 2), &data) == 0) {}
+  ~WinsockGuard() {
+    if (ready)
+      WSACleanup();
+  }
+  bool ready = false;
+  WSADATA data{};
+#else
+  WinsockGuard() = default;
+  ~WinsockGuard() = default;
+  bool ready = true;
+#endif
+};
+
+void CloseSocket(SocketHandle socket) {
+#ifdef _WIN32
+  ::closesocket(socket);
+#else
+  ::close(socket);
+#endif
+}
+
+int SessionDescriptor(SocketHandle socket) {
+  // The adapter's public API stores the descriptor in an int, matching OpenSSL's
+  // SSL_set_fd()/BIO_new_socket() signatures on both platforms.
+  return static_cast<int>(socket);
+}
+
+// Binds a listening TCP socket to an ephemeral port on 127.0.0.1 and reports it.
+SocketHandle CreateLoopbackListener(std::uint16_t* port) {
+  const SocketHandle listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (listener == kInvalidSocket)
+    return kInvalidSocket;
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (::bind(listener, reinterpret_cast<sockaddr*>(&address),
+             static_cast<SockLen>(sizeof(address))) != 0 ||
+      ::listen(listener, 1) != 0) {
+    CloseSocket(listener);
+    return kInvalidSocket;
+  }
+
+  SockLen length = static_cast<SockLen>(sizeof(address));
+  if (::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+    CloseSocket(listener);
+    return kInvalidSocket;
+  }
+  *port = ntohs(address.sin_port);
+  return listener;
+}
+
+SocketHandle ConnectLoopback(std::uint16_t port) {
+  const SocketHandle client = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (client == kInvalidSocket)
+    return kInvalidSocket;
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(port);
+  if (::connect(client, reinterpret_cast<sockaddr*>(&address),
+                static_cast<SockLen>(sizeof(address))) != 0) {
+    CloseSocket(client);
+    return kInvalidSocket;
+  }
+  return client;
 }
 
 PkeyPtr GenerateSm2Key() {
@@ -342,17 +441,31 @@ void RunHandshake(const char* label, uvnvr::gb35114::GmTlsProtocol protocol,
   if (!client_context)
     return;
 
-#ifndef _WIN32
-  int fds[2] = {-1, -1};
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
-    Check(false, std::string(label) + ": socketpair");
+  std::uint16_t port = 0;
+  const SocketHandle listener = CreateLoopbackListener(&port);
+  Check(listener != kInvalidSocket, std::string(label) + ": loopback listener");
+  if (listener == kInvalidSocket)
+    return;
+
+  const SocketHandle client = ConnectLoopback(port);
+  if (client == kInvalidSocket) {
+    CloseSocket(listener);
+    Check(false, std::string(label) + ": loopback connect");
     return;
   }
 
   PeerResult server_result;
-  std::thread server([&] { server_result = RunServerPeer(server_context, fds[1], kPing); });
+  std::thread server([&] {
+    const SocketHandle peer = ::accept(listener, nullptr, nullptr);
+    if (peer == kInvalidSocket) {
+      server_result.error = "accept";
+      return;
+    }
+    server_result = RunServerPeer(server_context, SessionDescriptor(peer), kPing);
+    CloseSocket(peer);
+  });
 
-  GmTlsSession session = GmTlsSession::Connect(client_context, fds[0], &error);
+  GmTlsSession session = GmTlsSession::Connect(client_context, SessionDescriptor(client), &error);
   Check(error.empty(), std::string(label) + ": client session (" + error + ")");
   if (error.empty()) {
     const GmTlsStatus status = HandshakeBlocking(session, &error);
@@ -394,10 +507,10 @@ void RunHandshake(const char* label, uvnvr::gb35114::GmTlsProtocol protocol,
   session.Shutdown(&error);
   // Wake a server peer that may still be blocked in SSL_read after a failed
   // client handshake or an early test exit.
-  shutdown(fds[0], SHUT_RDWR);
+  shutdown(client, kShutdownBoth);
   server.join();
-  close(fds[0]);
-  close(fds[1]);
+  CloseSocket(client);
+  CloseSocket(listener);
   Check(server_result.ok, std::string(label) + ": server peer (" + server_result.error + ")");
   Check(server_result.peer_verified, std::string(label) + ": server verifies the client chain");
   if (server_result.ok) {
@@ -405,11 +518,6 @@ void RunHandshake(const char* label, uvnvr::gb35114::GmTlsProtocol protocol,
     std::printf("%s: server protocol=%s cipher=%s\n", label, server_result.protocol.c_str(),
                 server_result.cipher.c_str());
   }
-#else
-  (void)signing;
-  (void)encryption;
-  Check(false, std::string(label) + ": socketpair test is POSIX-only");
-#endif
 }
 
 void RunCapabilityCheck() {
@@ -451,6 +559,8 @@ void RunCredentialValidation(const Identity& signing, const Identity& encryption
 } // namespace
 
 int main() {
+  const WinsockGuard winsock;
+  Check(winsock.ready, "winsock: initialise");
 #ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
 #endif
