@@ -273,6 +273,27 @@ jobs:
           ls "$OUT/bin" | wc -l
           cp "$MNN_DIR"/build/libMNN.dll "$OUT/bin/"
           cp "$IF_ROOT"/lib/libInspireFace.dll "$OUT/bin/"
+          cp "$UVCPP_DIR"/bin/libuvcpp.dll "$OUT/bin/"
+
+          # Fail the job if any import is still unresolved, instead of shipping
+          # a package that silently refuses to start.
+          missing=0
+          for exe in "$OUT"/bin/*.exe; do
+            for name in $(objdump -p "$exe" | awk '/DLL Name:/ {print $3}'); do
+              case "$name" in
+                KERNEL32.dll|USER32.dll|ADVAPI32.dll|CRYPT32.dll|WS2_32.dll|SHELL32.dll| \
+                ole32.dll|OLE32.dll|msvcrt.dll|api-ms-*|bcrypt.dll|iphlpapi.dll|userenv.dll| \
+                wtsapi32.dll|gdi32.dll|comctl32.dll|SHLWAPI.dll|WINMM.dll|dbghelp.dll|pdh.dll| \
+                psapi.dll|secur32.dll|version.dll|winhttp.dll|wininet.dll|ntdll.dll|NETAPI32.dll)
+                  continue ;;
+              esac
+              if [ ! -f "$OUT/bin/$name" ]; then
+                echo "missing $name (needed by $(basename "$exe"))"
+                missing=1
+              fi
+            done
+          done
+          [ "$missing" = 0 ]
           cp /tmp/models/hyperlpr3/*.mnn "$OUT/models/hyperlpr3/"
           cp /tmp/models/face/Pikachu "$OUT/models/face/Pikachu"
           cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/"
