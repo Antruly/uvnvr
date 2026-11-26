@@ -31,6 +31,37 @@ inline double L2NormFor2Points(const cv::Point2f &p1, const cv::Point2f &p2) {
     return sqrt(r);
 }
 
+
+inline cv::Mat Homography4Points(const cv::Mat &src, const cv::Mat &dst) {
+    // Build the standard 8x8 system for h33 = 1 and solve it.
+    cv::Mat A = cv::Mat::zeros(8, 8, CV_64F);
+    cv::Mat b = cv::Mat::zeros(8, 1, CV_64F);
+    for (int i = 0; i < 4; ++i) {
+        const double x = src.at<float>(i, 0);
+        const double y = src.at<float>(i, 1);
+        const double u = dst.at<float>(i, 0);
+        const double v = dst.at<float>(i, 1);
+        A.at<double>(2 * i, 0) = x;
+        A.at<double>(2 * i, 1) = y;
+        A.at<double>(2 * i, 2) = 1.0;
+        A.at<double>(2 * i, 6) = -u * x;
+        A.at<double>(2 * i, 7) = -u * y;
+        b.at<double>(2 * i, 0) = u;
+        A.at<double>(2 * i + 1, 3) = x;
+        A.at<double>(2 * i + 1, 4) = y;
+        A.at<double>(2 * i + 1, 5) = 1.0;
+        A.at<double>(2 * i + 1, 6) = -v * x;
+        A.at<double>(2 * i + 1, 7) = -v * y;
+        b.at<double>(2 * i + 1, 0) = v;
+    }
+    cv::Mat h;
+    cv::solve(A, b, h, cv::DECOMP_SVD);
+    cv::Mat m = (cv::Mat_<double>(3, 3) << h.at<double>(0, 0), h.at<double>(1, 0),
+                 h.at<double>(2, 0), h.at<double>(3, 0), h.at<double>(4, 0),
+                 h.at<double>(5, 0), h.at<double>(6, 0), h.at<double>(7, 0), 1.0);
+    return m;
+}
+
 inline cv::Mat getRotateCropAndAlignMatrix(int img_crop_width, int img_crop_height,
                                            float *points2d, int point_num = 4) {
     assert(point_num == 4);
@@ -42,7 +73,9 @@ inline cv::Mat getRotateCropAndAlignMatrix(int img_crop_width, int img_crop_heig
     cv::Mat dst(4, 2, CV_32F);
     dst.data = (uchar *) dst_array;
 
-    cv::Mat transform_matrix = cv::getPerspectiveTransform(src, dst);
+    // OpenCV 5 dropped cv::getPerspectiveTransform, so solve the four-point
+    // homography directly; the result is the same 3x3 matrix on 4.x and 5.x.
+    cv::Mat transform_matrix = Homography4Points(src, dst);
 
     return transform_matrix;
 }

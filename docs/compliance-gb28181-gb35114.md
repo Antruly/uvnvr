@@ -135,6 +135,28 @@ gm_tls: all checks passed
 CI 中的 `gm-tls` 作业会现场编译 Tongsuo 并断言这两个套件名，防止适配层悄悄回退到普通
 OpenSSL。`UVNVR_ENABLE_GM_TLS` 默认 OFF，带不动 Tongsuo 的构建不受影响。
 
+### 国密信令传输（tls-gm）
+
+`gb28181.transport=tls-gm` 让 SIP 信令跑在 GM/T 0024 上，配置项：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `gb28181.transport` | `udp` | `udp` / `tcp` / `tls-gm` |
+| `gb28181.tls.protocol` | `tlcp` | `tlcp`（GM/T 0024）或 `tls13` |
+| `gb28181.tls.sign_cert` / `sign_key` | 空 | 签名证书对，必填 |
+| `gb28181.tls.enc_cert` / `enc_key` | 空 | TLCP 双证书的加密对 |
+| `gb28181.tls.ca` / `verify` / `server_name` | 空 / `1` / 空 | 信任锚、校验、SNI |
+
+少了必填项时启动直接报错，不会退回明文。CMake 侧必须同时指向 Tongsuo 的两套库，
+否则 `libssl.so` 会和系统 `libcrypto` 混链（表现为 `OPENSSL_3.4.0` 未定义符号）：
+
+```bash
+cmake -S . -B build -DUVNVR_ENABLE_GM_TLS=ON -DUVNVR_GM_TLS_ROOT=<tongsuo> \
+      -DOPENSSL_ROOT_DIR=<tongsuo> \
+      -DOPENSSL_SSL_LIBRARY=<tongsuo>/lib64/libssl.so \
+      -DOPENSSL_CRYPTO_LIBRARY=<tongsuo>/lib64/libcrypto.so
+```
+
 ## 4. 已知风险
 
 1. **国密 TLS**：OpenSSL 3 只有算法，无 GM/T 0024 套件。已用 **Tongsuo 8.5.0**
