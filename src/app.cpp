@@ -1,5 +1,7 @@
 #include "app.h"
 
+#include "auth/session_revocation.h"
+
 #if UVNVR_ENABLE_AI
 #include "ai/ai_service.h"
 #endif
@@ -4122,16 +4124,45 @@ void App::RegisterProtectedRoutes() {
                       return;
                     }
                   }
-                  if (!new_enabled) {
-                    uvcpp::uvcpp_db_params sessions;
-                    sessions.add(user_id);
-                    Exec("DELETE FROM sessions WHERE user_id = ?", sessions, nullptr, &error);
+                  // A password change, a role change or a disable makes every
+                  // credential issued to this account stale. Revoke them after
+                  // the update commits, so a client cannot slip in a login with
+                  // the old password between the two operations.
+                  auth::UserSecurityChange change;
+                  change.password_changed = has_password;
+                  change.role_changed = has_role && new_role != old_role;
+                  change.enabled_before = old_enabled;
+                  change.enabled_after = new_enabled;
+                  const auth::RevocationPlan plan = auth::PlanRevocation(change);
+                  auth::RevocationCounts revoked;
+                  std::string revoke_error;
+                  const bool revoked_ok = auth::RevokeUserCredentials(
+                      [this](const std::string& sql, int64_t target_id, int64_t* affected,
+                             std::string* exec_error) {
+                        uvcpp::uvcpp_db_params params;
+                        params.add(target_id);
+                        return Exec(sql, params, affected, exec_error);
+                      },
+                      user_id, plan, &revoked, &revoke_error);
+                  if (!revoked_ok) {
+                    Audit("user", "error", actor.username, ip, ua, "user",
+                          std::to_string(user_id), "update", "failure",
+                          "session_revocation_failed",
+                          json{{"error", revoke_error}}.dump());
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "session_revocation_failed";
+                    op->message =
+                        "the user was updated, but existing credentials could not be revoked";
+                    return;
                   }
                   Audit("user", "info", actor.username, ip, ua, "user", std::to_string(user_id),
                         "update", "success", "",
                         json{{"enabled", new_enabled},
                              {"role", new_role_name},
-                             {"passwordChanged", has_password}}
+                             {"passwordChanged", has_password},
+                             {"revokedSessions", revoked.sessions},
+                             {"revokedApiTokens", revoked.api_tokens}}
                             .dump());
                   op->data = json{{"id", user_id},
                                   {"username", target_name},
