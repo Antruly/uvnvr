@@ -7,6 +7,10 @@
 
 #include <unistd.h>
 
+// getPerspectiveTransform lives in imgproc; opencv.hpp does not always pull it
+// in (the MSYS2 package is built without the umbrella header's extra includes).
+#include <opencv2/imgproc.hpp>
+
 inline bool exists(const std::string &file_path) {
     return (access(file_path.c_str(), F_OK) != -1);
 }
