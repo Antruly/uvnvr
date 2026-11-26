@@ -57,8 +57,18 @@ jobs:
 
       - name: Build MNN
         run: |
-          curl -fL --retry 3 --max-time 600 -o "$RUNNER_TEMP/mnn.zip" \
-            https://gitee.com/alibaba/MNN/repository/archive/master.zip
+          # codeload is on GitHub's own network; Gitee is the fallback for
+          # networks that cannot reach it, retried until the archive is whole.
+          ok=0
+          for url in https://codeload.github.com/alibaba/MNN/zip/refs/heads/master \
+                     https://gitee.com/alibaba/MNN/repository/archive/master.zip; do
+            for i in 1 2 3; do
+              rm -f "$RUNNER_TEMP/mnn.zip"
+              curl -fsSL --max-time 600 -o "$RUNNER_TEMP/mnn.zip" "$url" || continue
+              if unzip -tq "$RUNNER_TEMP/mnn.zip" >/dev/null 2>&1; then ok=1; break 2; fi
+            done
+          done
+          [ "$ok" = 1 ] || { echo "cannot download MNN"; exit 1; }
           unzip -q "$RUNNER_TEMP/mnn.zip" -d "$RUNNER_TEMP/mnn-src"
           MNN_DIR=$(find "$RUNNER_TEMP/mnn-src" -maxdepth 1 -mindepth 1 -type d | head -1)
           cmake -S "$MNN_DIR" -B "$MNN_DIR/build" \
@@ -184,8 +194,16 @@ jobs:
 
       - name: Build MNN
         run: |
-          curl -fL --retry 3 --max-time 600 -o /tmp/mnn.zip \
-            https://gitee.com/alibaba/MNN/repository/archive/master.zip
+          ok=0
+          for url in https://codeload.github.com/alibaba/MNN/zip/refs/heads/master \
+                     https://gitee.com/alibaba/MNN/repository/archive/master.zip; do
+            for i in 1 2 3; do
+              rm -f /tmp/mnn.zip
+              curl -fsSL --max-time 600 -o /tmp/mnn.zip "$url" || continue
+              if unzip -tq /tmp/mnn.zip >/dev/null 2>&1; then ok=1; break 2; fi
+            done
+          done
+          [ "$ok" = 1 ] || { echo "cannot download MNN"; exit 1; }
           unzip -q /tmp/mnn.zip -d /tmp/mnn-src
           MNN_DIR=$(find /tmp/mnn-src -maxdepth 1 -mindepth 1 -type d | head -1)
           cmake -S "$MNN_DIR" -B "$MNN_DIR/build" -G Ninja \
