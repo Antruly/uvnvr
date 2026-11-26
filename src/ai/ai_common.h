@@ -30,6 +30,11 @@ struct AiSettings {
   // and detector input level; -1 keeps the SDK default.
   std::string face_model_dir;
   int face_pixel_level = -1;
+  // Frames narrower than this are upsampled before plate detection (0 keeps
+  // the engine default). HyperLPR3 resizes its input to 320/640 px, so a plate
+  // needs roughly 100 px in the captured frame to survive that.
+  int plate_min_width = 0;
+  std::string plate_model_dir;
   // Legacy single plate watchlist. It is still read as a blacklist when
   // ai.plate.blacklist is empty, so existing installations keep alerting.
   std::string plate_watchlist;
@@ -74,10 +79,12 @@ struct AiRuntimeConfig {
   int face_dedup_seconds = 10;
   std::string face_model_dir;
   int face_pixel_level = -1;
+  std::string plate_model_dir;
   std::string plate_watchlist;
   std::string plate_blacklist;
   std::string plate_whitelist;
   std::string face_watchlist;
+  int plate_min_width = 0;
 };
 
 } // namespace uvnvr

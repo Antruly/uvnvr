@@ -1399,6 +1399,8 @@ bool App::Migrate(std::string* error) {
       {"ai.stub", "0"},
       {"ai.face.modelDir", ""},
       {"ai.face.pixelLevel", "-1"},
+      {"ai.plate.modelDir", ""},
+      {"ai.plate.minDetectWidth", "1600"},
       {"ai.plate.watchlist", ""},
       {"ai.plate.blacklist", ""},
       {"ai.plate.whitelist", ""},

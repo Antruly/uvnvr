@@ -584,6 +584,18 @@ struct AiService::Impl {
     settings.face_model_dir = std::move(face_model_dir);
     settings.face_pixel_level = static_cast<int>(
         std::max<int64_t>(-1, std::min<int64_t>(1280, SettingInt("ai.face.pixelLevel", -1))));
+    settings.plate_min_width = static_cast<int>(
+        std::max<int64_t>(0, std::min<int64_t>(4096, SettingInt("ai.plate.minDetectWidth", 1600))));
+    settings.plate_model_dir = Setting("ai.plate.modelDir", "");
+    if (settings.plate_model_dir.empty()) {
+      settings.plate_model_dir =
+          (std::filesystem::path(opts.data_dir) / "models" / "hyperlpr3").string();
+    } else {
+      std::filesystem::path model_path(settings.plate_model_dir);
+      if (model_path.is_relative())
+        model_path = std::filesystem::path(opts.data_dir) / model_path;
+      settings.plate_model_dir = model_path.lexically_normal().string();
+    }
     settings.plate_watchlist = Setting("ai.plate.watchlist", "");
     settings.plate_blacklist = Setting("ai.plate.blacklist", "");
     if (settings.plate_blacklist.empty()) {
@@ -664,6 +676,8 @@ struct AiService::Impl {
     config.face_dedup_seconds = settings.face_dedup_seconds;
     config.face_model_dir = settings.face_model_dir;
     config.face_pixel_level = settings.face_pixel_level;
+    config.plate_model_dir = settings.plate_model_dir;
+    config.plate_min_width = settings.plate_min_width;
     config.plate_watchlist = settings.plate_watchlist;
     config.plate_blacklist = settings.plate_blacklist;
     config.plate_whitelist = settings.plate_whitelist;
@@ -917,6 +931,8 @@ struct AiService::Impl {
     NameCurrentThread("ai-plate");
     AiConfig engine_config;
     engine_config.stub = runtime.stub;
+    engine_config.model_dir = runtime.plate_model_dir;
+    engine_config.plate_min_width = runtime.plate_min_width;
     std::string error;
     std::unique_ptr<AiEngine> engine = CreatePlateEngine(engine_config, &error);
     if (!engine) {
@@ -1801,6 +1817,7 @@ json AiService::ConfigJson() const {
               {"stub", s.stub},
               {"faceModelDir", s.face_model_dir},
               {"facePixelLevel", s.face_pixel_level},
+              {"plateModelDir", s.plate_model_dir},
               {"plateWatchlist", s.plate_watchlist},
               {"plateBlacklist", s.plate_blacklist},
               {"plateWhitelist", s.plate_whitelist},
@@ -1891,6 +1908,7 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   double match_threshold = 0.75;
   int64_t face_pixel_level = -1;
   std::string face_model_dir;
+  std::string plate_model_dir;
   std::string plate_watchlist;
   std::string plate_blacklist;
   std::string plate_whitelist;
@@ -1915,7 +1933,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
       !read_text("plateWatchlist", &plate_watchlist) ||
       !read_text("plateBlacklist", &plate_blacklist) ||
       !read_text("plateWhitelist", &plate_whitelist) ||
-      !read_text("faceWatchlist", &face_watchlist)) {
+      !read_text("faceWatchlist", &face_watchlist) ||
+      !read_text("plateModelDir", &plate_model_dir)) {
     return false;
   }
 
@@ -1972,6 +1991,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     updates.push_back({"ai.snapshotMaxTotalMb", std::to_string(snapshot_max_total_mb)});
   if (body.contains("snapshotMinFreeMb"))
     updates.push_back({"ai.snapshotMinFreeMb", std::to_string(snapshot_min_free_mb)});
+  if (body.contains("plateModelDir"))
+    updates.push_back({"ai.plate.modelDir", plate_model_dir});
 
   for (const auto& update : updates) {
     if (!impl_->WriteSetting(update.key, update.value, error))
@@ -2396,9 +2417,12 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
       {"channelId", channel_id}, {"width", image.cols}, {"height", image.rows}, {"engine", "stub"}};
   if (normalized_type == "plate" || normalized_type == "both") {
     const int64_t started = NowMs();
+    engine_config.model_dir = runtime.plate_model_dir;
+    engine_config.plate_min_width = runtime.plate_min_width;
     std::unique_ptr<AiEngine> engine = CreatePlateEngine(engine_config, error);
     if (!engine)
       return json();
+    result["engine"] = engine->Name();
     std::vector<AiPlateResult> results;
     if (!engine->DetectPlates(image, &results, error))
       return json();
