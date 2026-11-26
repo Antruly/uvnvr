@@ -50,6 +50,10 @@ struct AiChannelSettings {
   int interval_ms = 0;
   std::string plate_roi;
   std::string face_roi;
+  // Per-channel sensitivity overrides. A negative value inherits the global
+  // ai.minPlateConfidence / ai.minFaceQuality.
+  double min_plate_confidence = -1.0;
+  double min_face_quality = -1.0;
 };
 
 struct AiChannelInfo {

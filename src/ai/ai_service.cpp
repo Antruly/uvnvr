@@ -377,6 +377,9 @@ struct CaptureTask {
   int interval_ms = 1000;
   std::string plate_roi;
   std::string face_roi;
+  // Negative values inherit the global sensitivity.
+  double min_plate_confidence = -1.0;
+  double min_face_quality = -1.0;
 };
 
 } // namespace
@@ -611,8 +614,8 @@ struct AiService::Impl {
     }
     uvcpp::uvcpp_db_table settings_table;
     if (uvcpp::uvcpp_db_ok(opts.db->query(
-            "SELECT channel_id, plate_enabled, face_enabled, interval_ms, plate_roi, face_roi "
-            "FROM ai_channel_settings",
+            "SELECT channel_id, plate_enabled, face_enabled, interval_ms, plate_roi, face_roi, "
+            "min_plate_confidence, min_face_quality FROM ai_channel_settings",
             {}, &settings_table))) {
       for (size_t row = 0; row < settings_table.rows().size(); ++row) {
         AiChannelSettings cs;
@@ -622,6 +625,8 @@ struct AiService::Impl {
         cs.interval_ms = static_cast<int>(SqlInt(settings_table, row, "interval_ms"));
         cs.plate_roi = SqlColumn(settings_table, row, "plate_roi");
         cs.face_roi = SqlColumn(settings_table, row, "face_roi");
+        cs.min_plate_confidence = SqlDouble(settings_table, row, "min_plate_confidence");
+        cs.min_face_quality = SqlDouble(settings_table, row, "min_face_quality");
         channel_settings[cs.channel_id] = std::move(cs);
       }
     }
@@ -716,6 +721,8 @@ struct AiService::Impl {
             it->second.interval_ms > 0 ? it->second.interval_ms : settings.interval_ms;
         task.plate_roi = it->second.plate_roi;
         task.face_roi = it->second.face_roi;
+        task.min_plate_confidence = it->second.min_plate_confidence;
+        task.min_face_quality = it->second.min_face_quality;
         tasks.push_back(std::move(task));
       }
       if (tasks.empty())
@@ -825,6 +832,11 @@ struct AiService::Impl {
     StartLocked();
   }
 
+  void RefreshChannels() {
+    std::lock_guard<std::mutex> lock(mutex);
+    LoadChannelsLocked();
+  }
+
   // ---- capture / workers ------------------------------------------------
 
   bool CaptureFrame(int64_t channel_id, const std::string& primary, cv::Mat* out,
@@ -874,6 +886,10 @@ struct AiService::Impl {
         frame.channel_name = task.channel_name;
         frame.ts_ms = NowMs();
         frame.config = runtime;
+        if (task.min_plate_confidence >= 0.0)
+          frame.config.min_plate_confidence = task.min_plate_confidence;
+        if (task.min_face_quality >= 0.0)
+          frame.config.min_face_quality = task.min_face_quality;
         if (task.plate && plate) {
           Frame copy = frame;
           copy.roi = task.plate_roi;
@@ -922,7 +938,7 @@ struct AiService::Impl {
         std::string detect_error;
         if (engine->DetectPlates(input, &results, &detect_error)) {
           for (const auto& result : results)
-            HandlePlate(frame, result, offset_x, offset_y, runtime, engine->Name());
+            HandlePlate(frame, result, offset_x, offset_y, frame.config, engine->Name());
         } else {
           plate_failed.fetch_add(1);
           std::fprintf(stderr, "ai: plate detection failed: %s\n", detect_error.c_str());
@@ -956,7 +972,7 @@ struct AiService::Impl {
         std::string detect_error;
         if (engine->DetectFaces(input, &results, &detect_error)) {
           for (const auto& result : results)
-            HandleFace(frame, result, roi.x, roi.y, runtime, engine->Name());
+            HandleFace(frame, result, roi.x, roi.y, frame.config, engine->Name());
         } else {
           face_failed.fetch_add(1);
           std::fprintf(stderr, "ai: face detection failed: %s\n", detect_error.c_str());
@@ -1544,8 +1560,8 @@ struct AiService::Impl {
   }
 
   bool QueryEventsImpl(const std::string& type, int64_t channel_id, int64_t from, int64_t to,
-                       const std::string& plate, int limit, int offset, json* out,
-                       std::string* error) const {
+                       const std::string& plate, int64_t matched_face_id, int limit, int offset,
+                       json* out, std::string* error) const {
     if (opts.db == nullptr) {
       if (error != nullptr)
         *error = "database is not available";
@@ -1575,6 +1591,10 @@ struct AiService::Impl {
         where += " AND e.plate LIKE ?";
         values.push_back(uvcpp::uvcpp_db_value("%" + plate + "%"));
       }
+    }
+    if (type == "face" && matched_face_id > 0) {
+      where += " AND e.matched_face_id = ?";
+      values.push_back(uvcpp::uvcpp_db_value(matched_face_id));
     }
 
     const std::string base = EventSelectSql(type);
@@ -1712,6 +1732,12 @@ struct AiService::Impl {
         global_plate && channel->second.enabled && settings_value.plate_enabled;
     const bool effective_face =
         global_face && channel->second.enabled && settings_value.face_enabled;
+    const double effective_min_plate =
+        settings_value.min_plate_confidence >= 0.0 ? settings_value.min_plate_confidence
+                                                   : settings.min_plate_confidence;
+    const double effective_min_face =
+        settings_value.min_face_quality >= 0.0 ? settings_value.min_face_quality
+                                               : settings.min_face_quality;
     *out = json{{"channelId", channel_id},
                 {"channelName", channel->second.name},
                 {"plateEnabled", settings_value.plate_enabled},
@@ -1719,10 +1745,18 @@ struct AiService::Impl {
                 {"intervalMs", settings_value.interval_ms},
                 {"plateRoi", settings_value.plate_roi},
                 {"faceRoi", settings_value.face_roi},
+                {"minPlateConfidence", settings_value.min_plate_confidence >= 0.0
+                                           ? json(settings_value.min_plate_confidence)
+                                           : json(nullptr)},
+                {"minFaceQuality", settings_value.min_face_quality >= 0.0
+                                       ? json(settings_value.min_face_quality)
+                                       : json(nullptr)},
                 {"effectivePlate", effective_plate},
                 {"effectiveFace", effective_face},
                 {"effectiveIntervalMs", settings_value.interval_ms > 0 ? settings_value.interval_ms
-                                                                       : settings.interval_ms}};
+                                                                       : settings.interval_ms},
+                {"effectiveMinPlateConfidence", effective_min_plate},
+                {"effectiveMinFaceQuality", effective_min_face}};
     return true;
   }
 };
@@ -1742,6 +1776,9 @@ void AiService::Stop() {
 }
 void AiService::Reload() {
   impl_->Reload();
+}
+void AiService::RefreshChannels() {
+  impl_->RefreshChannels();
 }
 
 json AiService::ConfigJson() const {
@@ -1986,6 +2023,32 @@ bool AiService::UpdateChannelSettings(int64_t channel_id, const json& body, std:
     }
     current.face_enabled = body["faceEnabled"].get<bool>();
   }
+  // null clears the override and falls back to the global threshold.
+  auto read_override = [&](const char* name, double* target) -> bool {
+    const auto it = body.find(name);
+    if (it == body.end())
+      return true;
+    if (it->is_null()) {
+      *target = -1.0;
+      return true;
+    }
+    if (!it->is_number()) {
+      if (error != nullptr)
+        *error = std::string(name) + " must be a number between 0 and 1, or null to inherit";
+      return false;
+    }
+    const double value = it->get<double>();
+    if (value < 0.0 || value > 1.0) {
+      if (error != nullptr)
+        *error = std::string(name) + " must be between 0 and 1, or null to inherit";
+      return false;
+    }
+    *target = value;
+    return true;
+  };
+  if (!read_override("minPlateConfidence", &current.min_plate_confidence) ||
+      !read_override("minFaceQuality", &current.min_face_quality))
+    return false;
   if (body.contains("intervalMs")) {
     if (!body["intervalMs"].is_number_integer()) {
       if (error != nullptr)
@@ -2028,13 +2091,18 @@ bool AiService::UpdateChannelSettings(int64_t channel_id, const json& body, std:
   params.add(current.interval_ms);
   params.add(current.plate_roi);
   params.add(current.face_roi);
+  params.add(current.min_plate_confidence);
+  params.add(current.min_face_quality);
   params.add(NowSeconds());
   if (!uvcpp::uvcpp_db_ok(impl_->opts.db->execute(
           "INSERT INTO ai_channel_settings(channel_id, plate_enabled, face_enabled, "
-          "interval_ms, plate_roi, face_roi, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
+          "interval_ms, plate_roi, face_roi, min_plate_confidence, min_face_quality, "
+          "updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
           "ON CONFLICT(channel_id) DO UPDATE SET plate_enabled = excluded.plate_enabled, "
           "face_enabled = excluded.face_enabled, interval_ms = excluded.interval_ms, "
           "plate_roi = excluded.plate_roi, face_roi = excluded.face_roi, "
+          "min_plate_confidence = excluded.min_plate_confidence, "
+          "min_face_quality = excluded.min_face_quality, "
           "updated_at = excluded.updated_at",
           params))) {
     if (error != nullptr)
@@ -2080,10 +2148,13 @@ bool AiService::UpdateChannels(const std::vector<int64_t>& channel_ids, bool pla
     params.add(current.interval_ms);
     params.add(current.plate_roi);
     params.add(current.face_roi);
+    params.add(current.min_plate_confidence);
+    params.add(current.min_face_quality);
     params.add(NowSeconds());
     if (!uvcpp::uvcpp_db_ok(impl_->opts.db->execute(
             "INSERT INTO ai_channel_settings(channel_id, plate_enabled, face_enabled, "
-            "interval_ms, plate_roi, face_roi, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
+            "interval_ms, plate_roi, face_roi, min_plate_confidence, min_face_quality, "
+            "updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(channel_id) DO UPDATE SET plate_enabled = excluded.plate_enabled, "
             "face_enabled = excluded.face_enabled, updated_at = excluded.updated_at",
             params))) {
@@ -2193,8 +2264,8 @@ json AiService::Stats() {
 }
 
 json AiService::QueryEvents(const std::string& type, int64_t channel_id, int64_t from, int64_t to,
-                            const std::string& plate, int limit, int offset,
-                            std::string* error) const {
+                            const std::string& plate, int64_t matched_face_id, int limit,
+                            int offset, std::string* error) const {
   const std::string normalized_type = NormalizeType(type);
   if (normalized_type.empty()) {
     if (error != nullptr)
@@ -2202,8 +2273,8 @@ json AiService::QueryEvents(const std::string& type, int64_t channel_id, int64_t
     return json();
   }
   json out;
-  if (!impl_->QueryEventsImpl(normalized_type, channel_id, from, to, plate, limit, offset, &out,
-                              error)) {
+  if (!impl_->QueryEventsImpl(normalized_type, channel_id, from, to, plate, matched_face_id,
+                              limit, offset, &out, error)) {
     return json();
   }
   return out;

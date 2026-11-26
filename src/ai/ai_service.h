@@ -63,6 +63,11 @@ public:
   // Re-reads ai.* settings and per-channel flags from the database, then
   // restarts the pipeline so changes take effect without a service restart.
   void Reload();
+  // Re-reads the channel and per-channel switch tables without touching the
+  // running workers. Used after a channel is created, edited or deleted so the
+  // settings API sees it immediately; the next Reload() picks it up for
+  // capture.
+  void RefreshChannels();
 
   nlohmann::json ConfigJson() const;
   bool UpdateConfig(const nlohmann::json& body, nlohmann::json* out, std::string* error);
@@ -75,8 +80,8 @@ public:
   nlohmann::json Stats();
 
   nlohmann::json QueryEvents(const std::string& type, int64_t channel_id, int64_t from, int64_t to,
-                             const std::string& plate, int limit, int offset,
-                             std::string* error) const;
+                             const std::string& plate, int64_t matched_face_id, int limit,
+                             int offset, std::string* error) const;
   nlohmann::json GetEvent(const std::string& type, int64_t id, std::string* error) const;
   bool ReadSnapshot(const std::string& type, int64_t id, const std::string& kind,
                     std::string* bytes, std::string* error) const;
