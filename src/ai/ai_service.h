@@ -30,9 +30,11 @@ public:
     std::string data_dir;
     // Broadcasts one JSON message on /ws/events.
     std::function<void(const nlohmann::json&)> broadcast;
-    // Insert a snapshot path; may be empty.
+    // Insert an alert row. `source_type` ("plate" or "face") and `source_id`
+    // identify the ai_*_events row that produced it; pass empty/0 when there is
+    // no AI event behind the alert. The alert is also pushed on /ws/events.
     std::function<void(int64_t, const std::string&, const std::string&, const std::string&,
-                       const std::string&)>
+                       const std::string&, const std::string&, int64_t)>
         raise_alert;
     // Optional data-at-rest hooks supplied when the secure module is compiled
     // in. `seal_snapshot` replaces the bytes written to disk (or returns the
@@ -83,6 +85,10 @@ public:
   bool CreateFace(const nlohmann::json& body, int64_t* id, std::string* error);
   bool UpdateFace(int64_t id, const nlohmann::json& body, std::string* error);
   bool DeleteFace(int64_t id, std::string* error);
+  // 1:N search against the in-memory face library. Body:
+  // {feature:[numbers], threshold?:0..1, limit?:1..50}. Returns the best hits
+  // with the cosine score and whether each one reached the threshold.
+  nlohmann::json SearchFaces(const nlohmann::json& body, std::string* error) const;
 
 private:
   struct Impl;

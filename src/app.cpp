@@ -1119,7 +1119,12 @@ bool App::Migrate(std::string* error) {
       "message TEXT NOT NULL,"
       "snapshot_path TEXT NOT NULL DEFAULT '',"
       "acknowledged INTEGER NOT NULL DEFAULT 0,"
-      "created_at INTEGER NOT NULL)",
+      "created_at INTEGER NOT NULL,"
+      "source_type TEXT NOT NULL DEFAULT '',"
+      "source_id INTEGER NOT NULL DEFAULT 0,"
+      "acknowledged_at INTEGER NOT NULL DEFAULT 0,"
+      "acknowledged_by TEXT NOT NULL DEFAULT '',"
+      "ack_note TEXT NOT NULL DEFAULT '')",
       // AI recognition (docs/ai-recognition.md). Settings and events live in
       // the same SQLite database as the rest of the service.
       "CREATE TABLE IF NOT EXISTS ai_channel_settings ("
@@ -1252,6 +1257,34 @@ bool App::Migrate(std::string* error) {
     }
   }
 
+  // Alert acknowledgement metadata and the AI event that caused the alert.
+  // These columns were added after the first releases, so both a fresh and an
+  // upgraded database must end up with the same shape.
+  {
+    uvcpp::uvcpp_db_table columns;
+    if (Query("PRAGMA table_info(alerts)", {}, &columns, error)) {
+      std::vector<std::string> names;
+      for (size_t row = 0; row < columns.rows().size(); ++row)
+        names.push_back(TableText(columns, row, "name"));
+      const auto has_column = [&](const char* name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+      };
+      const std::vector<std::pair<const char*, const char*>> wanted = {
+          {"source_type", "ALTER TABLE alerts ADD COLUMN source_type TEXT NOT NULL DEFAULT ''"},
+          {"source_id", "ALTER TABLE alerts ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0"},
+          {"acknowledged_at",
+           "ALTER TABLE alerts ADD COLUMN acknowledged_at INTEGER NOT NULL DEFAULT 0"},
+          {"acknowledged_by",
+           "ALTER TABLE alerts ADD COLUMN acknowledged_by TEXT NOT NULL DEFAULT ''"},
+          {"ack_note", "ALTER TABLE alerts ADD COLUMN ack_note TEXT NOT NULL DEFAULT ''"},
+      };
+      for (const auto& [name, sql] : wanted) {
+        if (!has_column(name) && !Exec(sql, {}, nullptr, error))
+          return false;
+      }
+    }
+  }
+
   const int64_t now = NowSeconds();
   const std::vector<std::pair<std::string, std::pair<std::string, std::string>>> defaults = {
       {"admin", {"Administrator", R"(["*"])"}},
@@ -1335,6 +1368,8 @@ bool App::Migrate(std::string* error) {
       {"ai.face.modelDir", ""},
       {"ai.face.pixelLevel", "-1"},
       {"ai.plate.watchlist", ""},
+      {"ai.plate.blacklist", ""},
+      {"ai.plate.whitelist", ""},
       {"ai.face.watchlist", ""},
       {"ai.face.matchThreshold", "0.75"},
       {"ai.dedupSeconds", "10"},
@@ -2633,8 +2668,9 @@ int App::Run() {
     options.broadcast = [this](const json& event) { BroadcastEvent(event); };
     options.raise_alert =
         [this](int64_t channel_id, const std::string& type, const std::string& level,
-               const std::string& message, const std::string& snapshot_path) {
-          RaiseAlert(channel_id, type, level, message, snapshot_path);
+               const std::string& message, const std::string& snapshot_path,
+               const std::string& source_type, int64_t source_id) {
+          RaiseAlert(channel_id, type, level, message, snapshot_path, source_type, source_id);
         };
 #ifdef UVNVR_ENABLE_SECURE
     options.seal_snapshot = [this](const std::string& path, const std::string& plaintext,
@@ -10150,7 +10186,9 @@ App::~App() {
 }
 
 void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
-                     const std::string& message, const std::string& snapshot_path) {
+                     const std::string& message, const std::string& snapshot_path,
+                     const std::string& source_type, int64_t source_id) {
+  const int64_t created_at = NowSeconds();
   uvcpp::uvcpp_db_params params;
   params.add(channel_id);
   params.add(type);
@@ -10158,21 +10196,40 @@ void App::RaiseAlert(int64_t channel_id, const std::string& type, const std::str
   params.add(message);
   params.add(snapshot_path);
   params.add(0);
-  params.add(NowSeconds());
+  params.add(created_at);
+  params.add(source_type);
+  params.add(source_id);
   std::string error;
-  if (!Exec("INSERT INTO alerts(channel_id, type, level, message, snapshot_path, acknowledged, "
-            "created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            params, nullptr, &error)) {
-    std::fprintf(stderr, "alert insert failed: %s\n", error.c_str());
+  uvcpp::uvcpp_db_value new_id;
+  const auto status =
+      db_.insert("INSERT INTO alerts(channel_id, type, level, message, snapshot_path, "
+                 "acknowledged, created_at, source_type, source_id) "
+                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 params, &new_id);
+  int64_t alert_id = 0;
+  if (uvcpp::uvcpp_db_ok(status)) {
+    alert_id = new_id.to_int64();
+  } else {
+    std::fprintf(stderr, "alert insert failed: %s\n", db_.last_error().c_str());
   }
-  BroadcastEvent(json{{"type", "alert"},
-                      {"alert", json{{"channelId", channel_id},
-                                     {"type", type},
-                                     {"level", level},
-                                     {"message", message},
-                                     {"snapshotPath", snapshot_path},
-                                     {"acknowledged", false},
-                                     {"createdAt", NowSeconds()}}}});
+  json alert{{"id", alert_id},
+             {"channelId", channel_id},
+             {"type", type},
+             {"level", level},
+             {"message", message},
+             {"snapshotPath", snapshot_path},
+             {"snapshotUrl", snapshot_path.empty() || alert_id <= 0
+                                  ? ""
+                                  : "/api/v1/alerts/" + std::to_string(alert_id) + "/snapshot"},
+             {"sourceType", source_type},
+             {"sourceId", source_id},
+             {"sourceUrl", (source_type == "plate" || source_type == "face") && source_id > 0
+                               ? "/api/v1/ai/events/" + std::to_string(source_id) +
+                                     "/snapshot?type=" + source_type + "&kind=crop"
+                               : ""},
+             {"acknowledged", false},
+             {"createdAt", created_at}};
+  BroadcastEvent(json{{"type", "alert"}, {"alert", alert}});
   if (recording_ && channel_id > 0 &&
       (type == "motion" || type == "person" || type == "tamper" || type == "intrusion")) {
     recording_->OnEvent(channel_id);
@@ -10504,18 +10561,23 @@ void App::RegisterAlertRoutes() {
           [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
                  uvcpp::uvcpp_web_next next) {
             const std::string level = req.query("level") ? *req.query("level") : "";
+            const std::string type = req.query("type") ? *req.query("type") : "";
             const std::string acknowledged =
                 req.query("acknowledged") ? *req.query("acknowledged") : "";
             const UserContext user = UserFromRequest(req);
             auto items = std::make_shared<json>(json::array());
             auto failure = std::make_shared<std::string>();
             RunWork(
-                [this, user, level, acknowledged, items, failure] {
+                [this, user, level, type, acknowledged, items, failure] {
                   std::string where = " WHERE 1=1";
                   uvcpp::uvcpp_db_params params;
                   if (!level.empty()) {
                     where += " AND a.level = ?";
                     params.add(level);
+                  }
+                  if (!type.empty()) {
+                    where += " AND a.type = ?";
+                    params.add(type);
                   }
                   if (acknowledged == "1" || acknowledged == "0") {
                     where += " AND a.acknowledged = ?";
@@ -10543,22 +10605,41 @@ void App::RegisterAlertRoutes() {
                   std::string error;
                   if (!Query(
                           "SELECT a.id, a.channel_id, c.name AS channel_name, a.type, a.level, "
-                          "a.message, a.snapshot_path, a.acknowledged, a.created_at FROM alerts a "
+                          "a.message, a.snapshot_path, a.acknowledged, a.created_at, "
+                          "a.source_type, a.source_id, a.acknowledged_at, a.acknowledged_by, "
+                          "a.ack_note FROM alerts a "
                           "LEFT JOIN channels c ON c.id = a.channel_id" +
                               where + " ORDER BY a.created_at DESC LIMIT 300",
                           params, &table, &error)) {
                     return;
                   }
                   for (size_t i = 0; i < table.rows().size(); ++i) {
+                    const int64_t id = TableInt(table, i, "id");
+                    const std::string source_type = TableText(table, i, "source_type");
+                    const int64_t source_id = TableInt(table, i, "source_id");
+                    const std::string snapshot_path = TableText(table, i, "snapshot_path");
                     items->push_back(json{
-                        {"id", TableInt(table, i, "id")},
+                        {"id", id},
                         {"channelId", TableInt(table, i, "channel_id")},
                         {"channelName", TableText(table, i, "channel_name")},
                         {"type", TableText(table, i, "type")},
                         {"level", TableText(table, i, "level")},
                         {"message", TableText(table, i, "message")},
-                        {"snapshotPath", TableText(table, i, "snapshot_path")},
+                        {"snapshotPath", snapshot_path},
+                        {"snapshotUrl", snapshot_path.empty()
+                                            ? ""
+                                            : "/api/v1/alerts/" + std::to_string(id) + "/snapshot"},
+                        {"sourceType", source_type},
+                        {"sourceId", source_id},
+                        {"sourceUrl", (source_type == "plate" || source_type == "face") &&
+                                              source_id > 0
+                                          ? "/api/v1/ai/events/" + std::to_string(source_id) +
+                                                "/snapshot?type=" + source_type + "&kind=crop"
+                                          : ""},
                         {"acknowledged", TableInt(table, i, "acknowledged") != 0},
+                        {"acknowledgedAt", TableInt(table, i, "acknowledged_at")},
+                        {"acknowledgedBy", TableText(table, i, "acknowledged_by")},
+                        {"note", TableText(table, i, "ack_note")},
                         {"createdAt", TableInt(table, i, "created_at")},
                     });
                   }
@@ -10585,15 +10666,42 @@ void App::RegisterAlertRoutes() {
                     next();
                     return;
                   }
+                  std::string note;
+                  if (!req.body_str().empty()) {
+                    const json body = json::parse(req.body_str(), nullptr, false);
+                    if (body.is_discarded() || !body.is_object()) {
+                      SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                      next();
+                      return;
+                    }
+                    if (body.contains("note")) {
+                      if (!body["note"].is_string()) {
+                        SendError(resp, 400, "invalid_note", "note must be a string");
+                        next();
+                        return;
+                      }
+                      note = body["note"].get<std::string>();
+                      if (note.size() > 2000) {
+                        SendError(resp, 400, "invalid_note",
+                                  "note must be at most 2000 characters");
+                        next();
+                        return;
+                      }
+                    }
+                  }
                   const UserContext actor = UserFromRequest(req);
                   const std::string ip = req.peer_ip();
                   const std::string ua = req.header("User-Agent", "");
                   auto op = std::make_shared<OpResult>();
                   RunWork(
-                      [this, alert_id, actor, ip, ua, op] {
+                      [this, alert_id, actor, ip, ua, note, op] {
+                        const int64_t now = NowSeconds();
                         uvcpp::uvcpp_db_params params;
-                        params.add(NowSeconds());
+                        params.add(now);
+                        params.add(actor.username);
+                        params.add(note);
                         params.add(alert_id);
+                        int64_t affected = 0;
                         std::string error;
 #ifdef UVNVR_ENABLE_CHANNEL_ACL
                         uvcpp::uvcpp_db_table alert;
@@ -10629,17 +10737,30 @@ void App::RegisterAlertRoutes() {
                         (void)ip;
                         (void)ua;
 #endif
-                        if (!Exec("UPDATE alerts SET acknowledged = 1 WHERE id = ?", params,
-                                  nullptr, &error)) {
+                        if (!Exec("UPDATE alerts SET acknowledged = 1, acknowledged_at = ?, "
+                                  "acknowledged_by = ?, ack_note = ? WHERE id = ?",
+                                  params, &affected, &error)) {
                           op->ok = false;
                           op->status = 500;
                           op->code = "database_error";
                           op->message = "the alert could not be acknowledged";
                           return;
                         }
+                        if (affected == 0) {
+                          op->ok = false;
+                          op->status = 404;
+                          op->code = "alert_not_found";
+                          op->message = "alert not found";
+                          return;
+                        }
                         Audit("alert", "info", actor.username, "", "", "alert",
-                              std::to_string(alert_id), "acknowledge", "success", "", "{}");
-                        op->data = json{{"ok", true}};
+                              std::to_string(alert_id), "acknowledge", "success", "",
+                              json{{"note", note}}.dump());
+                        op->data = json{{"ok", true},
+                                        {"acknowledged", true},
+                                        {"acknowledgedAt", now},
+                                        {"acknowledgedBy", actor.username},
+                                        {"note", note}};
                       },
                       [op, &resp, next] {
                         SendOp(resp, *op);
@@ -11300,6 +11421,38 @@ void App::RegisterAiRoutes() {
                  });
                },
                "alert.view"));
+
+  web_.post("/api/v1/ai/faces/search",
+            Protected(
+                [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                       uvcpp::uvcpp_web_next next) {
+                  if (!ai_) {
+                    SendError(resp, 503, "ai_unavailable", "AI support is not compiled in");
+                    next();
+                    return;
+                  }
+                  const json body = json::parse(req.body_str(), nullptr, false);
+                  if (body.is_discarded() || !body.is_object()) {
+                    SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+                    next();
+                    return;
+                  }
+                  auto result = std::make_shared<json>();
+                  auto error = std::make_shared<std::string>();
+                  auto ok = std::make_shared<bool>(false);
+                  RunWork([this, body, result, error, ok] {
+                    *result = ai_->SearchFaces(body, error.get());
+                    *ok = !result->is_null();
+                  }, [ok, result, error, &resp, next] {
+                    if (!*ok) {
+                      SendError(resp, 400, "invalid_search", *error);
+                    } else {
+                      SendJson(resp, 200, *result);
+                    }
+                    next();
+                  });
+                },
+                "alert.view"));
 
   web_.post("/api/v1/ai/faces",
             Protected(

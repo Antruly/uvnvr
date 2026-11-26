@@ -2,6 +2,7 @@
 
 #include "ai_common.h"
 #include "ai_engine.h"
+#include "ai_rules.h"
 #include "media.h"
 #include "plate_post.h"
 #include "snapshot_quota.h"
@@ -189,32 +190,6 @@ std::vector<float> JsonToFloats(const json& value) {
   return out;
 }
 
-double CosineSimilarity(const std::vector<float>& a, const std::vector<float>& b) {
-  if (a.empty() || a.size() != b.size())
-    return 0.0;
-  double dot = 0.0;
-  double na = 0.0;
-  double nb = 0.0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    dot += static_cast<double>(a[i]) * b[i];
-    na += static_cast<double>(a[i]) * a[i];
-    nb += static_cast<double>(b[i]) * b[i];
-  }
-  if (na <= 1e-9 || nb <= 1e-9)
-    return 0.0;
-  return dot / (std::sqrt(na) * std::sqrt(nb));
-}
-
-std::set<std::string> PlateWatchlist(const std::string& text) {
-  std::set<std::string> out;
-  for (const auto& item : SplitList(text)) {
-    const std::string normalized = NormalizePlate(item);
-    if (!normalized.empty())
-      out.insert(normalized);
-  }
-  return out;
-}
-
 std::set<int64_t> IdWatchlist(const std::string& text) {
   std::set<int64_t> out;
   for (const auto& item : SplitList(text)) {
@@ -390,18 +365,7 @@ private:
   std::atomic<uint64_t> dropped_{0};
 };
 
-struct FaceRecord {
-  int64_t id = 0;
-  std::string name;
-  std::vector<float> feature;
-};
-
-struct FaceMatch {
-  bool found = false;
-  int64_t id = 0;
-  std::string name;
-  double score = 0.0;
-};
+using FaceRecord = FaceLibraryEntry;
 
 struct CaptureTask {
   int64_t channel_id = 0;
@@ -617,6 +581,13 @@ struct AiService::Impl {
     settings.face_pixel_level = static_cast<int>(
         std::max<int64_t>(-1, std::min<int64_t>(1280, SettingInt("ai.face.pixelLevel", -1))));
     settings.plate_watchlist = Setting("ai.plate.watchlist", "");
+    settings.plate_blacklist = Setting("ai.plate.blacklist", "");
+    if (settings.plate_blacklist.empty()) {
+      // Compatibility: before black/white lists existed the single watchlist
+      // was the alert list. Keep those deployments alerting after upgrade.
+      settings.plate_blacklist = settings.plate_watchlist;
+    }
+    settings.plate_whitelist = Setting("ai.plate.whitelist", "");
     settings.face_watchlist = Setting("ai.face.watchlist", "");
   }
 
@@ -660,8 +631,9 @@ struct AiService::Impl {
     if (opts.db != nullptr) {
       uvcpp::uvcpp_db_table table;
       if (uvcpp::uvcpp_db_ok(opts.db->query(
-              "SELECT id, name, feature_blob FROM ai_faces WHERE feature_blob IS NOT NULL", {},
-              &table))) {
+              "SELECT id, name, feature_blob FROM ai_faces WHERE feature_blob IS NOT NULL "
+              "ORDER BY id",
+              {}, &table))) {
         for (size_t row = 0; row < table.rows().size(); ++row) {
           FaceRecord record;
           record.id = SqlInt(table, row, "id");
@@ -687,6 +659,8 @@ struct AiService::Impl {
     config.face_model_dir = settings.face_model_dir;
     config.face_pixel_level = settings.face_pixel_level;
     config.plate_watchlist = settings.plate_watchlist;
+    config.plate_blacklist = settings.plate_blacklist;
+    config.plate_whitelist = settings.plate_whitelist;
     config.face_watchlist = settings.face_watchlist;
     return config;
   }
@@ -1231,7 +1205,9 @@ struct AiService::Impl {
                &crop_path);
     UpdatePlatePaths(event_id, full_path, crop_path);
 
-    const bool alert = PlateWatchlist(runtime.plate_watchlist).count(normalized) > 0;
+    const PlateListVerdict verdict =
+        EvaluatePlateLists(normalized, runtime.plate_blacklist, runtime.plate_whitelist);
+    const bool alert = verdict.ShouldAlert();
 
     json message{{"type", "ai.plate"},
                  {"ts", ts},
@@ -1241,37 +1217,26 @@ struct AiService::Impl {
                  {"box", json{{"x", result.x}, {"y", result.y}, {"w", result.w}, {"h", result.h}}},
                  {"color", result.color},
                  {"engine", engine_name},
-                 {"alert", alert}};
+                 {"alert", alert},
+                 {"list", verdict.MatchLabel()}};
     message["imageUrl"] = full_path.empty() ? "" : SnapshotUrl("plate", event_id, "full");
     message["cropUrl"] = crop_path.empty() ? "" : SnapshotUrl("plate", event_id, "crop");
 
     if (opts.broadcast)
       opts.broadcast(message);
     if (alert && opts.raise_alert) {
-      opts.raise_alert(frame.channel_id, "ai_plate", "warning", "AI 车牌预警: " + normalized,
-                       full_path);
+      opts.raise_alert(frame.channel_id, "ai_plate", "warning",
+                       "AI 车牌黑名单预警: " + normalized, full_path, "plate", event_id);
     }
   }
 
-  FaceMatch MatchFace(const std::vector<float>& feature, double threshold) {
-    FaceMatch best;
-    if (feature.empty())
-      return best;
+  FaceMatchResult MatchFace(const std::vector<float>& feature, double threshold) {
     std::lock_guard<std::mutex> lock(faces_mutex);
-    for (const auto& face : faces) {
-      const double score = CosineSimilarity(feature, face.feature);
-      if (score > best.score) {
-        best.score = score;
-        best.id = face.id;
-        best.name = face.name;
-      }
-    }
-    best.found = best.id != 0 && best.score >= threshold;
-    return best;
+    return MatchFaceFeature(faces, feature, threshold);
   }
 
   bool InsertFaceEvent(int64_t channel_id, int64_t ts, const AiFaceResult& result,
-                       const std::string& engine, const FaceMatch& match, int64_t* event_id) {
+                       const std::string& engine, const FaceMatchResult& match, int64_t* event_id) {
     if (opts.db == nullptr)
       return false;
     uvcpp::uvcpp_db_params params;
@@ -1343,7 +1308,7 @@ struct AiService::Impl {
       return;
     }
 
-    const FaceMatch match = MatchFace(result.feature, runtime.face_match_threshold);
+    const FaceMatchResult match = MatchFace(result.feature, runtime.face_match_threshold);
     const bool alert = match.found && IdWatchlist(runtime.face_watchlist).count(match.id) > 0;
 
     int64_t event_id = 0;
@@ -1363,7 +1328,8 @@ struct AiService::Impl {
                  {"confidence", result.detConfidence},
                  {"box", json{{"x", result.x}, {"y", result.y}, {"w", result.w}, {"h", result.h}}},
                  {"engine", engine_name},
-                 {"alert", alert}};
+                 {"alert", alert},
+                 {"matchThreshold", runtime.face_match_threshold}};
     if (match.found) {
       message["matched"] = json{{"id", match.id}, {"name", match.name}, {"score", match.score}};
     } else {
@@ -1376,7 +1342,7 @@ struct AiService::Impl {
       opts.broadcast(message);
     if (alert && opts.raise_alert) {
       opts.raise_alert(frame.channel_id, "ai_face", "warning", "AI 人脸预警: " + match.name,
-                       full_path);
+                       full_path, "face", event_id);
     }
   }
 
@@ -1754,6 +1720,8 @@ json AiService::ConfigJson() const {
               {"faceModelDir", s.face_model_dir},
               {"facePixelLevel", s.face_pixel_level},
               {"plateWatchlist", s.plate_watchlist},
+              {"plateBlacklist", s.plate_blacklist},
+              {"plateWhitelist", s.plate_whitelist},
               {"faceWatchlist", s.face_watchlist},
               {"faceMatchThreshold", s.face_match_threshold},
               {"dedupSeconds", s.dedup_seconds},
@@ -1842,6 +1810,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
   int64_t face_pixel_level = -1;
   std::string face_model_dir;
   std::string plate_watchlist;
+  std::string plate_blacklist;
+  std::string plate_whitelist;
   std::string face_watchlist;
   if (!read_bool("enabled", &enabled) || !read_bool("plateEnabled", &plate) ||
       !read_bool("faceEnabled", &face) || !read_bool("stub", &stub) ||
@@ -1861,6 +1831,8 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
       !read_double("faceMatchThreshold", &match_threshold) ||
       !read_text("faceModelDir", &face_model_dir) ||
       !read_text("plateWatchlist", &plate_watchlist) ||
+      !read_text("plateBlacklist", &plate_blacklist) ||
+      !read_text("plateWhitelist", &plate_whitelist) ||
       !read_text("faceWatchlist", &face_watchlist)) {
     return false;
   }
@@ -1900,6 +1872,10 @@ bool AiService::UpdateConfig(const json& body, json* out, std::string* error) {
     updates.push_back({"ai.face.pixelLevel", std::to_string(face_pixel_level)});
   if (body.contains("plateWatchlist"))
     updates.push_back({"ai.plate.watchlist", plate_watchlist});
+  if (body.contains("plateBlacklist"))
+    updates.push_back({"ai.plate.blacklist", plate_blacklist});
+  if (body.contains("plateWhitelist"))
+    updates.push_back({"ai.plate.whitelist", plate_whitelist});
   if (body.contains("faceWatchlist"))
     updates.push_back({"ai.face.watchlist", face_watchlist});
   if (body.contains("faceMatchThreshold"))
@@ -2374,6 +2350,80 @@ json AiService::ListFaces(std::string* error) const {
                          {"createdAt", SqlInt(table, row, "created_at")}});
   }
   return json{{"items", items}};
+}
+
+json AiService::SearchFaces(const json& body, std::string* error) const {
+  if (!body.is_object()) {
+    if (error != nullptr)
+      *error = "request body must be a JSON object";
+    return json();
+  }
+  const auto feature_it = body.find("feature");
+  if (feature_it == body.end() || !feature_it->is_array()) {
+    if (error != nullptr)
+      *error = "feature must be an array of numbers";
+    return json();
+  }
+  const std::vector<float> feature = JsonToFloats(*feature_it);
+  if (feature.empty()) {
+    if (error != nullptr)
+      *error = "feature must be a non-empty array of numbers";
+    return json();
+  }
+  // Default to the configured global threshold so a caller that omits the
+  // field gets the same decision the live pipeline would make.
+  double threshold = 0.75;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    threshold = impl_->settings.face_match_threshold;
+  }
+  if (body.contains("threshold")) {
+    if (!body["threshold"].is_number()) {
+      if (error != nullptr)
+        *error = "threshold must be a number between 0 and 1";
+      return json();
+    }
+    threshold = body["threshold"].get<double>();
+    if (threshold < 0.0 || threshold > 1.0) {
+      if (error != nullptr)
+        *error = "threshold must be between 0 and 1";
+      return json();
+    }
+  }
+  int limit = 10;
+  if (body.contains("limit")) {
+    if (!body["limit"].is_number_integer()) {
+      if (error != nullptr)
+        *error = "limit must be an integer between 1 and 50";
+      return json();
+    }
+    limit = body["limit"].get<int>();
+    if (limit < 1 || limit > 50) {
+      if (error != nullptr)
+        *error = "limit must be between 1 and 50";
+      return json();
+    }
+  }
+
+  std::vector<FaceLibraryEntry> library;
+  {
+    std::lock_guard<std::mutex> lock(impl_->faces_mutex);
+    library = impl_->faces;
+  }
+  const std::vector<FaceMatchResult> hits = RankFaceMatches(library, feature, threshold, limit);
+  json items = json::array();
+  bool matched = false;
+  for (const auto& hit : hits) {
+    matched = matched || hit.found;
+    items.push_back(json{{"id", hit.id},
+                         {"name", hit.name},
+                         {"score", hit.score},
+                         {"matched", hit.found}});
+  }
+  return json{{"threshold", threshold},
+              {"librarySize", library.size()},
+              {"matched", matched},
+              {"items", items}};
 }
 
 bool AiService::CreateFace(const json& body, int64_t* id, std::string* error) {

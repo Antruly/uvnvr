@@ -158,7 +158,8 @@ private:
   void StopMonitors();
   void MonitorRun();
   void RaiseAlert(int64_t channel_id, const std::string& type, const std::string& level,
-                  const std::string& message, const std::string& snapshot_path);
+                  const std::string& message, const std::string& snapshot_path,
+                  const std::string& source_type = "", int64_t source_id = 0);
   void RegisterAlertRoutes();
   void RegisterSystemRoutes();
   void RegisterChannelRoutes();

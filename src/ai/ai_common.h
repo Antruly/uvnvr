@@ -30,7 +30,14 @@ struct AiSettings {
   // and detector input level; -1 keeps the SDK default.
   std::string face_model_dir;
   int face_pixel_level = -1;
+  // Legacy single plate watchlist. It is still read as a blacklist when
+  // ai.plate.blacklist is empty, so existing installations keep alerting.
   std::string plate_watchlist;
+  // Plate alert rules. The whitelist wins: a plate on both lists never raises
+  // an alert. Entries are comma/semicolon/space separated and normalised.
+  std::string plate_blacklist;
+  std::string plate_whitelist;
+  // ai_faces.id values that raise an alert when matched.
   std::string face_watchlist;
 };
 
@@ -64,6 +71,8 @@ struct AiRuntimeConfig {
   std::string face_model_dir;
   int face_pixel_level = -1;
   std::string plate_watchlist;
+  std::string plate_blacklist;
+  std::string plate_whitelist;
   std::string face_watchlist;
 };
 
