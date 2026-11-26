@@ -127,9 +127,14 @@ if(UVNVR_GB35114_ENABLED)
   add_test(NAME gb35114 COMMAND gb35114_test)
 endif()
 
-if(UVNVR_GM_TLS_ENABLED AND NOT WIN32)
+if(UVNVR_GM_TLS_ENABLED)
   add_executable(gm_tls_test gm_tls_test.cpp)
   target_link_libraries(gm_tls_test PRIVATE uvnvr_gm_tls)
+  if(WIN32)
+    # The loopback transport uses Winsock directly; the adapter library already
+    # links ws2_32, but the test executable names it explicitly as well.
+    target_link_libraries(gm_tls_test PRIVATE ws2_32)
+  endif()
   add_test(NAME gm_tls COMMAND gm_tls_test)
 endif()
 
