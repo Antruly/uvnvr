@@ -7,6 +7,9 @@
 #include "secure/audit_store.h"
 #include "secure/firmware.h"
 #endif
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+#include "secure/config_integrity.h"
+#endif
 
 #include <charconv>
 #include <cstdlib>
@@ -38,7 +41,49 @@ struct Options {
   std::string verify_firmware;
   std::string firmware_key;
   std::string service_action;
+  // Configuration integrity options. Parsed unconditionally so a build without
+  // the module can reject them with a clear message.
+  bool verify_config = false;
+  bool write_config_digest = false;
+  bool sign_config = false;
+  std::string config_private_key;
+  std::string config_integrity_mode;
+  std::string config_manifest_path;
+  std::string config_public_key;
+  // Raw file contents kept so verification hashes exactly what was parsed.
+  bool config_file_read = false;
+  std::string config_file_path;
+  std::string config_file_contents;
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+  uvnvr::secure::ConfigIntegrityMode integrity_mode =
+      uvnvr::secure::ConfigIntegrityMode::kWarn;
+#endif
 };
+
+// Read helper shared by the config loader and the secure command modes.
+bool ReadTextFile(const std::string& path, std::string* contents, std::string* error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (error != nullptr)
+      *error = "cannot open " + path;
+    return false;
+  }
+  contents->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    if (error != nullptr)
+      *error = "cannot read " + path;
+    return false;
+  }
+  return true;
+}
+
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+std::string ResolveConfigManifestPath(const Options& options) {
+  if (!options.config_manifest_path.empty())
+    return options.config_manifest_path;
+  return uvnvr::secure::DefaultConfigManifestPath(options.config_file_path);
+}
+#endif
 
 #ifdef _WIN32
 std::string NormalizePathForCompare(std::string value) {
@@ -112,6 +157,16 @@ void PrintUsage(const char* argv0) {
             << "  --verify-audit     Verify the SM3 audit chain in the configured database\n"
             << "  --verify-firmware <package> <public-key.pem>\n"
             << "                     Verify a signed firmware package and exit\n"
+            << "  --config-integrity <mode>\n"
+            << "                     off, warn or enforce (default: warn; requires a build\n"
+            << "                     with UVNVR_ENABLE_CONFIG_INTEGRITY)\n"
+            << "  --config-manifest <path>  Integrity manifest (default: <config>.sm3)\n"
+            << "  --config-public-key <pem> SM2 public key or certificate for signed manifests\n"
+            << "  --verify-config    Verify the configuration manifest and exit\n"
+            << "  --write-config-digest\n"
+            << "                     Write an SM3-only manifest for the configuration and exit\n"
+            << "  --sign-config <key.pem>\n"
+            << "                     Write an SM2-signed manifest for the configuration and exit\n"
             << "  --version          Print version and exit\n"
             << "  --help             Print this help and exit\n\n"
             << "Configuration file:\n"
@@ -131,26 +186,11 @@ void PrintUsage(const char* argv0) {
             << "  UVNVR_CACHE_MB     Playback LRU cache size in MiB (default: 128)\n"
             << "  UVNVR_READAHEAD_MB Next-segment read-ahead in MiB (default: 4)\n"
             << "  UVNVR_TLS_CERT     PEM certificate; with UVNVR_TLS_KEY enables HTTPS\n"
-            << "  UVNVR_TLS_KEY      PEM private key\n";
+            << "  UVNVR_TLS_KEY      PEM private key\n"
+            << "  UVNVR_CONFIG_INTEGRITY  off, warn or enforce\n"
+            << "  UVNVR_CONFIG_MANIFEST   Integrity manifest path\n"
+            << "  UVNVR_CONFIG_PUBLIC_KEY SM2 public key or certificate path\n";
 }
-
-#ifdef UVNVR_ENABLE_SECURE
-bool ReadTextFile(const std::string& path, std::string* contents, std::string* error) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    if (error != nullptr)
-      *error = "cannot open " + path;
-    return false;
-  }
-  contents->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-  if (input.bad()) {
-    if (error != nullptr)
-      *error = "cannot read " + path;
-    return false;
-  }
-  return true;
-}
-#endif
 
 bool ParsePort(std::string_view text, int* port) {  int value = 0;
   const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -374,6 +414,32 @@ Options ParseOptions(int argc, char** argv) {
         else
           options.firmware_key = value;
       }
+    } else if (arg == "--config-integrity") {
+      if (!TakeValue(argc, argv, &i, "--config-integrity", &value))
+        options.help = true;
+      else
+        options.config_integrity_mode = value;
+    } else if (arg == "--config-manifest") {
+      if (!TakeValue(argc, argv, &i, "--config-manifest", &value))
+        options.help = true;
+      else
+        options.config_manifest_path = value;
+    } else if (arg == "--config-public-key") {
+      if (!TakeValue(argc, argv, &i, "--config-public-key", &value))
+        options.help = true;
+      else
+        options.config_public_key = value;
+    } else if (arg == "--verify-config") {
+      options.verify_config = true;
+    } else if (arg == "--write-config-digest") {
+      options.write_config_digest = true;
+    } else if (arg == "--sign-config") {
+      if (!TakeValue(argc, argv, &i, "--sign-config", &value))
+        options.help = true;
+      else {
+        options.sign_config = true;
+        options.config_private_key = value;
+      }
     } else if (arg == "--service-action") {
       if (!TakeValue(argc, argv, &i, "--service-action", &value))
         options.help = true;
@@ -387,6 +453,45 @@ Options ParseOptions(int argc, char** argv) {
 
   if (options.help || options.version)
     return options;
+
+#ifndef UVNVR_ENABLE_CONFIG_INTEGRITY
+  // The flags exist in every build so scripts get a precise message instead of
+  // "unknown option"; the actual behaviour needs the compiled-in module.
+  if (options.verify_config || options.write_config_digest || options.sign_config ||
+      !options.config_integrity_mode.empty() || !options.config_manifest_path.empty() ||
+      !options.config_public_key.empty()) {
+    std::cerr << "configuration error: the configuration integrity options require a build "
+                 "with UVNVR_ENABLE_CONFIG_INTEGRITY\n";
+    options.fatal = true;
+    return options;
+  }
+#else
+  {
+    std::string mode_text = options.config_integrity_mode;
+    if (mode_text.empty()) {
+      if (const char* env = std::getenv("UVNVR_CONFIG_INTEGRITY");
+          env != nullptr && env[0] != '\0')
+        mode_text = env;
+    }
+    if (!mode_text.empty() &&
+        !uvnvr::secure::ParseConfigIntegrityMode(mode_text, &options.integrity_mode)) {
+      std::cerr << "configuration error: configuration integrity mode must be off, warn or "
+                   "enforce\n";
+      options.fatal = true;
+      return options;
+    }
+    if (options.config_manifest_path.empty()) {
+      if (const char* env = std::getenv("UVNVR_CONFIG_MANIFEST");
+          env != nullptr && env[0] != '\0')
+        options.config_manifest_path = env;
+    }
+    if (options.config_public_key.empty()) {
+      if (const char* env = std::getenv("UVNVR_CONFIG_PUBLIC_KEY");
+          env != nullptr && env[0] != '\0')
+        options.config_public_key = env;
+    }
+  }
+#endif
 
   // Configuration file: explicit paths are errors when unreadable; discovered
   // candidates are silently skipped when absent.
@@ -415,14 +520,31 @@ Options ParseOptions(int argc, char** argv) {
 
   if (!config_path.empty()) {
     const std::string default_data_dir = options.config.data_dir;
-    if (!uvnvr::LoadConfigFile(config_path, &options.config, &config_error)) {
+    std::string read_error;
+    if (!ReadTextFile(config_path, &options.config_file_contents, &read_error)) {
       if (config_required || std::filesystem::exists(config_path)) {
+        std::cerr << "configuration error: " << read_error << "\n";
+        options.fatal = true;
+        return options;
+      }
+    } else {
+      options.config_file_path = config_path;
+      options.config_file_read = true;
+      uvnvr::ConfigLoadReport load_report;
+      if (!uvnvr::LoadConfigText(options.config_file_contents, config_path, &options.config,
+                                 &config_error, &load_report)) {
         std::cerr << "configuration error: " << config_error << "\n";
         options.fatal = true;
         return options;
       }
-    } else if (options.config.data_dir != default_data_dir) {
-      data_dir_set = true;
+      if (options.config.data_dir != default_data_dir)
+        data_dir_set = true;
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+      if (options.integrity_mode != uvnvr::secure::ConfigIntegrityMode::kOff) {
+        for (const std::string& key : load_report.unknown_keys)
+          std::cerr << "configuration warning: unknown key \"" << key << "\" (ignored)\n";
+      }
+#endif
     }
   }
 
@@ -440,6 +562,55 @@ Options ParseOptions(int argc, char** argv) {
     std::cerr << "configuration error: " << config_error << "\n";
     options.fatal = true;
   }
+
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+  // Explicit --verify-config / signing modes print their own diagnostics and
+  // must not be pre-empted by the startup policy.
+  const bool integrity_action =
+      options.verify_config || options.write_config_digest || options.sign_config;
+  if (!options.fatal && options.config_file_read && !integrity_action &&
+      options.integrity_mode != uvnvr::secure::ConfigIntegrityMode::kOff) {
+    const std::string manifest_path = ResolveConfigManifestPath(options);
+    std::string public_key;
+    std::string key_error;
+    bool key_ok = true;
+    if (!options.config_public_key.empty())
+      key_ok = ReadTextFile(options.config_public_key, &public_key, &key_error);
+
+    uvnvr::secure::ConfigIntegrityResult result;
+    std::string integrity_error;
+    bool performed = false;
+    if (key_ok) {
+      performed = uvnvr::secure::VerifyConfigText(options.config_file_contents, manifest_path,
+                                                  public_key, &result, &integrity_error);
+    } else {
+      integrity_error = key_error;
+    }
+
+    const auto report_failure = [&](const std::string& detail) {
+      const std::string message =
+          "config integrity: " + detail + " (manifest: " + manifest_path + ")";
+      if (options.integrity_mode == uvnvr::secure::ConfigIntegrityMode::kEnforce) {
+        std::cerr << "configuration error: " << message << "; refusing to start (mode=enforce)\n";
+        options.fatal = true;
+      } else {
+        std::cerr << "configuration warning: " << message << "; continuing (mode=warn)\n";
+      }
+    };
+
+    if (!performed) {
+      report_failure(integrity_error.empty() ? "verification could not be performed"
+                                             : integrity_error);
+    } else if (!result.ok) {
+      std::string detail = result.message;
+      if (!result.expected_sm3.empty() || !result.actual_sm3.empty()) {
+        detail += " [expected sm3 " + result.expected_sm3 + ", actual " + result.actual_sm3 +
+                  "]";
+      }
+      report_failure(detail);
+    }
+  }
+#endif
   return options;
 }
 
@@ -469,6 +640,74 @@ int main(int argc, char** argv) {
   if (options.print_config) {
     std::cout << uvnvr::ConfigToJson(options.config).dump(2) << "\n";
     return 0;
+  }
+
+  if (options.verify_config) {
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+    if (!options.config_file_read) {
+      std::cerr << "config verify: no configuration file was loaded; use --config\n";
+      return 2;
+    }
+    std::string public_key;
+    std::string error;
+    if (!options.config_public_key.empty() &&
+        !ReadTextFile(options.config_public_key, &public_key, &error)) {
+      std::cerr << "config verify: " << error << "\n";
+      return 2;
+    }
+    uvnvr::secure::ConfigIntegrityResult result;
+    if (!uvnvr::secure::VerifyConfigText(options.config_file_contents,
+                                         ResolveConfigManifestPath(options), public_key, &result,
+                                         &error)) {
+      std::cerr << "config verify: " << error << "\n";
+      return 2;
+    }
+    if (!result.ok) {
+      std::cout << "FAIL " << options.config_file_path << ": " << result.message << "\n"
+                << "  manifest:    " << ResolveConfigManifestPath(options) << "\n"
+                << "  expected sm3: " << result.expected_sm3 << "\n"
+                << "  actual sm3:   " << result.actual_sm3 << "\n";
+      return 1;
+    }
+    std::cout << "OK " << options.config_file_path << ": sm3=" << result.actual_sm3;
+    if (result.signed_manifest)
+      std::cout << " (SM2 signature verified)";
+    std::cout << "\n";
+    return 0;
+#else
+    std::cerr << "config verify: this build was configured without "
+                 "UVNVR_ENABLE_CONFIG_INTEGRITY\n";
+    return 2;
+#endif
+  }
+
+  if (options.write_config_digest || options.sign_config) {
+#ifdef UVNVR_ENABLE_CONFIG_INTEGRITY
+    if (!options.config_file_read) {
+      std::cerr << "config manifest: no configuration file was loaded; use --config\n";
+      return 2;
+    }
+    std::string private_key;
+    std::string error;
+    if (options.sign_config &&
+        !ReadTextFile(options.config_private_key, &private_key, &error)) {
+      std::cerr << "config manifest: " << error << "\n";
+      return 2;
+    }
+    const std::string manifest_path = ResolveConfigManifestPath(options);
+    if (!uvnvr::secure::WriteConfigManifestForContents(options.config_file_contents, manifest_path,
+                                                       private_key, &error)) {
+      std::cerr << "config manifest: " << error << "\n";
+      return 2;
+    }
+    std::cout << "config manifest " << (options.sign_config ? "signed with SM2" : "written")
+              << ": " << manifest_path << "\n";
+    return 0;
+#else
+    std::cerr << "config manifest: this build was configured without "
+                 "UVNVR_ENABLE_CONFIG_INTEGRITY\n";
+    return 2;
+#endif
   }
 
   if (options.verify_audit) {

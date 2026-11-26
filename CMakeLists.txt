@@ -45,6 +45,11 @@ set(UVNVR_GM_TLS_ROOT "" CACHE PATH
 option(UVNVR_ENABLE_CHANNEL_ACL
        "Build the object-level channel/group authorization (deny-by-default for non-admin users)"
        OFF)
+# SM3/SM2 integrity manifest for the startup configuration, plus warnings for
+# unknown keys. Off by default: existing deployments keep loading their config
+# without an integrity manifest.
+option(UVNVR_ENABLE_CONFIG_INTEGRITY
+       "Verify the startup configuration with an SM3/SM2 manifest" OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -308,6 +313,35 @@ if(UVNVR_ENABLE_GM_CRYPTO)
   endif()
 else()
   message(STATUS "gm_crypto: disabled by UVNVR_ENABLE_GM_CRYPTO=OFF")
+endif()
+
+# Configuration integrity: an SM3 digest (optionally SM2-signed) manifest is
+# checked before the service uses the config file, and unknown keys are
+# reported. It depends on the GM crypto library. Like the secure module it is
+# isolated behind its own switch so a default build behaves exactly as before.
+set(UVNVR_CONFIG_INTEGRITY_ENABLED 0)
+if(UVNVR_ENABLE_CONFIG_INTEGRITY)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "config_integrity: requested but gm_crypto is unavailable; UVNVR_ENABLE_CONFIG_INTEGRITY is forced OFF")
+  else()
+    set(UVNVR_CONFIG_INTEGRITY_ENABLED 1)
+    add_library(uvnvr_config_integrity STATIC
+      src/secure/config_integrity.cpp
+    )
+    target_include_directories(uvnvr_config_integrity PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_config_integrity PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_config_integrity PUBLIC UVNVR_ENABLE_CONFIG_INTEGRITY=1)
+    if(MSVC)
+      target_compile_options(uvnvr_config_integrity PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_config_integrity PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    target_link_libraries(uvnvr PRIVATE uvnvr_config_integrity)
+    message(STATUS "config_integrity: enabled")
+  endif()
+else()
+  message(STATUS "config_integrity: disabled by UVNVR_ENABLE_CONFIG_INTEGRITY=OFF")
 endif()
 
 # Secure module: audit hash chain, firmware signature verification and
