@@ -676,7 +676,8 @@ elseif(NOT WIN32)
 endif()
 
 if(MSVC)
-  target_compile_options(uvnvr PRIVATE /W4 /permissive- /utf-8)
+  # app.cpp is large enough that MSVC runs out of section entries on arm64.
+  target_compile_options(uvnvr PRIVATE /W4 /permissive- /utf-8 /bigobj)
 else()
   target_compile_options(uvnvr PRIVATE -Wall -Wextra -Wpedantic)
 endif()

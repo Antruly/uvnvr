@@ -286,7 +286,11 @@ std::vector<LocalInterface> LocalInterfaces() {
       const uint32_t broadcast_host = (host & mask_host) | ~mask_host;
       in_addr broadcast{};
       broadcast.s_addr = htonl(broadcast_host);
-      local.broadcast = IpFromSockaddr(sockaddr_in{AF_INET, 0, broadcast});
+      sockaddr_in broadcast_addr{};
+      broadcast_addr.sin_family = AF_INET;
+      broadcast_addr.sin_port = 0;
+      broadcast_addr.sin_addr = broadcast;
+      local.broadcast = IpFromSockaddr(broadcast_addr);
     }
     const bool duplicate =
         std::any_of(interfaces.begin(), interfaces.end(), [&](const LocalInterface& existing) {
