@@ -51,7 +51,7 @@ bool ReadFile(const std::string& path, std::string* contents, std::string* error
   return true;
 }
 
-std::string NameToString(X509_NAME* name) {
+std::string NameToString(const X509_NAME* name) {
   if (!name)
     return {};
   internal::BioPtr bio(BIO_new(BIO_s_mem()));
@@ -62,16 +62,16 @@ std::string NameToString(X509_NAME* name) {
   return internal::BioToString(bio.get());
 }
 
-std::string NameEntry(X509_NAME* name, int nid) {
+std::string NameEntry(const X509_NAME* name, int nid) {
   if (!name)
     return {};
   const int index = X509_NAME_get_index_by_NID(name, nid, -1);
   if (index < 0)
     return {};
-  X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, index);
+  const X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, index);
   if (!entry)
     return {};
-  ASN1_STRING* data = X509_NAME_ENTRY_get_data(entry);
+  const ASN1_STRING* data = X509_NAME_ENTRY_get_data(entry);
   if (!data)
     return {};
   unsigned char* utf8 = nullptr;
@@ -447,7 +447,7 @@ bool GenerateCsr(std::string_view private_key_pem, const CsrOptions& options, st
     return false;
   }
 
-  X509_NAME* subject = X509_REQ_get_subject_name(request.get());
+  X509_NAME* subject = const_cast<X509_NAME*>(X509_REQ_get_subject_name(request.get()));
   if (!subject) {
     SetError(error, "cannot access the certificate request subject");
     return false;
@@ -539,8 +539,8 @@ bool DescribeCertificate(std::string_view certificate_pem, CertificateDetails* d
     return false;
 
   CertificateDetails result;
-  X509_NAME* subject = X509_get_subject_name(certificate.get());
-  X509_NAME* issuer = X509_get_issuer_name(certificate.get());
+  const X509_NAME* subject = X509_get_subject_name(certificate.get());
+  const X509_NAME* issuer = X509_get_issuer_name(certificate.get());
   result.subject = NameToString(subject);
   result.issuer = NameToString(issuer);
   result.serial_hex = SerialToHex(certificate.get());
