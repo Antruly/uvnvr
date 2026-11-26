@@ -15,11 +15,16 @@
 
 #include <openssl/evp.h>
 
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+#include "gb35114/tls_gm.h"
+#endif
+
 #ifdef _WIN32
 #include <ws2tcpip.h>
 #else
 #include <netdb.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -639,6 +644,9 @@ class SipTransport {
     std::function<void(std::string error)> on_error;
     std::function<void()> on_connected;
     std::function<void(std::string reason)> on_disconnected;
+    // Operator-visible progress (handshake completion, a blocked GM TLS
+    // write). Never carries SIP payloads.
+    std::function<void(std::string message)> on_event;
   };
 
   virtual ~SipTransport() = default;
@@ -648,6 +656,20 @@ class SipTransport {
   virtual std::string local_ip() const = 0;
   virtual std::uint16_t local_port() const = 0;
   virtual std::string peer() const = 0;
+  virtual std::string tls_protocol() const { return {}; }
+  virtual std::string tls_cipher() const { return {}; }
+};
+
+struct TlsGmConfig {
+  bool enabled = false;
+  bool tls13 = false;
+  std::string sign_certificate_pem;
+  std::string sign_private_key_pem;
+  std::string enc_certificate_pem;
+  std::string enc_private_key_pem;
+  std::string ca_pem;
+  bool verify_peer = true;
+  std::string server_name;
 };
 
 struct TransportConfig {
@@ -656,6 +678,7 @@ struct TransportConfig {
   std::string bind_ip;
   std::string local_ip;
   std::uint16_t local_port = 0;
+  TlsGmConfig tls;
 };
 
 // --- UDP -------------------------------------------------------------------
@@ -876,20 +899,41 @@ class TcpTransport final : public SipTransport {
  public:
   TcpTransport(uvcpp::uvcpp_loop* loop, TransportConfig config)
       : loop_(loop), config_(std::move(config)) {}
-  ~TcpTransport() override {
-    if (state_ != nullptr) {
-      state_->owner = nullptr;
-      if (!state_->closing) {
-        state_->closing = true;
-        uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
-        uv_close(reinterpret_cast<uv_handle_t*>(&state_->handle), &TcpTransport::OnClosed);
-      }
-      state_ = nullptr;
-    }
-  }
+  ~TcpTransport() override { CloseState(); }
 
   bool Start(Callbacks callbacks, std::string* error) override {
     callbacks_ = std::move(callbacks);
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (config_.tls.enabled) {
+      uvnvr::gb35114::GmTlsCredentials credentials;
+      credentials.sign_certificate_pem = config_.tls.sign_certificate_pem;
+      credentials.sign_private_key_pem = config_.tls.sign_private_key_pem;
+      credentials.enc_certificate_pem = config_.tls.enc_certificate_pem;
+      credentials.enc_private_key_pem = config_.tls.enc_private_key_pem;
+      credentials.ca_pem = config_.tls.ca_pem;
+      credentials.verify_peer = config_.tls.verify_peer;
+
+      uvnvr::gb35114::GmTlsOptions options;
+      options.protocol = config_.tls.tls13 ? uvnvr::gb35114::GmTlsProtocol::GmTls13
+                                           : uvnvr::gb35114::GmTlsProtocol::Tlcp;
+      options.server_name = config_.tls.server_name;
+      std::string tls_error;
+      // One context per transport, reused for every reconnect of this
+      // transport instance; never rebuilt per SIP message.
+      tls_context_ = uvnvr::gb35114::GmTlsContext::CreateClient(credentials, options, &tls_error);
+      if (!tls_context_) {
+        if (error)
+          *error = "GM TLS client context: " + tls_error;
+        return false;
+      }
+    }
+#else
+    if (config_.tls.enabled) {
+      if (error)
+        *error = "tls-gm transport requested but this build has UVNVR_ENABLE_GM_TLS=OFF";
+      return false;
+    }
+#endif
     ResolvedEndpoint endpoint;
     if (!ResolveEndpoint(config_.server_host, config_.server_port, SOCK_STREAM, &endpoint, error))
       return false;
@@ -940,13 +984,28 @@ class TcpTransport final : public SipTransport {
   }
 
   bool Send(std::string message, std::string* error) override {
-    if (!ConnectedState()) {
+    // During the GM TLS handshake TCP is connected but the channel is not
+    // usable yet: queue the bytes and flush them in order once the handshake
+    // completes. Plain TCP sets both flags together, so its behaviour is
+    // unchanged.
+    if (state_ == nullptr || !state_->tcp_connected || state_->closing) {
       if (error)
-        *error = "tcp transport is not connected";
+        *error = config_.tls.enabled ? "tls-gm transport is not connected"
+                                     : "tcp transport is not connected";
       return false;
     }
     state_->queue.push_back(std::move(message));
-    Pump();
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (config_.tls.enabled) {
+      if (state_->tls_ready)
+        FlushTls(state_);
+      if (state_ != nullptr)
+        UpdatePollInterest(state_);
+    } else
+#endif
+    {
+      Pump();
+    }
     return true;
   }
 
@@ -955,7 +1014,58 @@ class TcpTransport final : public SipTransport {
   std::uint16_t local_port() const override { return local_port_; }
   std::string peer() const override { return peer_; }
 
+  std::string tls_protocol() const override {
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (state_ != nullptr && state_->tls_ready && state_->tls)
+      return state_->tls->NegotiatedProtocol();
+#endif
+    return {};
+  }
+
+  std::string tls_cipher() const override {
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (state_ != nullptr && state_->tls_ready && state_->tls)
+      return state_->tls->NegotiatedCipher();
+#endif
+    return {};
+  }
+
  private:
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+#ifdef _WIN32
+  static constexpr uv_os_sock_t kInvalidPollSocket = INVALID_SOCKET;
+#else
+  static constexpr uv_os_sock_t kInvalidPollSocket = -1;
+#endif
+
+  // uv_poll watches a duplicate descriptor so OpenSSL can keep reading and
+  // writing the socket that uv_tcp owns. The duplicate shares the underlying
+  // connection, and uv_poll never consumes bytes, so the two can coexist.
+  static uv_os_sock_t DuplicateForPoll(uv_os_sock_t source) {
+#ifdef _WIN32
+    WSAPROTOCOL_INFOW protocol{};
+    if (WSADuplicateSocketW(source, GetCurrentProcessId(), &protocol) != 0)
+      return kInvalidPollSocket;
+    const SOCKET duplicate =
+        WSASocketW(protocol.iAddressFamily, protocol.iSocketType, protocol.iProtocol, &protocol,
+                   0, 0);
+    return duplicate == INVALID_SOCKET ? kInvalidPollSocket : duplicate;
+#else
+    return ::dup(source);
+#endif
+  }
+
+  static void ClosePollSocket(uv_os_sock_t socket) {
+    if (socket == kInvalidPollSocket)
+      return;
+#ifdef _WIN32
+    ::closesocket(socket);
+#else
+    ::close(socket);
+#endif
+  }
+#endif
+
   struct TcpState {
     uv_tcp_t handle{};
     uv_connect_t connect_req{};
@@ -964,9 +1074,30 @@ class TcpTransport final : public SipTransport {
     std::string in_flight;
     std::string in_buffer;
     bool connecting = false;
-    bool connected = false;
+    // TCP is connected. For plain TCP this is set together with `connected`;
+    // for GM TLS it is set before the handshake and lets Send() queue bytes.
+    bool tcp_connected = false;
+    bool connected = false;  // transport ready (GM TLS: handshake complete)
     bool send_in_flight = false;
     bool closing = false;
+    int pending_closes = 0;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    uv_poll_t poll{};
+    uv_os_sock_t poll_socket = kInvalidPollSocket;
+    bool poll_initialized = false;
+    std::optional<uvnvr::gb35114::GmTlsSession> tls;
+    bool tls_ready = false;
+    bool tls_want_write = false;
+    bool reported_want_read = false;
+    bool reported_want_write = false;
+    // Retry timer for SSL_write back-pressure. A repeating timer wakes the
+    // loop every few milliseconds only while the socket is full; it is
+    // stopped as soon as the queue drains.
+    uv_timer_t write_retry_timer{};
+    bool write_retry_initialized = false;
+    bool write_retry_active = false;
+    std::size_t tls_written = 0;
+#endif
   };
 
   bool ConnectedState() const { return state_ != nullptr && state_->connected && !state_->closing; }
@@ -1002,9 +1133,17 @@ class TcpTransport final : public SipTransport {
     if (state->owner->local_ip_.empty())
       state->owner->local_ip_ = SockaddrHost(reinterpret_cast<const sockaddr*>(&local));
 
+    state->tcp_connected = true;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (state->owner->config_.tls.enabled) {
+      state->owner->StartTls(state);
+      return;
+    }
+#endif
     const int read_rc = uv_read_start(reinterpret_cast<uv_stream_t*>(&state->handle),
                                       &TcpTransport::OnAlloc, &TcpTransport::OnRead);
     if (read_rc != 0) {
+      state->tcp_connected = false;
       state->owner->OnAsyncError(std::string("tcp read_start: ") + uv_strerror(read_rc));
       return;
     }
@@ -1012,6 +1151,310 @@ class TcpTransport final : public SipTransport {
     if (state->owner->callbacks_.on_connected)
       state->owner->callbacks_.on_connected();
   }
+
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+  static void OnPoll(uv_poll_t* handle, int status, int events) {
+    auto* state = static_cast<TcpState*>(handle->data);
+    if (state == nullptr || state->owner == nullptr)
+      return;
+    state->owner->HandleTlsPoll(state, status, events);
+  }
+
+  void StartTls(TcpState* state) {
+    uv_os_fd_t descriptor = 0;
+    const int fileno_rc =
+        uv_fileno(reinterpret_cast<uv_handle_t*>(&state->handle), &descriptor);
+    if (fileno_rc != 0) {
+      TlsFailure(state, std::string("tls-gm: cannot obtain the TCP descriptor: ") +
+                            uv_strerror(fileno_rc));
+      return;
+    }
+    const uv_os_sock_t socket = reinterpret_cast<uv_os_sock_t>(descriptor);
+    const uv_os_sock_t poll_socket = DuplicateForPoll(socket);
+    if (poll_socket == kInvalidPollSocket) {
+      TlsFailure(state, "tls-gm: cannot duplicate the TCP socket for readiness polling");
+      return;
+    }
+    auto* raw_loop = reinterpret_cast<uv_loop_t*>(loop_->get_handle());
+    const int poll_rc = uv_poll_init_socket(raw_loop, &state->poll, poll_socket);
+    if (poll_rc != 0) {
+      ClosePollSocket(poll_socket);
+      TlsFailure(state, std::string("tls-gm poll init: ") + uv_strerror(poll_rc));
+      return;
+    }
+    state->poll.data = state;
+    state->poll_socket = poll_socket;
+    state->poll_initialized = true;
+
+    if (uv_timer_init(raw_loop, &state->write_retry_timer) != 0) {
+      TlsFailure(state, "tls-gm: cannot initialise the write retry timer");
+      return;
+    }
+    state->write_retry_timer.data = state;
+    state->write_retry_initialized = true;
+
+    std::string error;
+    state->tls.emplace(
+        uvnvr::gb35114::GmTlsSession::Connect(tls_context_, static_cast<int>(socket), &error));
+    if (!error.empty()) {
+      TlsFailure(state, "tls-gm session: " + error);
+      return;
+    }
+    if (uv_poll_start(&state->poll, UV_READABLE, &TcpTransport::OnPoll) != 0) {
+      TlsFailure(state, "tls-gm: cannot start the read readiness poll");
+      return;
+    }
+    DriveTls(state);
+  }
+
+  void HandleTlsPoll(TcpState* state, int status, int events) {
+    if (state != state_ || state->closing)
+      return;
+    if (status < 0) {
+      TlsFailure(state, std::string("tls-gm poll: ") + uv_strerror(status));
+      return;
+    }
+    if ((events & UV_READABLE) != 0) {
+      // Readable during the handshake means a handshake flight arrived; it
+      // must be fed to SSL_do_handshake, not to SSL_read.
+      if (!state->tls_ready) {
+        DriveTls(state);
+        if (state != state_ || state->closing)
+          return;
+      }
+      if (state->tls_ready) {
+        if (!TlsReadAvailable(state))
+          return;
+        if (state != state_ || state->closing)
+          return;
+      }
+    }
+    // A completed read may have freed SSL_write to make progress after it
+    // returned WantRead (renegotiation), so retry the queue here as well.
+    if (state->tls_ready && (!state->queue.empty() || !state->in_flight.empty()))
+      FlushTls(state);
+    if (state != state_ || state->closing)
+      return;
+    UpdatePollInterest(state);
+  }
+
+  // Reads one TLS record batch. Returns false when the transport is no longer
+  // usable; errors and close_notify are reported through the callbacks.
+  bool TlsReadAvailable(TcpState* state) {
+    char buffer[32768];
+    for (;;) {
+      std::size_t received = 0;
+      std::string error;
+      const uvnvr::gb35114::GmTlsStatus status =
+          state->tls->Read(buffer, sizeof(buffer), &received, &error);
+      if (status == uvnvr::gb35114::GmTlsStatus::Ok) {
+        state->in_buffer.append(buffer, received);
+        ProcessInput();
+        if (state != state_ || state->closing)
+          return false;
+        continue;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::WantRead) {
+        if (!state->reported_want_read) {
+          state->reported_want_read = true;
+          Event("tls-gm read would block (WantRead); waiting for socket readability");
+        }
+        return true;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::WantWrite) {
+        state->tls_want_write = true;
+        return true;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::Closed) {
+        TlsDisconnected(state, "tls-gm peer closed the connection");
+        return false;
+      }
+      TlsFailure(state, "tls-gm read: " + error);
+      return false;
+    }
+  }
+
+  // Drives the handshake one step. WantRead keeps the readable poll armed;
+  // WantWrite arms the write retry timer.
+  void DriveTls(TcpState* state) {
+    if (!state->tls)
+      return;
+    std::string error;
+    const uvnvr::gb35114::GmTlsStatus status = state->tls->Handshake(&error);
+    if (status == uvnvr::gb35114::GmTlsStatus::Ok) {
+      if (state->tls_ready) {
+        UpdatePollInterest(state);
+        return;
+      }
+      state->tls_ready = true;
+      state->tls_want_write = false;
+      state->connected = true;
+      Event("tls-gm handshake complete: protocol=" + state->tls->NegotiatedProtocol() +
+            " cipher=" + state->tls->NegotiatedCipher() +
+            (state->tls->PeerVerified() ? " peer=verified" : " peer=unverified"));
+      if (callbacks_.on_connected)
+        callbacks_.on_connected();
+      if (state != state_ || state->closing)
+        return;
+      FlushTls(state);
+      if (state != state_ || state->closing)
+        return;
+      UpdatePollInterest(state);
+      return;
+    }
+    if (status == uvnvr::gb35114::GmTlsStatus::WantRead)
+      return;  // readable interest is always on
+    if (status == uvnvr::gb35114::GmTlsStatus::WantWrite) {
+      state->tls_want_write = true;
+      UpdatePollInterest(state);
+      return;
+    }
+    if (status == uvnvr::gb35114::GmTlsStatus::Closed) {
+      TlsDisconnected(state, "tls-gm peer closed during the handshake");
+      return;
+    }
+    TlsFailure(state, "tls-gm handshake: " + error);
+  }
+
+  // Writes queued SIP messages into the TLS channel. SSL_write may accept a
+  // partial buffer on a non-blocking socket, so the current message and the
+  // offset into it survive until it has been written completely.
+  void FlushTls(TcpState* state) {
+    if (!state->tls || !state->tls_ready || state->closing)
+      return;
+    for (;;) {
+      if (state->in_flight.empty()) {
+        if (state->queue.empty())
+          break;
+        state->in_flight = std::move(state->queue.front());
+        state->queue.pop_front();
+        state->tls_written = 0;
+      }
+      const std::size_t remaining = state->in_flight.size() - state->tls_written;
+      if (remaining == 0) {
+        state->in_flight.clear();
+        state->tls_written = 0;
+        continue;
+      }
+      // Write at most one maximum-size TLS record per call. A multi-megabyte
+      // SSL_write is legal, but after WantWrite some backends only report
+      // progress per record; chunking keeps the retry contract simple (same
+      // pointer and length) and makes the partial progress explicit.
+      constexpr std::size_t kMaxTlsRecord = 16 * 1024;
+      const std::size_t chunk = std::min(remaining, kMaxTlsRecord);
+      std::size_t sent = 0;
+      std::string error;
+      const uvnvr::gb35114::GmTlsStatus status =
+          state->tls->Write(state->in_flight.data() + state->tls_written, chunk, &sent, &error);
+      if (status == uvnvr::gb35114::GmTlsStatus::Ok) {
+        state->tls_written += sent;
+        if (sent == 0) {
+          // Defensive: do not spin if a backend reports success without
+          // consuming anything.
+          state->tls_want_write = true;
+          return;
+        }
+        if (state->tls_written >= state->in_flight.size()) {
+          state->in_flight.clear();
+          state->tls_written = 0;
+        }
+        continue;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::WantWrite) {
+        state->tls_want_write = true;
+        if (!state->reported_want_write) {
+          state->reported_want_write = true;
+          Event("tls-gm write would block (WantWrite); waiting for socket writability");
+        }
+        return;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::WantRead) {
+        state->tls_want_write = false;
+        return;
+      }
+      if (status == uvnvr::gb35114::GmTlsStatus::Closed) {
+        TlsDisconnected(state, "tls-gm peer closed during a write");
+        return;
+      }
+      TlsFailure(state, "tls-gm write: " + error);
+      return;
+    }
+    state->tls_want_write = false;
+  }
+
+  // Maps the SSL_write WantWrite state onto a timed retry. libuv 1.48 does
+  // not deliver a reliable EPOLLOUT transition for a uv_poll handle that was
+  // first registered UV_READABLE, and the write path cannot inject a dummy
+  // byte into the TLS stream, so a short repeating timer is the portable way
+  // to poll for socket writability without blocking the loop. The timer only
+  // exists while a write is actually blocked.
+  void UpdatePollInterest(TcpState* state) {
+    if (state != state_ || state->closing)
+      return;
+    if (state->tls_want_write) {
+      if (!state->write_retry_active && state->write_retry_initialized) {
+        state->write_retry_active = true;
+        uv_timer_start(&state->write_retry_timer, &TcpTransport::OnWriteRetry, 1, 4);
+      }
+    } else if (state->write_retry_active) {
+      state->write_retry_active = false;
+      uv_timer_stop(&state->write_retry_timer);
+    }
+  }
+
+  static void OnWriteRetry(uv_timer_t* handle) {
+    auto* state = static_cast<TcpState*>(handle->data);
+    if (state == nullptr)
+      return;
+    if (state->owner == nullptr || state->closing) {
+      uv_timer_stop(handle);
+      state->write_retry_active = false;
+      return;
+    }
+    if (!state->tls_ready)
+      state->owner->DriveTls(state);
+    else
+      state->owner->FlushTls(state);
+    if (!state->tls_want_write && state->write_retry_active) {
+      state->write_retry_active = false;
+      uv_timer_stop(handle);
+    }
+    if (state->owner != nullptr && !state->closing)
+      state->owner->UpdatePollInterest(state);
+  }
+
+  void TlsFailure(TcpState* state, std::string reason) {
+    state->tcp_connected = false;
+    state->connected = false;
+    state->tls_ready = false;
+    state->tls_want_write = false;
+    state->write_retry_active = false;
+    if (state->write_retry_initialized)
+      uv_timer_stop(&state->write_retry_timer);
+    if (state->poll_initialized)
+      uv_poll_stop(&state->poll);
+    OnAsyncError(std::move(reason));
+  }
+
+  void TlsDisconnected(TcpState* state, std::string reason) {
+    state->tcp_connected = false;
+    state->connected = false;
+    state->tls_ready = false;
+    state->tls_want_write = false;
+    state->write_retry_active = false;
+    if (state->write_retry_initialized)
+      uv_timer_stop(&state->write_retry_timer);
+    if (state->poll_initialized)
+      uv_poll_stop(&state->poll);
+    if (callbacks_.on_disconnected)
+      callbacks_.on_disconnected(std::move(reason));
+  }
+
+  void Event(std::string message) {
+    if (callbacks_.on_event)
+      callbacks_.on_event(std::move(message));
+  }
+#endif  // UVNVR_GM_TLS_ENABLED
 
   static void OnRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     auto* state = static_cast<TcpState*>(stream->data);
@@ -1023,8 +1466,9 @@ class TcpTransport final : public SipTransport {
     if (nread < 0) {
       if (buf != nullptr && buf->base != nullptr)
         std::free(buf->base);
-      if (state->connected) {
+      if (state->connected || state->tcp_connected) {
         state->connected = false;
+        state->tcp_connected = false;
         uv_read_stop(stream);
         if (state->owner->callbacks_.on_disconnected) {
           state->owner->callbacks_.on_disconnected(
@@ -1055,6 +1499,7 @@ class TcpTransport final : public SipTransport {
       return;
     if (status < 0) {
       state->connected = false;
+      state->tcp_connected = false;
       state->owner->OnAsyncError(std::string("tcp write: ") + uv_strerror(status));
       return;
     }
@@ -1063,6 +1508,15 @@ class TcpTransport final : public SipTransport {
 
   static void OnClosed(uv_handle_t* handle) {
     auto* state = static_cast<TcpState*>(handle->data);
+    if (state == nullptr)
+      return;
+    if (state->pending_closes > 0)
+      --state->pending_closes;
+    if (state->pending_closes != 0)
+      return;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    ClosePollSocket(state->poll_socket);
+#endif
     delete state;
   }
 
@@ -1078,7 +1532,13 @@ class TcpTransport final : public SipTransport {
       if (status == SipParseStatus::kInvalid) {
         OnAsyncError("invalid SIP message on tcp stream: " + error);
         state_->connected = false;
-        uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
+        state_->tcp_connected = false;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+        if (state_->poll_initialized)
+          uv_poll_stop(&state_->poll);
+        else
+#endif
+          uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
         return;
       }
       std::string raw = state_->in_buffer.substr(0, consumed);
@@ -1089,7 +1549,13 @@ class TcpTransport final : public SipTransport {
     if (state_ != nullptr && state_->in_buffer.size() > 4 * 1024 * 1024) {
       OnAsyncError("SIP message exceeded the 4 MiB stream limit");
       state_->connected = false;
-      uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
+      state_->tcp_connected = false;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+      if (state_->poll_initialized)
+        uv_poll_stop(&state_->poll);
+      else
+#endif
+        uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
     }
   }
 
@@ -1122,13 +1588,28 @@ class TcpTransport final : public SipTransport {
   void CloseState() {
     if (state_ == nullptr)
       return;
-    state_->owner = nullptr;
-    if (!state_->closing) {
-      state_->closing = true;
-      uv_read_stop(reinterpret_cast<uv_stream_t*>(&state_->handle));
-      uv_close(reinterpret_cast<uv_handle_t*>(&state_->handle), &TcpTransport::OnClosed);
-    }
+    TcpState* state = state_;
     state_ = nullptr;
+    state->owner = nullptr;
+    if (state->closing)
+      return;
+    state->closing = true;
+    uv_read_stop(reinterpret_cast<uv_stream_t*>(&state->handle));
+    state->pending_closes = 1;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    if (state->poll_initialized) {
+      uv_poll_stop(&state->poll);
+      ++state->pending_closes;
+      uv_close(reinterpret_cast<uv_handle_t*>(&state->poll), &TcpTransport::OnClosed);
+    }
+    if (state->write_retry_initialized) {
+      uv_timer_stop(&state->write_retry_timer);
+      ++state->pending_closes;
+      uv_close(reinterpret_cast<uv_handle_t*>(&state->write_retry_timer),
+               &TcpTransport::OnClosed);
+    }
+#endif
+    uv_close(reinterpret_cast<uv_handle_t*>(&state->handle), &TcpTransport::OnClosed);
   }
 
   uvcpp::uvcpp_loop* loop_;
@@ -1138,6 +1619,9 @@ class TcpTransport final : public SipTransport {
   std::string peer_;
   std::string local_ip_;
   std::uint16_t local_port_ = 0;
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+  std::shared_ptr<uvnvr::gb35114::GmTlsContext> tls_context_;
+#endif
 };
 
 }  // namespace
@@ -2058,7 +2542,15 @@ struct SipUserAgent::Impl {
       callbacks.on_state(new_state, detail);
   }
 
+  // SIP transport token for Via/Contact. GM TLS is a hop-by-hop security
+  // layer over the TCP transport, so the SIP token stays "TCP".
   std::string TransportName() const { return config.tcp ? "TCP" : "UDP"; }
+
+  std::string TransportLabel() const {
+    if (config.tls_gm)
+      return "TLS-GM";
+    return config.tcp ? "TCP" : "UDP";
+  }
 
   std::string ContactUri() const {
     SipUri contact;
@@ -2119,6 +2611,15 @@ struct SipUserAgent::Impl {
     transport_config.bind_ip = config.bind_ip;
     transport_config.local_ip = config.local_ip;
     transport_config.local_port = config.local_port;
+    transport_config.tls.enabled = config.tls_gm;
+    transport_config.tls.tls13 = config.tls13;
+    transport_config.tls.sign_certificate_pem = config.tls_sign_certificate_pem;
+    transport_config.tls.sign_private_key_pem = config.tls_sign_private_key_pem;
+    transport_config.tls.enc_certificate_pem = config.tls_enc_certificate_pem;
+    transport_config.tls.enc_private_key_pem = config.tls_enc_private_key_pem;
+    transport_config.tls.ca_pem = config.tls_ca_pem;
+    transport_config.tls.verify_peer = config.tls_verify_peer;
+    transport_config.tls.server_name = config.tls_server_name;
 
     std::unique_ptr<SipTransport> created;
     if (config.tcp) {
@@ -2138,6 +2639,7 @@ struct SipUserAgent::Impl {
     transport_callbacks.on_disconnected = [this](std::string reason) {
       OnTransportFailure(std::move(reason));
     };
+    transport_callbacks.on_event = [this](std::string message) { Event(message); };
 
     if (!created->Start(std::move(transport_callbacks), error))
       return false;
@@ -2198,7 +2700,12 @@ struct SipUserAgent::Impl {
       RegistrationFailed("TCP connection has no usable local address", true);
       return;
     }
-    Event("transport connected to " + (transport ? transport->peer() : std::string()));
+    std::string connected = "transport connected to " +
+                            (transport ? transport->peer() : std::string());
+    if (transport && !transport->tls_cipher().empty()) {
+      connected += " (GM TLS " + transport->tls_protocol() + ", " + transport->tls_cipher() + ")";
+    }
+    Event(connected);
     SendRegister(have_challenge, false);
   }
 
@@ -2874,6 +3381,32 @@ struct SipUserAgent::Impl {
         *error = "connect_timeout_ms must be greater than zero";
       return false;
     }
+    if (config.tls_gm) {
+      if (!config.tcp) {
+        if (error)
+          *error = "tls-gm requires the TCP stream transport";
+        return false;
+      }
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+      if (config.tls_sign_certificate_pem.empty() ||
+          config.tls_sign_private_key_pem.empty()) {
+        if (error)
+          *error = "tls-gm requires gb28181.tls.sign_cert and gb28181.tls.sign_key";
+        return false;
+      }
+      if (!config.tls13 &&
+          (config.tls_enc_certificate_pem.empty() || config.tls_enc_private_key_pem.empty())) {
+        if (error)
+          *error = "tls-gm with protocol=tlcp requires gb28181.tls.enc_cert and "
+                   "gb28181.tls.enc_key (TLCP double certificate)";
+        return false;
+      }
+#else
+      if (error)
+        *error = "tls-gm transport requested but this build has UVNVR_ENABLE_GM_TLS=OFF";
+      return false;
+#endif
+    }
     SipUri parsed;
     std::string parse_error;
     if (!ParseSipUri(registrar, &parsed, &parse_error)) {
@@ -2887,6 +3420,8 @@ struct SipUserAgent::Impl {
   bool Start(std::string* error) {
     if (running)
       return true;
+    if (config.tls_gm)
+      config.tcp = true;  // GM TLS is always carried on a TCP stream
     domain = config.domain.empty() ? config.server_host : config.domain;
     registrar = config.registrar_uri.empty()
                     ? MakeUri(config.server_id, domain)
@@ -2912,7 +3447,7 @@ struct SipUserAgent::Impl {
     local_ip.clear();
     local_port = 0;
     SetState(SipRegistrationState::kConnecting,
-             "starting " + TransportName() + " transport toward " + config.server_host + ":" +
+             "starting " + TransportLabel() + " transport toward " + config.server_host + ":" +
                  std::to_string(config.server_port));
     std::string setup_error;
     if (!BeginAttempt(&setup_error)) {
@@ -3060,6 +3595,14 @@ std::uint64_t SipUserAgent::sent_messages() const {
 
 std::uint64_t SipUserAgent::received_messages() const {
   return impl_->received_messages;
+}
+
+std::string SipUserAgent::tls_protocol() const {
+  return impl_->transport ? impl_->transport->tls_protocol() : std::string();
+}
+
+std::string SipUserAgent::tls_cipher() const {
+  return impl_->transport ? impl_->transport->tls_cipher() : std::string();
 }
 
 }  // namespace uvnvr::gb28181

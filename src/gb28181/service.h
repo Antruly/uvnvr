@@ -54,6 +54,18 @@ struct Gb28181Config {
   std::string server_host;
   std::uint16_t server_port = 5060;
   bool tcp = false;
+  // GM/T 0024 (TLCP) or RFC 8998 GM TLS 1.3 over the TCP stream. All PEM
+  // fields are text already loaded from the configured paths; the service
+  // never reads certificate files itself.
+  bool tls_gm = false;
+  bool tls13 = false;
+  std::string tls_sign_certificate_pem;
+  std::string tls_sign_private_key_pem;
+  std::string tls_enc_certificate_pem;
+  std::string tls_enc_private_key_pem;
+  std::string tls_ca_pem;
+  bool tls_verify_peer = true;
+  std::string tls_server_name;
   std::string username;
   std::string password;
   std::string server_id;

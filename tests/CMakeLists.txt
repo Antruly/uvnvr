@@ -136,6 +136,22 @@ if(UVNVR_GM_TLS_ENABLED)
     target_link_libraries(gm_tls_test PRIVATE ws2_32)
   endif()
   add_test(NAME gm_tls COMMAND gm_tls_test)
+
+  # End-to-end SIP REGISTER over GM/T 0024. Built only when both the SIP
+  # stack and the GM TLS adapter are enabled.
+  if(UVNVR_GB28181_ENABLED)
+    add_executable(sip_gm_tls_test sip_gm_tls_test.cpp)
+    # Put the Tongsuo headers ahead of the system OpenSSL include directory so
+    # the test's PKI helper and the adapter agree on the crypto library.
+    target_include_directories(sip_gm_tls_test PRIVATE
+      "${UVNVR_GM_TLS_INCLUDE_DIR}" "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(sip_gm_tls_test PRIVATE uvnvr_gb28181 uvnvr_gm_tls)
+    if(UVNVR_LIBUVCPP_ROOT)
+      set_property(TARGET sip_gm_tls_test APPEND PROPERTY
+                   BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+    endif()
+    add_test(NAME sip_gm_tls COMMAND sip_gm_tls_test)
+  endif()
 endif()
 
 if(UVNVR_CHANNEL_ACL_ENABLED)
