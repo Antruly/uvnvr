@@ -262,7 +262,9 @@ jobs:
           cp /tmp/models/hyperlpr3/*.mnn "$OUT/models/hyperlpr3/"
           cp /tmp/models/face/Pikachu "$OUT/models/face/Pikachu"
           cp -a frontend/dist/. "$OUT/share/uvnvr/frontend/"
-          cd /tmp && zip -qr uvnvr-full-windows-x64.zip uvnvr-full-win
+          # RUNNER_TEMP is visible to the PowerShell-based upload action,
+          # while MSYS2's /tmp is not.
+          cd "$RUNNER_TEMP" && zip -qr uvnvr-full-windows-x64.zip uvnvr-full-win
           sha256sum uvnvr-full-windows-x64.zip > uvnvr-full-windows-x64.zip.sha256
           cat uvnvr-full-windows-x64.zip.sha256
 
@@ -271,6 +273,6 @@ jobs:
         with:
           name: uvnvr-full-windows-x64
           path: |
-            /tmp/uvnvr-full-windows-x64.zip
-            /tmp/uvnvr-full-windows-x64.zip.sha256
+            ${{ runner.temp }}/uvnvr-full-windows-x64.zip
+            ${{ runner.temp }}/uvnvr-full-windows-x64.zip.sha256
           if-no-files-found: error
