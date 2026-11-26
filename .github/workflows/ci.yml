@@ -37,7 +37,19 @@ jobs:
           npm run build
 
       - name: Install build tools
-        run: sudo apt-get install -y --no-install-recommends ninja-build pkg-config unzip libuv1-dev libssl-dev python3-websockets ffmpeg
+        run: |
+          # The runner image's apt mirror intermittently 404s on a single
+          # package; retry instead of failing the whole job.
+          for attempt in 1 2 3; do
+            sudo apt-get update -o Acquire::Retries=5 || true
+            if sudo apt-get install -y --no-install-recommends \
+                 ninja-build pkg-config unzip libuv1-dev libssl-dev \
+                 python3-websockets ffmpeg; then
+              exit 0
+            fi
+            sleep 20
+          done
+          exit 1
 
       - name: Fetch libuvcpp 1.8.1
         run: |
