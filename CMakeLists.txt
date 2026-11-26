@@ -543,6 +543,8 @@ if(UVNVR_ENABLE_GM_TLS)
   endif()
 else()
   message(STATUS "gm_tls: disabled by UVNVR_ENABLE_GM_TLS=OFF")
+endif()
+
 # Object-level channel ACL. The static library holds the pure decision logic so
 # it can be unit tested without libuvcpp; the tables and enforcement hooks live
 # in the server under the same compile definition. When the option is off no
