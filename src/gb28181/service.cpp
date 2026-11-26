@@ -1035,6 +1035,15 @@ struct Gb28181Service::Impl {
     ua_config.server_host = config.server_host;
     ua_config.server_port = config.server_port;
     ua_config.tcp = config.tcp;
+    ua_config.tls_gm = config.tls_gm;
+    ua_config.tls13 = config.tls13;
+    ua_config.tls_sign_certificate_pem = config.tls_sign_certificate_pem;
+    ua_config.tls_sign_private_key_pem = config.tls_sign_private_key_pem;
+    ua_config.tls_enc_certificate_pem = config.tls_enc_certificate_pem;
+    ua_config.tls_enc_private_key_pem = config.tls_enc_private_key_pem;
+    ua_config.tls_ca_pem = config.tls_ca_pem;
+    ua_config.tls_verify_peer = config.tls_verify_peer;
+    ua_config.tls_server_name = config.tls_server_name;
     ua_config.username = config.username.empty() ? config.device_id : config.username;
     ua_config.password = config.password;
     ua_config.server_id = config.server_id;

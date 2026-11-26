@@ -198,7 +198,27 @@ struct SipUaConfig {
   // Registrar/platform address.
   std::string server_host;
   std::uint16_t server_port = 5060;
+  // Selects stream framing (TCP) instead of datagrams. GM TLS always uses a
+  // stream, so `tls_gm` implies `tcp`.
   bool tcp = false;
+
+  // Wrap the TCP stream in GM/T 0024 (TLCP) or RFC 8998 GM TLS 1.3. An empty
+  // build without UVNVR_ENABLE_GM_TLS rejects this at Start() instead of
+  // falling back to plaintext.
+  bool tls_gm = false;
+  // false selects TLCP (GM/T 0024); true selects GM TLS 1.3.
+  bool tls13 = false;
+  // Credentials and trust anchors as PEM text, never paths: the caller loads
+  // the configured files. TLCP needs the signing pair and the encryption pair;
+  // GM TLS 1.3 needs only the signing pair.
+  std::string tls_sign_certificate_pem;
+  std::string tls_sign_private_key_pem;
+  std::string tls_enc_certificate_pem;
+  std::string tls_enc_private_key_pem;
+  std::string tls_ca_pem;
+  bool tls_verify_peer = true;
+  // SNI and certificate hostname for the client session.
+  std::string tls_server_name;
 
   // Device credentials. GB/T 28181 uses the 20-digit device ID as the SIP
   // user name; `password` may be empty for a registrar without authentication.
@@ -331,6 +351,12 @@ class SipUserAgent {
   std::uint16_t local_port() const;
   std::uint64_t sent_messages() const;
   std::uint64_t received_messages() const;
+
+  // Negotiated GM/T 0024 parameters. Empty for UDP/plain TCP and before the
+  // handshake completes. Read them from an event-loop callback (or after the
+  // loop has stopped); they are not synchronised for other threads.
+  std::string tls_protocol() const;
+  std::string tls_cipher() const;
 
  private:
   struct Impl;

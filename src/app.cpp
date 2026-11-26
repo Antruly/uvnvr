@@ -12069,7 +12069,83 @@ void App::StartGb28181() {
   config.server_port =
       static_cast<std::uint16_t>(std::clamp<int64_t>(GetSettingInt("gb28181.server_port", 5060),
                                                      1, 65535));
-  config.tcp = GetSetting("gb28181.transport", "udp") == "tcp";
+  const std::string transport_kind = GetSetting("gb28181.transport", "udp");
+  if (transport_kind == "tcp") {
+    config.tcp = true;
+  } else if (transport_kind == "tls-gm") {
+    config.tcp = true;
+    config.tls_gm = true;
+  } else if (transport_kind != "udp") {
+    const std::string reason =
+        "gb28181.transport must be udp, tcp or tls-gm (got '" + transport_kind + "')";
+    std::fprintf(stderr, "GB28181 disabled: %s\n", reason.c_str());
+    RaiseAlert(0, "service_error", "warning", "GB/T 28181 is enabled but " + reason, "");
+    return;
+  }
+  if (config.tls_gm) {
+#if defined(UVNVR_GM_TLS_ENABLED) && UVNVR_GM_TLS_ENABLED
+    const std::string protocol = GetSetting("gb28181.tls.protocol", "tlcp");
+    if (protocol != "tlcp" && protocol != "tls13") {
+      const std::string reason =
+          "gb28181.tls.protocol must be tlcp or tls13 (got '" + protocol + "')";
+      std::fprintf(stderr, "GB28181 disabled: %s\n", reason.c_str());
+      RaiseAlert(0, "service_error", "warning", "GB/T 28181 is enabled but " + reason, "");
+      return;
+    }
+    config.tls13 = protocol == "tls13";
+    config.tls_verify_peer = GetSettingInt("gb28181.tls.verify", 1) != 0;
+    config.tls_server_name = GetSetting("gb28181.tls.server_name", "");
+
+    bool pem_ok = true;
+    const auto load_pem = [&](const std::string& setting, bool required,
+                              std::string* out) -> bool {
+      out->clear();
+      const std::string path = GetSetting("gb28181.tls." + setting, "");
+      if (path.empty()) {
+        if (!required)
+          return true;
+        const std::string reason = "gb28181.tls." + setting + " is required for tls-gm";
+        std::fprintf(stderr, "GB28181 disabled: %s\n", reason.c_str());
+        RaiseAlert(0, "service_error", "warning", "GB/T 28181 is enabled but " + reason, "");
+        return false;
+      }
+      std::ifstream input(path, std::ios::binary);
+      if (!input) {
+        const std::string reason =
+            "gb28181.tls." + setting + " cannot be read: " + path;
+        std::fprintf(stderr, "GB28181 disabled: %s\n", reason.c_str());
+        RaiseAlert(0, "service_error", "warning", "GB/T 28181 is enabled but " + reason, "");
+        return false;
+      }
+      out->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+      if (out->empty()) {
+        const std::string reason =
+            "gb28181.tls." + setting + " is empty: " + path;
+        std::fprintf(stderr, "GB28181 disabled: %s\n", reason.c_str());
+        RaiseAlert(0, "service_error", "warning", "GB/T 28181 is enabled but " + reason, "");
+        return false;
+      }
+      return true;
+    };
+    pem_ok = load_pem("sign_cert", true, &config.tls_sign_certificate_pem) && pem_ok;
+    pem_ok = load_pem("sign_key", true, &config.tls_sign_private_key_pem) && pem_ok;
+    const bool tlcp = !config.tls13;
+    pem_ok = load_pem("enc_cert", tlcp, &config.tls_enc_certificate_pem) && pem_ok;
+    pem_ok = load_pem("enc_key", tlcp, &config.tls_enc_private_key_pem) && pem_ok;
+    pem_ok = load_pem("ca", false, &config.tls_ca_pem) && pem_ok;
+    if (!pem_ok)
+      return;
+#else
+    std::fprintf(stderr,
+                 "GB28181 disabled: gb28181.transport=tls-gm requires a build with "
+                 "UVNVR_ENABLE_GM_TLS=ON\n");
+    RaiseAlert(0, "service_error", "warning",
+               "GB/T 28181 is enabled but gb28181.transport=tls-gm requires a build with "
+               "UVNVR_ENABLE_GM_TLS=ON",
+               "");
+    return;
+#endif
+  }
   config.username = GetSetting("gb28181.username", device_id);
   config.password = GetSetting("gb28181.password", "");
   config.server_id = GetSetting("gb28181.server_id", "");

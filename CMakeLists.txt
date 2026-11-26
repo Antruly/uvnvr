@@ -64,6 +64,31 @@ set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
 # UVNVR_LIBUVCPP_ROOT pins the first route, which is what CI and the
 # reproducible developer setup use. Without it, find_package() is tried first.
 find_package(PkgConfig QUIET)
+
+# A GM/T 0024 build must use one crypto library for the whole process: two
+# libcrypto.so.3 images (system OpenSSL plus Tongsuo) cannot coexist because
+# the linker deduplicates them by SONAME and the NTLS symbols stay unresolved.
+# Point FindOpenSSL at Tongsuo up front; when GM TLS is requested but Tongsuo
+# is absent, the explicit gm_tls check below stops the configure with a clear
+# error instead of silently mixing the two libraries.
+if(UVNVR_ENABLE_GM_TLS)
+  set(_uvnvr_gm_tls_early_roots)
+  if(UVNVR_GM_TLS_ROOT)
+    list(APPEND _uvnvr_gm_tls_early_roots "${UVNVR_GM_TLS_ROOT}")
+  endif()
+  foreach(_uvnvr_gm_tls_env TONGSUO_ROOT TONGSUO_INSTALL_ROOT)
+    if(DEFINED ENV{${_uvnvr_gm_tls_env}} AND NOT "$ENV{${_uvnvr_gm_tls_env}}" STREQUAL "")
+      list(APPEND _uvnvr_gm_tls_early_roots "$ENV{${_uvnvr_gm_tls_env}}")
+    endif()
+  endforeach()
+  foreach(_uvnvr_gm_tls_candidate IN LISTS _uvnvr_gm_tls_early_roots)
+    if(EXISTS "${_uvnvr_gm_tls_candidate}/include/openssl/ntls.h")
+      set(OPENSSL_ROOT_DIR "${_uvnvr_gm_tls_candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+
 find_package(OpenSSL REQUIRED)
 
 # A static OpenSSL/Tongsuo build on MinGW needs the Winsock and Win32 helpers
@@ -648,12 +673,12 @@ if(UVNVR_ENABLE_GM_TLS)
            _uvnvr_gm_tls_config_header)
     endif()
     if(NOT _uvnvr_gm_tls_version_header MATCHES "TONGSUO_VERSION_MAJOR")
-      message(STATUS
-        "gm_tls: ${UVNVR_GM_TLS_INCLUDE_DIR} is not a Tongsuo installation; UVNVR_ENABLE_GM_TLS is forced OFF")
+      message(FATAL_ERROR
+        "gm_tls: ${UVNVR_GM_TLS_INCLUDE_DIR} is not a Tongsuo installation; set UVNVR_GM_TLS_ROOT to a Tongsuo install prefix or turn UVNVR_ENABLE_GM_TLS off")
     elseif(_uvnvr_gm_tls_conf_header MATCHES "OPENSSL_NO_NTLS" OR
            _uvnvr_gm_tls_config_header MATCHES "define OPENSSL_NO_NTLS")
-      message(STATUS
-        "gm_tls: Tongsuo was built without NTLS; UVNVR_ENABLE_GM_TLS is forced OFF")
+      message(FATAL_ERROR
+        "gm_tls: Tongsuo was built without NTLS; rebuild it with --enable-ntls or turn UVNVR_ENABLE_GM_TLS off")
     else()
       find_package(Threads REQUIRED)
       set(UVNVR_GM_TLS_ENABLED 1)
@@ -683,11 +708,19 @@ if(UVNVR_ENABLE_GM_TLS)
         "gm_tls: enabled (Tongsuo ${UVNVR_GM_TLS_SSL_LIBRARY}, headers ${UVNVR_GM_TLS_INCLUDE_DIR})")
     endif()
   else()
-    message(STATUS
-      "gm_tls: Tongsuo not found; set UVNVR_GM_TLS_ROOT to its install prefix. UVNVR_ENABLE_GM_TLS is forced OFF")
+    message(FATAL_ERROR
+      "gm_tls: Tongsuo not found; set UVNVR_GM_TLS_ROOT to its install prefix or turn UVNVR_ENABLE_GM_TLS off")
   endif()
 else()
   message(STATUS "gm_tls: disabled by UVNVR_ENABLE_GM_TLS=OFF")
+endif()
+
+# The GB/T 28181 SIP user agent gains its third transport only when both
+# modules are built. uvnvr_gm_tls stays out of the normal link otherwise.
+if(UVNVR_GM_TLS_ENABLED AND TARGET uvnvr_gb28181)
+  target_link_libraries(uvnvr_gb28181 PUBLIC uvnvr_gm_tls)
+  target_compile_definitions(uvnvr_gb28181 PUBLIC UVNVR_GM_TLS_ENABLED=1)
+  message(STATUS "gb28181: tls-gm SIP transport enabled (GM/T 0024 via Tongsuo)")
 endif()
 
 # Object-level channel ACL. The static library holds the pure decision logic so
