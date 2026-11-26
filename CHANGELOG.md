@@ -4,6 +4,32 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] - 2026-11-26
+
+### Added
+
+- **GB/T 28181 device stack (opt-in, `UVNVR_ENABLE_GB28181`).** Self-hosted SIP
+  UA (REGISTER/Digest/keepalive/backoff), MANSCDP catalog and device status,
+  PS/RTP media with INVITE/BYE dialogs, RecordInfo playback with speed/pause/seek,
+  PTZ control and alarm reporting.
+- **GB 35114 video security (opt-in, `UVNVR_ENABLE_GB35114`).** A-level SM3/SM2
+  frame signatures, VKEK negotiation, B-level SM4 stream encryption and a
+  reference interop run against a 35114 platform.
+- **Security hardening (`UVNVR_ENABLE_SECURE`, `CHANNEL_ACL`, `CONFIG_INTEGRITY`).**
+  SM3 audit hash chain, signed firmware packages, SM4 data-at-rest encryption,
+  channel/group level object authorization and configuration integrity checks.
+- **Session revocation.** Changing a password or role, or disabling an account,
+  now drops that user's sessions and API tokens immediately.
+- **AI.** HyperLPR3 plate engine, InspireFace face engine, snapshot quotas with
+  face deduplication, alert rules, an events page and SDK AI subscriptions.
+- **GA/T 2155.2 gap matrix** and 35 executable self-test cases in `docs/`.
+
+### Fixed
+
+- Snapshot writes are bounded by daily count, directory size and free space, so
+  a static face can no longer fill the disk.
+- Windows builds keep X509 name handling const-correct for OpenSSL 3 on MinGW.
+
 ## [Unreleased]
 
 ### Added
