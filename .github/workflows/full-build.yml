@@ -251,7 +251,7 @@ jobs:
 
       - name: Package
         run: |
-          OUT=/tmp/uvnvr-full-win
+          OUT="$RUNNER_TEMP/uvnvr-full-win"
           mkdir -p "$OUT"/{bin,models/hyperlpr3,models/face,share/uvnvr/frontend}
           cp build/uvnvr.exe build/hlpr_cli.exe "$OUT/bin/"
           for dll in $(ldd build/uvnvr.exe | awk '/=> \/mingw64/ {print $3}'); do
