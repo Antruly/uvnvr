@@ -4,6 +4,30 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.20.1] - 2026-11-27
+
+### Added
+
+- **Real plate recognition.** The HyperLPR3 engine (MNN backend, Apache-2.0) is
+  back behind `UVNVR_ENABLE_HYPERLPR`; the stub stays the default when the
+  engine is not compiled in.
+- **GM/T 0024 signalling.** `gb28181.transport=tls-gm` runs SIP over NTLS with
+  the double-certificate model, `gb28181.tls.*` carries the credentials, and a
+  profile that cannot validate refuses to start instead of falling back to
+  plaintext.
+- **Full-build pipeline.** `full-build.yml` produces Linux and Windows packages
+  with AI, GB/T 28181, GB 35114 and the hardening modules all compiled in.
+
+### Fixed
+
+- The AI probe endpoint never passed the face model path to the engine, so it
+  always reported the stub even with InspireFace configured.
+- The GB/T 28181 module links libuv itself instead of relying on the
+  executable's link order.
+- The vendored plate helper computes the four-point homography itself, because
+  OpenCV 5 no longer exports `getPerspectiveTransform`.
+- A static Tongsuo build needs the Winsock helpers after `libcrypto` on MinGW.
+
 ## [0.20.0] - 2026-11-26
 
 ### Added
