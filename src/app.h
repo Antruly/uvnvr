@@ -183,6 +183,8 @@ private:
   bool CreateStatusTicket(int64_t user_id, std::string* token, int64_t* expires_at,
                           std::string* error);
   void BroadcastEvent(const json& event);
+  // Forwards a REST-shaped AI event to private-protocol subscribers.
+  void ForwardAiEvent(const json& event);
   void BroadcastStatus(const json& message);
   void StatusRun();
   void StartStatusPush();

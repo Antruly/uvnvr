@@ -611,6 +611,12 @@ void ProtoServer::OnQuicConnection(uvcpp::uvcpp_quic_connection* quic_connection
 
 void ProtoServer::OnConnectionClosed(uint64_t connection_id) {
   connections_.erase(connection_id);
+  for (auto it = ai_subscriptions_.begin(); it != ai_subscriptions_.end();) {
+    if (it->second.connection_id == connection_id)
+      it = ai_subscriptions_.erase(it);
+    else
+      ++it;
+  }
 }
 
 SessionView* ProtoServer::FindSession(uint64_t session_id) {
@@ -810,6 +816,72 @@ void ProtoServer::Reply(const ProtoConnection::Ptr& connection, const Header& re
   }
   connection->SendError(reply.opcode != 0 ? reply.opcode : request.opcode, request.session_id,
                         request.request_id, reply.status, reply.code, reply.message);
+}
+
+void ProtoServer::AddAiSubscription(const ProtoConnection::Ptr& connection,
+                                    uint32_t subscription_id, uint32_t types,
+                                    int64_t channel_id) {
+  if (!connection || subscription_id == 0 || types == 0)
+    return;
+  AiSubscription subscription;
+  subscription.connection = connection;
+  subscription.connection_id = connection->id();
+  subscription.types = types;
+  subscription.channel_id = channel_id;
+  ai_subscriptions_[(subscription.connection_id << 32) | subscription_id] =
+      std::move(subscription);
+}
+
+void ProtoServer::RemoveAiSubscription(const ProtoConnection::Ptr& connection,
+                                       uint32_t subscription_id) {
+  if (!connection || subscription_id == 0)
+    return;
+  ai_subscriptions_.erase((connection->id() << 32) | subscription_id);
+}
+
+void ProtoServer::BroadcastAiEvent(const json& event) {
+  if (ai_subscriptions_.empty() || !event.is_object())
+    return;
+  const std::string type = JsonString(event, "type");
+  uint32_t bit = 0;
+  if (type == "plate")
+    bit = 1;
+  else if (type == "face")
+    bit = 2;
+  else
+    return;
+  int64_t channel_id = 0;
+  if (const auto it = event.find("channelId");
+      it != event.end() && it->is_number_integer()) {
+    try {
+      channel_id = it->get<int64_t>();
+    } catch (...) {
+      channel_id = 0;
+    }
+  }
+
+  // Snapshot the targets before sending: a failed send can close the
+  // connection synchronously, and OnConnectionClosed then erases entries from
+  // ai_subscriptions_ while it is being iterated.
+  std::vector<std::pair<ProtoConnection::Ptr, uint32_t>> targets;
+  targets.reserve(ai_subscriptions_.size());
+  for (const auto& [key, subscription] : ai_subscriptions_) {
+    if ((subscription.types & bit) == 0)
+      continue;
+    if (subscription.channel_id > 0 && subscription.channel_id != channel_id)
+      continue;
+    auto connection = subscription.connection.lock();
+    if (!connection || !connection->alive())
+      continue;
+    targets.emplace_back(std::move(connection), static_cast<uint32_t>(key & 0xffffffffu));
+  }
+
+  for (const auto& [connection, subscription_id] : targets) {
+    json payload = event;
+    // Demultiplex the push without changing the event's REST/WS field names.
+    payload["subscriptionId"] = subscription_id;
+    connection->SendJson(kOpAiEvent, 0, 0, 0, payload);
+  }
 }
 
 } // namespace uvnvr::proto

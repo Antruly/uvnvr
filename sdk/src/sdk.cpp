@@ -374,6 +374,64 @@ int UVNVR_CALL uvnvr_live_close(uvnvr_sdk_t* sdk, int handle) {
   return rc;
 }
 
+int UVNVR_CALL uvnvr_ai_subscribe(uvnvr_sdk_t* sdk, int channel_id,
+                                  unsigned int types, uvnvr_ai_event_cb cb,
+                                  void* user) {
+  if (sdk == nullptr || cb == nullptr) {
+    SetLastError(UVNVR_ERR_INVALID_ARGUMENT, "callback is required");
+    return -UVNVR_ERR_INVALID_ARGUMENT;
+  }
+  auto internal = [sdk, cb, user](int handle, const uvnvr::sdk::AiEvent& source) {
+    uvnvr_ai_event_t event;
+    std::memset(&event, 0, sizeof(event));
+    event.struct_size = sizeof(uvnvr_ai_event_t);
+    event.id = source.id;
+    event.type = source.type;
+    event.channel_id = source.channel_id;
+    event.ts = source.ts;
+    event.alert = source.alert ? 1 : 0;
+    event.confidence = source.confidence;
+    event.quality = source.quality;
+    event.channel_name = source.channel_name.c_str();
+    event.plate = source.plate.c_str();
+    event.plate_norm = source.plate_norm.c_str();
+    event.color = source.color.c_str();
+    event.box.x = source.x;
+    event.box.y = source.y;
+    event.box.w = source.w;
+    event.box.h = source.h;
+    event.engine = source.engine.c_str();
+    event.matched_face_id = source.matched_face_id;
+    event.matched_score = source.matched_score;
+    event.matched_name = source.matched_name.c_str();
+    event.image_url = source.image_url.c_str();
+    event.crop_url = source.crop_url.c_str();
+    cb(sdk, handle, &event, user);
+  };
+  std::string error;
+  const int handle = sdk->impl->AiSubscribe(channel_id, static_cast<uint32_t>(types),
+                                            std::move(internal), &error);
+  if (handle < 0) {
+    SetLastError(-handle, error);
+    return handle;
+  }
+  ClearLastError();
+  return handle;
+}
+
+int UVNVR_CALL uvnvr_ai_unsubscribe(uvnvr_sdk_t* sdk, int handle) {
+  if (sdk == nullptr) {
+    SetLastError(UVNVR_ERR_INVALID_ARGUMENT, "sdk is required");
+    return UVNVR_ERR_INVALID_ARGUMENT;
+  }
+  const int rc = sdk->impl->AiUnsubscribe(handle);
+  if (rc != UVNVR_OK)
+    SetLastError(rc, "invalid AI subscription handle");
+  else
+    ClearLastError();
+  return rc;
+}
+
 int UVNVR_CALL uvnvr_download_recording(uvnvr_sdk_t* sdk, int64_t recording_id,
                                         const char* path,
                                         uvnvr_progress_cb progress, void* user) {

@@ -26,6 +26,12 @@ add_executable(ai_rules_test
 )
 target_include_directories(ai_rules_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME ai_rules COMMAND ai_rules_test)
+add_executable(ai_event_json_test
+  ai_event_json_test.cpp
+  "${CMAKE_SOURCE_DIR}/src/proto/proto_protocol.cpp"
+)
+target_include_directories(ai_event_json_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME ai_event_json COMMAND ai_event_json_test)
 
 add_executable(ai_snapshot_quota_test
   ai_snapshot_quota_test.cpp

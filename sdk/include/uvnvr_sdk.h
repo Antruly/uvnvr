@@ -90,6 +90,15 @@ typedef enum uvnvr_stream {
 } uvnvr_stream_t;
 
 /**
+ * AI event kinds. The values are a bitmask: pass one or both to
+ * uvnvr_ai_subscribe.
+ */
+typedef enum uvnvr_ai_event_type {
+  UVNVR_AI_EVENT_PLATE = 1,
+  UVNVR_AI_EVENT_FACE = 2
+} uvnvr_ai_event_type_t;
+
+/**
  * SDK options. Always initialise with uvnvr_options_init before changing
  * fields; `struct_size` lets future versions append fields without breaking
  * existing callers. A zero value in a timeout field means "use the default".
@@ -155,6 +164,61 @@ typedef struct uvnvr_frame {
 /** Live frame callback. Runs on the SDK's internal loop thread. */
 typedef void(UVNVR_CALL* uvnvr_frame_cb)(uvnvr_sdk_t* sdk, int handle,
                                          const uvnvr_frame_t* frame, void* user);
+
+/** Detection box in source-frame pixels, matching the REST/WS `box` object. */
+typedef struct uvnvr_ai_box {
+  int32_t x;
+  int32_t y;
+  int32_t w;
+  int32_t h;
+} uvnvr_ai_box_t;
+
+/**
+ * One AI recognition event delivered to uvnvr_ai_event_cb.
+ *
+ * Field names and meaning mirror the REST event item
+ * (`GET /api/v1/ai/events`) and the /ws/events realtime message:
+ *   - `id`           event id, usable with the REST snapshot endpoint;
+ *   - `type`         UVNVR_AI_EVENT_PLATE or UVNVR_AI_EVENT_FACE;
+ *   - `channel_id`   REST `channelId`;
+ *   - `ts`           epoch seconds;
+ *   - `confidence`   detection confidence;
+ *   - `quality`      face quality (0 for plate events);
+ *   - `plate`/`plate_norm`/`color`  plate events only, empty otherwise;
+ *   - `matched_face_id`, `matched_score`, `matched_name`  face library hit;
+ *                    `matched_face_id == 0` means no match;
+ *   - `image_url`/`crop_url` relative snapshot URLs, empty if not saved;
+ *   - `alert`        watchlist hit flag (WS `alert`).
+ *
+ * The pointers are owned by the SDK and are valid only for the duration of
+ * the callback. Copy anything you need to keep.
+ */
+typedef struct uvnvr_ai_event {
+  uint32_t struct_size;
+  int64_t id;
+  int32_t type; /**< uvnvr_ai_event_type_t */
+  int64_t channel_id;
+  int64_t ts;
+  int32_t alert;
+  double confidence;
+  double quality;
+  const char* channel_name;
+  const char* plate;
+  const char* plate_norm;
+  const char* color;
+  uvnvr_ai_box_t box;
+  const char* engine;
+  int64_t matched_face_id;
+  double matched_score;
+  const char* matched_name;
+  const char* image_url;
+  const char* crop_url;
+} uvnvr_ai_event_t;
+
+/** AI event callback. Runs on the SDK's internal loop thread. */
+typedef void(UVNVR_CALL* uvnvr_ai_event_cb)(uvnvr_sdk_t* sdk, int handle,
+                                            const uvnvr_ai_event_t* event,
+                                            void* user);
 
 /** Download progress callback. Runs on the SDK's internal loop thread. */
 typedef void(UVNVR_CALL* uvnvr_progress_cb)(uvnvr_sdk_t* sdk, int64_t received,
@@ -229,6 +293,23 @@ UVNVR_API int UVNVR_CALL uvnvr_live_open(uvnvr_sdk_t* sdk, int channel_id,
 
 /** Closes a live subscription. Returns UVNVR_OK or UVNVR_ERR_INVALID_ARGUMENT. */
 UVNVR_API int UVNVR_CALL uvnvr_live_close(uvnvr_sdk_t* sdk, int handle);
+
+/**
+ * Subscribes to AI recognition events. Returns a handle >= 0, or a negative
+ * uvnvr_error_t. `types` is a bitmask of uvnvr_ai_event_type_t; `channel_id`
+ * <= 0 receives every channel. Events are pushed as the recorder recognises
+ * them (the same events /ws/events broadcasts) and delivered on the loop
+ * thread. A subscription does not survive a reconnect; subscribe again.
+ *
+ * Requires the `alert.view` permission. Returns UVNVR_ERR_UNAVAILABLE when
+ * AI support is not compiled into the recorder or not running.
+ */
+UVNVR_API int UVNVR_CALL uvnvr_ai_subscribe(uvnvr_sdk_t* sdk, int channel_id,
+                                            unsigned int types,
+                                            uvnvr_ai_event_cb cb, void* user);
+
+/** Cancels an AI subscription. Returns UVNVR_OK or UVNVR_ERR_INVALID_ARGUMENT. */
+UVNVR_API int UVNVR_CALL uvnvr_ai_unsubscribe(uvnvr_sdk_t* sdk, int handle);
 
 /**
  * Downloads one finalized recording to `path`, synchronously. `progress` may

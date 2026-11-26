@@ -199,6 +199,16 @@ public:
   void Reply(const ProtoConnection::Ptr& connection, const Header& request,
              const ProtoReply& reply);
 
+  // AI event subscriptions. `types` is a bitmask: 1 = plate, 2 = face.
+  // `channel_id <= 0` means every channel. These run on the loop thread; the
+  // subscription is dropped automatically when the connection closes.
+  void AddAiSubscription(const ProtoConnection::Ptr& connection, uint32_t subscription_id,
+                         uint32_t types, int64_t channel_id);
+  void RemoveAiSubscription(const ProtoConnection::Ptr& connection, uint32_t subscription_id);
+  // Pushes `event` (same field names as the REST AI event item) to every
+  // matching subscriber. Must run on the loop thread.
+  void BroadcastAiEvent(const json& event);
+
 private:
   void OnTcpClient(uvcpp::uvcpp_tcp_client* client);
   void OnQuicConnection(uvcpp::uvcpp_quic_connection* connection);
@@ -225,6 +235,15 @@ private:
   std::unique_ptr<Impl> impl_;
   std::unordered_map<uint64_t, ProtoConnection::Ptr> connections_;
   uint64_t next_connection_id_ = 1;
+
+  struct AiSubscription {
+    std::weak_ptr<ProtoConnection> connection;
+    uint64_t connection_id = 0;
+    uint32_t types = 0; // 1 = plate, 2 = face
+    int64_t channel_id = 0;
+  };
+  // Key is (connection_id << 32) | subscription_id.
+  std::unordered_map<uint64_t, AiSubscription> ai_subscriptions_;
 
   struct Session {
     SessionView view;

@@ -33,6 +33,11 @@ public:
     // Insert an alert row. `source_type` ("plate" or "face") and `source_id`
     // identify the ai_*_events row that produced it; pass empty/0 when there is
     // no AI event behind the alert. The alert is also pushed on /ws/events.
+    // Delivers the same recognition as a REST-shaped event item. The private
+    // protocol forwards it to subscribed SDK clients. Kept separate from
+    // `broadcast` because the WebSocket message uses its own field names.
+    std::function<void(const nlohmann::json&)> event_sink;
+    // Insert a snapshot path; may be empty.
     std::function<void(int64_t, const std::string&, const std::string&, const std::string&,
                        const std::string&, const std::string&, int64_t)>
         raise_alert;

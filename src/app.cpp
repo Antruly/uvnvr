@@ -2666,6 +2666,7 @@ int App::Run() {
     options.media = media_.get();
     options.data_dir = config_.data_dir;
     options.broadcast = [this](const json& event) { BroadcastEvent(event); };
+    options.event_sink = [this](const json& event) { ForwardAiEvent(event); };
     options.raise_alert =
         [this](int64_t channel_id, const std::string& type, const std::string& level,
                const std::string& message, const std::string& snapshot_path,
@@ -5747,6 +5748,15 @@ bool App::CreateEventsTicket(int64_t user_id, std::string* token, int64_t* expir
   ticket.events = true;
   tickets_[*token] = ticket;
   return true;
+}
+
+void App::ForwardAiEvent(const json& event) {
+  // AI workers call this off the loop thread. The private-protocol sender
+  // touches libuv handles, so marshal first and re-check proto_ on the loop.
+  web_.post([this, event] {
+    if (proto_ != nullptr)
+      proto_->BroadcastAiEvent(event);
+  });
 }
 
 void App::BroadcastEvent(const json& event) {
@@ -12816,6 +12826,80 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
           state->size = info->size;
           ProtoPumpDownload(std::move(state));
         });
+    return;
+  }
+
+  case proto::kOpAiSubscribe: {
+    if (!HasPermission(user, "alert.view")) {
+      complete(ProtoFailure(403, "forbidden", "alert.view permission is required"));
+      return;
+    }
+#if UVNVR_ENABLE_AI
+    if (ai_ == nullptr) {
+      complete(ProtoFailure(503, "ai_unavailable", "AI recognition is not running"));
+      return;
+    }
+#else
+    complete(ProtoFailure(503, "ai_unavailable", "AI support is not compiled in"));
+    return;
+#endif
+    const int64_t requested_id = JsonInt(fields, "subscriptionId", 0);
+    if (requested_id <= 0 || requested_id > 0xffffffffll) {
+      complete(ProtoFailure(400, "invalid_subscription",
+                            "subscriptionId must be between 1 and 4294967295"));
+      return;
+    }
+    const auto types_it = fields.find("types");
+    if (types_it == fields.end() || !types_it->is_array() || types_it->empty()) {
+      complete(ProtoFailure(400, "invalid_subscription",
+                            "types must be a non-empty array of \"plate\" and/or \"face\""));
+      return;
+    }
+    uint32_t types = 0;
+    for (const auto& value : *types_it) {
+      if (!value.is_string()) {
+        complete(ProtoFailure(400, "invalid_subscription", "types entries must be strings"));
+        return;
+      }
+      const std::string name = value.get<std::string>();
+      if (name == "plate")
+        types |= 1u;
+      else if (name == "face")
+        types |= 2u;
+      else {
+        complete(ProtoFailure(400, "invalid_subscription",
+                              "unknown AI event type: " + name));
+        return;
+      }
+    }
+    const int64_t channel_id = JsonInt(fields, "channelId", 0);
+    const uint32_t subscription_id = static_cast<uint32_t>(requested_id);
+    proto_->AddAiSubscription(request->connection, subscription_id, types, channel_id);
+    proto::ProtoReply reply;
+    reply.opcode = proto::kOpAiSubscribeAck;
+    reply.data = json{{"subscriptionId", subscription_id},
+                      {"channelId", channel_id},
+                      {"types", *types_it}};
+    complete(reply);
+    return;
+  }
+
+  case proto::kOpAiUnsubscribe: {
+    if (!HasPermission(user, "alert.view")) {
+      complete(ProtoFailure(403, "forbidden", "alert.view permission is required"));
+      return;
+    }
+    const int64_t requested_id = JsonInt(fields, "subscriptionId", 0);
+    if (requested_id <= 0 || requested_id > 0xffffffffll) {
+      complete(ProtoFailure(400, "invalid_subscription",
+                            "subscriptionId must be between 1 and 4294967295"));
+      return;
+    }
+    const uint32_t subscription_id = static_cast<uint32_t>(requested_id);
+    proto_->RemoveAiSubscription(request->connection, subscription_id);
+    proto::ProtoReply reply;
+    reply.data = json{{"subscriptionId", subscription_id}, {"ok", true}};
+    complete(reply);
     return;
   }
 
