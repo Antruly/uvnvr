@@ -1044,6 +1044,25 @@ bool App::Migrate(std::string* error) {
       "ON channel_groups(parent_id, sort)",
       "CREATE INDEX IF NOT EXISTS idx_channel_group_members_group "
       "ON channel_group_members(group_id)",
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+      // Object-level grants (GA/T 2155.2 ACC-02). A user may be granted
+      // individual channels and/or whole groups; a group grant covers the
+      // group's descendants as well.
+      "CREATE TABLE IF NOT EXISTS acl_user_channels ("
+      "user_id INTEGER NOT NULL,"
+      "channel_id INTEGER NOT NULL,"
+      "created_at INTEGER NOT NULL,"
+      "PRIMARY KEY(user_id, channel_id))",
+      "CREATE TABLE IF NOT EXISTS acl_user_groups ("
+      "user_id INTEGER NOT NULL,"
+      "group_id INTEGER NOT NULL,"
+      "created_at INTEGER NOT NULL,"
+      "PRIMARY KEY(user_id, group_id))",
+      "CREATE INDEX IF NOT EXISTS idx_acl_user_channels_channel "
+      "ON acl_user_channels(channel_id)",
+      "CREATE INDEX IF NOT EXISTS idx_acl_user_groups_group "
+      "ON acl_user_groups(group_id)",
+#endif
       "CREATE TABLE IF NOT EXISTS layouts ("
       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
       "user_id INTEGER NOT NULL,"
@@ -2591,6 +2610,11 @@ int App::Run() {
           media_->RemoveRawSubscriber(channel, stream, id);
       },
       config_.rtsp_port);
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  rtsp_->SetChannelAuthorizer([this](const std::string& user, int64_t channel) {
+    return RtspChannelAllowed(user, channel);
+  });
+#endif
   std::string rtsp_error;
   if (!rtsp_->Start(&rtsp_error)) {
     std::fprintf(stderr, "RTSP server unavailable: %s\n", rtsp_error.c_str());
@@ -3864,6 +3888,9 @@ std::vector<std::string> SplitSettingList(const std::string& value) {
 void App::RegisterProtectedRoutes() {
   RegisterCoreRoutes();
   RegisterChannelRoutes();
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  RegisterChannelAclRoutes();
+#endif
   RegisterGroupRoutes();
   RegisterLayoutRoutes();
   RegisterOnvifRoutes();
@@ -5263,6 +5290,160 @@ std::vector<ChannelRow> App::LoadChannels(std::string* error) {
   return result;
 }
 
+std::vector<ChannelRow> App::LoadAccessibleChannels(const UserContext& user, bool* ok,
+                                                    std::string* error) {
+  std::vector<ChannelRow> channels = LoadChannels(error);
+  if (ok != nullptr)
+    *ok = true;
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  acl::Grants grants;
+  if (!LoadChannelGrants(user, &grants, error)) {
+    if (ok != nullptr)
+      *ok = false;
+    return {};
+  }
+  std::erase_if(channels, [&grants](const ChannelRow& channel) {
+    return !grants.Allows(channel.id, channel.group_id);
+  });
+#else
+  (void)user;
+#endif
+  return channels;
+}
+
+App::ChannelAccess App::CheckChannelAccess(const UserContext& user, int64_t channel_id,
+                                           ChannelRow* channel) {
+  ChannelRow loaded;
+  std::string error;
+  const bool exists = LoadChannel(channel_id, &loaded, &error);
+  if (channel != nullptr)
+    *channel = loaded;
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  acl::Grants grants;
+  if (!LoadChannelGrants(user, &grants, &error))
+    return ChannelAccess::error;
+  if (grants.unrestricted)
+    return exists ? ChannelAccess::allowed : ChannelAccess::missing;
+  if (!exists) {
+    // A direct grant can outlive the channel row (recordings and alerts keep
+    // referring to deleted channels); anything else is denied.
+    return grants.Allows(channel_id, 0) ? ChannelAccess::allowed : ChannelAccess::denied;
+  }
+  if (!grants.Allows(loaded.id, loaded.group_id))
+    return ChannelAccess::denied;
+#else
+  (void)user;
+#endif
+  return exists ? ChannelAccess::allowed : ChannelAccess::missing;
+}
+
+void App::AuditAclDenied(const UserContext& user, const std::string& ip,
+                         const std::string& ua, int64_t channel_id,
+                         const std::string& action) {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  Audit("permission", "warning", user.username, ip, ua, "channel",
+        std::to_string(channel_id), action, "denied", "forbidden",
+        "channel is not granted to this account");
+#else
+  (void)user;
+  (void)ip;
+  (void)ua;
+  (void)channel_id;
+  (void)action;
+#endif
+}
+
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+bool App::LoadChannelGrants(const UserContext& user, acl::Grants* grants, std::string* error) {
+  if (grants == nullptr)
+    return false;
+  *grants = acl::Grants{};
+  if (acl::IsAdministrator(user.role_name, user.permissions)) {
+    grants->unrestricted = true;
+    return true;
+  }
+  if (user.id <= 0) {
+    // Deny by default; an account that cannot be identified has no objects.
+    return true;
+  }
+
+  {
+    uvcpp::uvcpp_db_table table;
+    uvcpp::uvcpp_db_params params;
+    params.add(user.id);
+    if (!Query("SELECT channel_id FROM acl_user_channels WHERE user_id = ?", params, &table,
+               error)) {
+      return false;
+    }
+    for (size_t row = 0; row < table.rows().size(); ++row) {
+      const int64_t channel_id = TableInt(table, row, "channel_id");
+      if (channel_id > 0)
+        grants->channels.insert(channel_id);
+    }
+  }
+
+  std::set<int64_t> granted_groups;
+  {
+    uvcpp::uvcpp_db_table table;
+    uvcpp::uvcpp_db_params params;
+    params.add(user.id);
+    if (!Query("SELECT group_id FROM acl_user_groups WHERE user_id = ?", params, &table, error))
+      return false;
+    for (size_t row = 0; row < table.rows().size(); ++row) {
+      const int64_t group_id = TableInt(table, row, "group_id");
+      if (group_id > 0)
+        granted_groups.insert(group_id);
+    }
+  }
+
+  std::vector<std::pair<int64_t, int64_t>> edges;
+  {
+    uvcpp::uvcpp_db_table table;
+    if (!Query("SELECT id, parent_id FROM channel_groups", {}, &table, error))
+      return false;
+    edges.reserve(table.rows().size());
+    for (size_t row = 0; row < table.rows().size(); ++row) {
+      edges.emplace_back(TableInt(table, row, "id"), TableInt(table, row, "parent_id"));
+    }
+  }
+  grants->groups = acl::ExpandGroupGrants(granted_groups, edges);
+  return true;
+}
+
+bool App::ChannelIdAllowed(const UserContext& user, int64_t channel_id, std::string* error) {
+  acl::Grants grants;
+  if (!LoadChannelGrants(user, &grants, error))
+    return false;
+  if (grants.unrestricted)
+    return true;
+  ChannelRow channel;
+  std::string load_error;
+  const int64_t group_id =
+      LoadChannel(channel_id, &channel, &load_error) ? channel.group_id : 0;
+  return grants.Allows(channel_id, group_id);
+}
+
+bool App::RtspChannelAllowed(const std::string& username, int64_t channel_id) {
+  uvcpp::uvcpp_db_table table;
+  uvcpp::uvcpp_db_params params;
+  params.add(username);
+  std::string error;
+  if (!Query("SELECT u.id, u.enabled, r.name AS role_name, r.permissions AS permissions "
+             "FROM users u JOIN roles r ON r.id = u.role_id "
+             "WHERE u.username = ? COLLATE NOCASE",
+             params, &table, &error) ||
+      table.empty() || TableInt(table, 0, "enabled") == 0) {
+    return false;
+  }
+  UserContext user;
+  user.id = TableInt(table, 0, "id");
+  user.username = TableText(table, 0, "username");
+  user.role_name = TableText(table, 0, "role_name");
+  user.permissions = ParsePermissions(TableText(table, 0, "permissions"));
+  return CheckChannelAccess(user, channel_id, nullptr) == ChannelAccess::allowed;
+}
+#endif
+
 json App::ChannelJson(const ChannelRow& channel) const {
   json media = json::parse(channel.media_json, nullptr, false);
   if (media.is_discarded() || !media.is_object())
@@ -5882,13 +6063,20 @@ bool App::ValidateStreamTicket(const std::string& token, StreamTicket* ticket) {
 void App::RegisterChannelRoutes() {
   web_.get("/api/v1/channels",
            Protected(
-               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
                       uvcpp::uvcpp_web_next next) {
+                 const UserContext user = UserFromRequest(req);
                  auto items = std::make_shared<json>(json::array());
+                 auto failure = std::make_shared<std::string>();
                  RunWork(
-                     [this, items] {
+                     [this, user, items, failure] {
                        std::string error;
-                       const auto channels = LoadChannels(&error);
+                       bool ok = false;
+                       const auto channels = LoadAccessibleChannels(user, &ok, &error);
+                       if (!ok) {
+                         *failure = error;
+                         return;
+                       }
                        for (const auto& channel : channels) {
                          json item = ChannelJson(channel);
                          StreamStatus main_status;
@@ -5906,8 +6094,12 @@ void App::RegisterChannelRoutes() {
                          items->push_back(std::move(item));
                        }
                      },
-                     [items, &resp, next] {
-                       SendJson(resp, 200, *items);
+                     [items, failure, &resp, next] {
+                       if (!failure->empty()) {
+                         SendError(resp, 500, "acl_error", *failure);
+                       } else {
+                         SendJson(resp, 200, *items);
+                       }
                        next();
                      });
                },
@@ -5943,13 +6135,20 @@ void App::RegisterChannelRoutes() {
 
   web_.get("/api/v1/preview/channels",
            Protected(
-               [this](uvcpp::uvcpp_web_request&, uvcpp::uvcpp_web_response& resp,
+               [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
                       uvcpp::uvcpp_web_next next) {
+                 const UserContext user = UserFromRequest(req);
                  auto items = std::make_shared<json>(json::array());
+                 auto failure = std::make_shared<std::string>();
                  RunWork(
-                     [this, items] {
+                     [this, user, items, failure] {
                        std::string error;
-                       const auto channels = LoadChannels(&error);
+                       bool ok = false;
+                       const auto channels = LoadAccessibleChannels(user, &ok, &error);
+                       if (!ok) {
+                         *failure = error;
+                         return;
+                       }
                        for (const auto& channel : channels) {
                          json item = ChannelJson(channel);
                          // Preview clients only need display metadata; URLs,
@@ -5974,8 +6173,12 @@ void App::RegisterChannelRoutes() {
                          items->push_back(std::move(item));
                        }
                      },
-                     [items, &resp, next] {
-                       SendJson(resp, 200, *items);
+                     [items, failure, &resp, next] {
+                       if (!failure->empty()) {
+                         SendError(resp, 500, "acl_error", *failure);
+                       } else {
+                         SendJson(resp, 200, *items);
+                       }
                        next();
                      });
                },
@@ -6304,7 +6507,23 @@ void App::RegisterChannelRoutes() {
                 [this, channel_id, body, has_password, password, actor, ip, ua, op] {
                   ChannelRow existing;
                   std::string error;
-                  if (!LoadChannel(channel_id, &existing, &error)) {
+                  const ChannelAccess access = CheckChannelAccess(actor, channel_id, &existing);
+                  if (access == ChannelAccess::denied) {
+                    AuditAclDenied(actor, ip, ua, channel_id, "update");
+                    op->ok = false;
+                    op->status = 403;
+                    op->code = "forbidden";
+                    op->message = "this channel is not granted to the account";
+                    return;
+                  }
+                  if (access == ChannelAccess::error) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "acl_error";
+                    op->message = "the channel authorization check failed";
+                    return;
+                  }
+                  if (access == ChannelAccess::missing) {
                     op->ok = false;
                     op->status = 404;
                     op->code = "not_found";
@@ -6465,7 +6684,23 @@ void App::RegisterChannelRoutes() {
                      [this, channel_id, actor, ip, ua, op] {
                        ChannelRow channel;
                        std::string error;
-                       if (!LoadChannel(channel_id, &channel, &error)) {
+                       const ChannelAccess access = CheckChannelAccess(actor, channel_id, &channel);
+                       if (access == ChannelAccess::denied) {
+                         AuditAclDenied(actor, ip, ua, channel_id, "delete");
+                         op->ok = false;
+                         op->status = 403;
+                         op->code = "forbidden";
+                         op->message = "this channel is not granted to the account";
+                         return;
+                       }
+                       if (access == ChannelAccess::error) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "acl_error";
+                         op->message = "the channel authorization check failed";
+                         return;
+                       }
+                       if (access == ChannelAccess::missing) {
                          op->ok = false;
                          op->status = 404;
                          op->code = "not_found";
@@ -6478,6 +6713,10 @@ void App::RegisterChannelRoutes() {
                             &error);
                        Exec("DELETE FROM channel_group_members WHERE channel_id = ?", params,
                             nullptr, &error);
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                       Exec("DELETE FROM acl_user_channels WHERE channel_id = ?", params,
+                            nullptr, &error);
+#endif
                        if (!Exec("DELETE FROM channels WHERE id = ?", params, nullptr, &error)) {
                          op->ok = false;
                          op->status = 500;
@@ -6514,12 +6753,32 @@ void App::RegisterChannelRoutes() {
                    next();
                    return;
                  }
+                 const UserContext actor = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto op = std::make_shared<OpResult>();
                  RunWork(
-                     [this, channel_id, op] {
+                     [this, actor, channel_id, ip, ua, op] {
                        ChannelRow channel;
                        std::string error;
-                       if (!LoadChannel(channel_id, &channel, &error)) {
+                       const ChannelAccess access =
+                           CheckChannelAccess(actor, channel_id, &channel);
+                       if (access == ChannelAccess::denied) {
+                         AuditAclDenied(actor, ip, ua, channel_id, "encoder");
+                         op->ok = false;
+                         op->status = 403;
+                         op->code = "forbidden";
+                         op->message = "this channel is not granted to the account";
+                         return;
+                       }
+                       if (access == ChannelAccess::error) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "acl_error";
+                         op->message = "the channel authorization check failed";
+                         return;
+                       }
+                       if (access == ChannelAccess::missing) {
                          op->ok = false;
                          op->status = 404;
                          op->code = "not_found";
@@ -6644,7 +6903,24 @@ void App::RegisterChannelRoutes() {
                      [this, channel_id, config, brand_config, actor, ip, ua, op] {
                        ChannelRow channel;
                        std::string error;
-                       if (!LoadChannel(channel_id, &channel, &error)) {
+                       const ChannelAccess access =
+                           CheckChannelAccess(actor, channel_id, &channel);
+                       if (access == ChannelAccess::denied) {
+                         AuditAclDenied(actor, ip, ua, channel_id, "encoder");
+                         op->ok = false;
+                         op->status = 403;
+                         op->code = "forbidden";
+                         op->message = "this channel is not granted to the account";
+                         return;
+                       }
+                       if (access == ChannelAccess::error) {
+                         op->ok = false;
+                         op->status = 500;
+                         op->code = "acl_error";
+                         op->message = "the channel authorization check failed";
+                         return;
+                       }
+                       if (access == ChannelAccess::missing) {
                          op->ok = false;
                          op->status = 404;
                          op->code = "not_found";
@@ -6745,18 +7021,37 @@ void App::RegisterChannelRoutes() {
                    next();
                    return;
                  }
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto payload = std::make_shared<std::string>();
                  auto status = std::make_shared<int>(200);
                  auto message = std::make_shared<std::string>();
+                 auto denied = std::make_shared<bool>(false);
                  RunWork(
-                     [this, channel_id, width, height, quality, payload, status, message] {
+                     [this, user, channel_id, width, height, quality, ip, ua, payload, status,
+                      message, denied] {
                        ChannelRow channel;
-                       std::string error;
-                       if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                       const ChannelAccess access =
+                           CheckChannelAccess(user, channel_id, &channel);
+                       if (access == ChannelAccess::denied) {
+                         AuditAclDenied(user, ip, ua, channel_id, "snapshot");
+                         *status = 403;
+                         *message = "this channel is not granted to the account";
+                         *denied = true;
+                         return;
+                       }
+                       if (access == ChannelAccess::error) {
+                         *status = 500;
+                         *message = "the channel authorization check failed";
+                         return;
+                       }
+                       if (access == ChannelAccess::missing || !channel.enabled) {
                          *status = 404;
                          *message = "channel not found or disabled";
                          return;
                        }
+                       std::string error;
                        // Prefer the channel's live ffmpeg output: its demux
                        // already holds the most recent keyframe, so the
                        // snapshot does not open a second RTSP session and
@@ -6789,9 +7084,10 @@ void App::RegisterChannelRoutes() {
                          }
                        }
                      },
-                     [payload, status, message, &resp, next] {
+                     [payload, status, message, denied, &resp, next] {
                        if (*status != 200) {
-                         SendError(resp, *status, "snapshot_failed", *message);
+                         SendError(resp, *status, *denied ? "forbidden" : "snapshot_failed",
+                                   *message);
                        } else {
                          resp.set_header("Content-Type", "image/jpeg");
                          resp.status(200).body(*payload, "image/jpeg");
@@ -6813,10 +7109,44 @@ void App::RegisterChannelRoutes() {
                     next();
                     return;
                   }
-                  if (media_)
-                    media_->Reconnect(channel_id);
-                  SendJson(resp, 200, json{{"ok", true}});
-                  next();
+                  const UserContext actor = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
+                  auto op = std::make_shared<OpResult>();
+                  RunWork(
+                      [this, actor, channel_id, ip, ua, op] {
+                        const ChannelAccess access =
+                            CheckChannelAccess(actor, channel_id, nullptr);
+                        if (access == ChannelAccess::denied) {
+                          AuditAclDenied(actor, ip, ua, channel_id, "reconnect");
+                          op->ok = false;
+                          op->status = 403;
+                          op->code = "forbidden";
+                          op->message = "this channel is not granted to the account";
+                          return;
+                        }
+                        if (access == ChannelAccess::error) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "acl_error";
+                          op->message = "the channel authorization check failed";
+                          return;
+                        }
+                        if (access == ChannelAccess::missing) {
+                          op->ok = false;
+                          op->status = 404;
+                          op->code = "not_found";
+                          op->message = "channel not found";
+                          return;
+                        }
+                        if (media_)
+                          media_->Reconnect(channel_id);
+                        op->data = json{{"ok", true}};
+                      },
+                      [op, &resp, next] {
+                        SendOp(resp, *op);
+                        next();
+                      });
                 },
                 "channel.manage"));
 
@@ -6897,6 +7227,256 @@ void App::RegisterChannelRoutes() {
                 },
                 "channel.manage"));
 }
+
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+void App::RegisterChannelAclRoutes() {
+  // Management API for the object-level ACL. Grants are per account and cover
+  // both individual channels and groups (a group grant includes descendants).
+  // Only user.manage may read or replace them; every change is audited.
+  web_.get(
+      "/api/v1/users/:id/channel-grants",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            int64_t user_id = 0;
+            if (!ParseIntParam(req.param("id"), &user_id) || user_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid user id");
+              next();
+              return;
+            }
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, user_id, op] {
+                  uvcpp::uvcpp_db_table user;
+                  uvcpp::uvcpp_db_params user_params;
+                  user_params.add(user_id);
+                  std::string error;
+                  if (!Query("SELECT u.username, r.name AS role_name FROM users u "
+                             "JOIN roles r ON r.id = u.role_id WHERE u.id = ?",
+                             user_params, &user, &error) ||
+                      user.empty()) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "user not found";
+                    return;
+                  }
+                  const bool admin_role = TableText(user, 0, "role_name") == "admin";
+                  json channel_ids = json::array();
+                  json group_ids = json::array();
+                  uvcpp::uvcpp_db_table channels;
+                  uvcpp::uvcpp_db_params channel_params;
+                  channel_params.add(user_id);
+                  if (!Query("SELECT channel_id FROM acl_user_channels WHERE user_id = ? "
+                             "ORDER BY channel_id",
+                             channel_params, &channels, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  for (size_t row = 0; row < channels.rows().size(); ++row)
+                    channel_ids.push_back(TableInt(channels, row, "channel_id"));
+                  uvcpp::uvcpp_db_table groups;
+                  uvcpp::uvcpp_db_params group_params;
+                  group_params.add(user_id);
+                  if (!Query("SELECT group_id FROM acl_user_groups WHERE user_id = ? "
+                             "ORDER BY group_id",
+                             group_params, &groups, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  for (size_t row = 0; row < groups.rows().size(); ++row)
+                    group_ids.push_back(TableInt(groups, row, "group_id"));
+                  op->data = json{{"userId", user_id},
+                                  {"username", TableText(user, 0, "username")},
+                                  {"role", TableText(user, 0, "role_name")},
+                                  {"unrestricted", admin_role},
+                                  {"channelIds", channel_ids},
+                                  {"groupIds", group_ids}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "user.manage"));
+
+  web_.put(
+      "/api/v1/users/:id/channel-grants",
+      Protected(
+          [this](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                 uvcpp::uvcpp_web_next next) {
+            int64_t user_id = 0;
+            if (!ParseIntParam(req.param("id"), &user_id) || user_id <= 0) {
+              SendError(resp, 400, "invalid_id", "invalid user id");
+              next();
+              return;
+            }
+            const json body = json::parse(req.body_str(), nullptr, false);
+            if (body.is_discarded() || !body.is_object()) {
+              SendError(resp, 400, "invalid_json", "request body must be a JSON object");
+              next();
+              return;
+            }
+            std::set<int64_t> channel_ids;
+            std::set<int64_t> group_ids;
+            auto parse_ids = [](const json& source, std::set<int64_t>* out) {
+              if (!source.is_array())
+                return false;
+              for (const auto& item : source) {
+                if (!item.is_number_integer())
+                  return false;
+                const int64_t id = item.get<int64_t>();
+                if (id <= 0)
+                  return false;
+                out->insert(id);
+              }
+              return true;
+            };
+            if ((body.contains("channelIds") && !parse_ids(body["channelIds"], &channel_ids)) ||
+                (body.contains("groupIds") && !parse_ids(body["groupIds"], &group_ids))) {
+              SendError(resp, 400, "invalid_grants",
+                        "channelIds and groupIds must be arrays of positive integers");
+              next();
+              return;
+            }
+            const UserContext actor = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
+            auto op = std::make_shared<OpResult>();
+            RunWork(
+                [this, user_id, channel_ids, group_ids, actor, ip, ua, op] {
+                  std::string error;
+                  uvcpp::uvcpp_db_table user;
+                  uvcpp::uvcpp_db_params user_params;
+                  user_params.add(user_id);
+                  if (!Query("SELECT username FROM users WHERE id = ?", user_params, &user,
+                             &error) ||
+                      user.empty()) {
+                    op->ok = false;
+                    op->status = 404;
+                    op->code = "not_found";
+                    op->message = "user not found";
+                    return;
+                  }
+                  for (const int64_t channel_id : channel_ids) {
+                    uvcpp::uvcpp_db_table table;
+                    uvcpp::uvcpp_db_params params;
+                    params.add(channel_id);
+                    if (!Query("SELECT id FROM channels WHERE id = ?", params, &table, &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = error;
+                      return;
+                    }
+                    if (table.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_channel";
+                      op->message = "channel " + std::to_string(channel_id) + " does not exist";
+                      return;
+                    }
+                  }
+                  for (const int64_t group_id : group_ids) {
+                    uvcpp::uvcpp_db_table table;
+                    uvcpp::uvcpp_db_params params;
+                    params.add(group_id);
+                    if (!Query("SELECT id FROM channel_groups WHERE id = ?", params, &table,
+                               &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = error;
+                      return;
+                    }
+                    if (table.empty()) {
+                      op->ok = false;
+                      op->status = 400;
+                      op->code = "invalid_group";
+                      op->message = "group " + std::to_string(group_id) + " does not exist";
+                      return;
+                    }
+                  }
+
+                  uvcpp::uvcpp_db_params remove_channels;
+                  remove_channels.add(user_id);
+                  if (!Exec("DELETE FROM acl_user_channels WHERE user_id = ?", remove_channels,
+                            nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  uvcpp::uvcpp_db_params remove_groups;
+                  remove_groups.add(user_id);
+                  if (!Exec("DELETE FROM acl_user_groups WHERE user_id = ?", remove_groups,
+                            nullptr, &error)) {
+                    op->ok = false;
+                    op->status = 500;
+                    op->code = "database_error";
+                    op->message = error;
+                    return;
+                  }
+                  const int64_t now = NowSeconds();
+                  for (const int64_t channel_id : channel_ids) {
+                    uvcpp::uvcpp_db_params params;
+                    params.add(user_id);
+                    params.add(channel_id);
+                    params.add(now);
+                    if (!Exec("INSERT INTO acl_user_channels(user_id, channel_id, created_at) "
+                              "VALUES(?, ?, ?)",
+                              params, nullptr, &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = error;
+                      return;
+                    }
+                  }
+                  for (const int64_t group_id : group_ids) {
+                    uvcpp::uvcpp_db_params params;
+                    params.add(user_id);
+                    params.add(group_id);
+                    params.add(now);
+                    if (!Exec("INSERT INTO acl_user_groups(user_id, group_id, created_at) "
+                              "VALUES(?, ?, ?)",
+                              params, nullptr, &error)) {
+                      op->ok = false;
+                      op->status = 500;
+                      op->code = "database_error";
+                      op->message = error;
+                      return;
+                    }
+                  }
+                  json channel_json = json::array();
+                  for (const int64_t channel_id : channel_ids)
+                    channel_json.push_back(channel_id);
+                  json group_json = json::array();
+                  for (const int64_t group_id : group_ids)
+                    group_json.push_back(group_id);
+                  json detail{{"channelIds", channel_json}, {"groupIds", group_json}};
+                  Audit("permission", "warning", actor.username, ip, ua, "user",
+                        std::to_string(user_id), "channel_grants", "success", "",
+                        detail.dump());
+                  op->data = json{{"userId", user_id},
+                                  {"channelIds", channel_json},
+                                  {"groupIds", group_json}};
+                },
+                [op, &resp, next] {
+                  SendOp(resp, *op);
+                  next();
+                });
+          },
+          "user.manage"));
+}
+#endif
 
 void App::RegisterGroupRoutes() {
   web_.get("/api/v1/channel-groups",
@@ -7156,6 +7736,10 @@ void App::RegisterGroupRoutes() {
                   params.add(group_id);
                   Exec("DELETE FROM channel_group_members WHERE group_id = ?", params, nullptr,
                        &error);
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                  Exec("DELETE FROM acl_user_groups WHERE group_id = ?", params, nullptr,
+                       &error);
+#endif
                   uvcpp::uvcpp_db_params reparent;
                   reparent.add(parent_id);
                   reparent.add(group_id);
@@ -8004,12 +8588,30 @@ void App::RegisterStreamRoutes() {
                     return;
                   }
                   const UserContext user = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
                   auto result = std::make_shared<OpResult>();
                   RunWork(
-                      [this, user, channel_id, stream, result] {
+                      [this, user, channel_id, stream, ip, ua, result] {
                         ChannelRow channel;
-                        std::string error;
-                        if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                        const ChannelAccess access =
+                            CheckChannelAccess(user, channel_id, &channel);
+                        if (access == ChannelAccess::denied) {
+                          AuditAclDenied(user, ip, ua, channel_id, "preview");
+                          result->ok = false;
+                          result->status = 403;
+                          result->code = "forbidden";
+                          result->message = "this channel is not granted to the account";
+                          return;
+                        }
+                        if (access == ChannelAccess::error) {
+                          result->ok = false;
+                          result->status = 500;
+                          result->code = "acl_error";
+                          result->message = "the channel authorization check failed";
+                          return;
+                        }
+                        if (access == ChannelAccess::missing || !channel.enabled) {
                           result->ok = false;
                           result->status = 404;
                           result->code = "not_found";
@@ -8023,6 +8625,7 @@ void App::RegisterStreamRoutes() {
                           result->message = "the sub stream is disabled for this channel";
                           return;
                         }
+                        std::string error;
                         std::string token;
                         int64_t expires_at = 0;
                         if (!CreateStreamTicket(user.id, channel_id, stream, &token, &expires_at,
@@ -8081,18 +8684,37 @@ void App::RegisterStreamRoutes() {
                     return;
                   }
                   const UserContext user = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
                   auto result = std::make_shared<OpResult>();
                   RunWork(
-                      [this, user, channel_id, stream, start_ms, end_ms, speed, result] {
+                      [this, user, channel_id, stream, start_ms, end_ms, speed, ip, ua, result] {
                         ChannelRow channel;
-                        std::string error;
-                        if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+                        const ChannelAccess access =
+                            CheckChannelAccess(user, channel_id, &channel);
+                        if (access == ChannelAccess::denied) {
+                          AuditAclDenied(user, ip, ua, channel_id, "playback");
+                          result->ok = false;
+                          result->status = 403;
+                          result->code = "forbidden";
+                          result->message = "this channel is not granted to the account";
+                          return;
+                        }
+                        if (access == ChannelAccess::error) {
+                          result->ok = false;
+                          result->status = 500;
+                          result->code = "acl_error";
+                          result->message = "the channel authorization check failed";
+                          return;
+                        }
+                        if (access == ChannelAccess::missing || !channel.enabled) {
                           result->ok = false;
                           result->status = 404;
                           result->code = "not_found";
                           result->message = "channel not found or disabled";
                           return;
                         }
+                        std::string error;
                         std::string token;
                         int64_t expires_at = 0;
                         if (!CreatePlaybackTicket(user.id, channel_id, stream, start_ms, end_ms,
@@ -8917,6 +9539,20 @@ void App::RegisterRecordingRoutes() {
                     op->message = "recording not found";
                     return;
                   }
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                  {
+                    const int64_t recording_channel = TableInt(table, 0, "channel_id");
+                    std::string acl_error;
+                    if (!ChannelIdAllowed(actor, recording_channel, &acl_error)) {
+                      AuditAclDenied(actor, ip, ua, recording_channel, "recording_delete");
+                      op->ok = false;
+                      op->status = 403;
+                      op->code = "forbidden";
+                      op->message = "this recording is not granted to the account";
+                      return;
+                    }
+                  }
+#endif
                   const std::string path = TableText(table, 0, "path");
                   const std::filesystem::path target =
                       std::filesystem::path(path).lexically_normal();
@@ -9017,14 +9653,51 @@ void App::RegisterRecordingRoutes() {
                  if (const std::string* value = req.query("to"))
                    ParseIntParam(value, &to_ms);
                  const std::string stream = req.query("stream") ? *req.query("stream") : "";
+                 const UserContext user = UserFromRequest(req);
                  auto items = std::make_shared<json>(json::array());
+                 auto failure = std::make_shared<std::string>();
+                 auto denied = std::make_shared<bool>(false);
                  RunWork(
-                     [this, channel_id, from_ms, to_ms, stream, items] {
+                     [this, user, channel_id, from_ms, to_ms, stream, items, failure, denied] {
                        std::string where = " WHERE 1=1";
                        uvcpp::uvcpp_db_params params;
+                       bool acl_restricted = false;
+                       std::set<int64_t> allowed_channels;
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                       if (!acl::IsAdministrator(user.role_name, user.permissions)) {
+                         acl_restricted = true;
+                         bool ok = false;
+                         std::string acl_error;
+                         const auto visible = LoadAccessibleChannels(user, &ok, &acl_error);
+                         if (!ok) {
+                           *failure = acl_error;
+                           return;
+                         }
+                         for (const auto& channel : visible)
+                           allowed_channels.insert(channel.id);
+                         if (channel_id > 0 &&
+                             allowed_channels.find(channel_id) == allowed_channels.end()) {
+                           *denied = true;
+                           return;
+                         }
+                       }
+#endif
                        if (channel_id > 0) {
                          where += " AND channel_id = ?";
                          params.add(channel_id);
+                       } else if (acl_restricted) {
+                         if (allowed_channels.empty()) {
+                           where += " AND 1=0";
+                         } else {
+                           std::string placeholders;
+                           for (const int64_t id : allowed_channels) {
+                             if (!placeholders.empty())
+                               placeholders += ",";
+                             placeholders += "?";
+                             params.add(id);
+                           }
+                           where += " AND channel_id IN (" + placeholders + ")";
+                         }
                        }
                        if (!stream.empty()) {
                          where += " AND stream = ?";
@@ -9070,6 +9743,10 @@ void App::RegisterRecordingRoutes() {
                          for (const auto& segment : recording_->ActiveSegments()) {
                            if (channel_id > 0 && segment.channel_id != channel_id)
                              continue;
+                           if (acl_restricted &&
+                               allowed_channels.find(segment.channel_id) ==
+                                   allowed_channels.end())
+                             continue;
                            if (!stream.empty() && segment.stream != stream)
                              continue;
                            if (to_ms > 0 && segment.start_ms >= to_ms)
@@ -9094,8 +9771,15 @@ void App::RegisterRecordingRoutes() {
                          }
                        }
                      },
-                     [items, &resp, next] {
-                       SendJson(resp, 200, *items);
+                     [items, failure, denied, &resp, next] {
+                       if (!failure->empty()) {
+                         SendError(resp, 500, "acl_error", *failure);
+                       } else if (*denied) {
+                         SendError(resp, 403, "forbidden",
+                                   "this channel is not granted to the account");
+                       } else {
+                         SendJson(resp, 200, *items);
+                       }
                        next();
                      });
                },
@@ -9130,8 +9814,21 @@ void App::RegisterRecordingRoutes() {
               return;
             }
             auto days = std::make_shared<json>(json::array());
+            const UserContext user = UserFromRequest(req);
+            auto failure = std::make_shared<std::string>();
+            auto denied = std::make_shared<bool>(false);
             RunWork(
-                [this, channel_id, from_day, to_day, days] {
+                [this, user, channel_id, from_day, to_day, days, failure, denied] {
+                  const ChannelAccess access =
+                      CheckChannelAccess(user, channel_id, nullptr);
+                  if (access == ChannelAccess::denied) {
+                    *denied = true;
+                    return;
+                  }
+                  if (access == ChannelAccess::error) {
+                    *failure = "the channel authorization check failed";
+                    return;
+                  }
                   const std::string zone_name = GetSetting("system.timezone", "UTC");
                   const DayZone zone = ResolveConfiguredZone(zone_name);
                   const int64_t from_ms = LocalDayStartMs(from_day, zone);
@@ -9176,8 +9873,15 @@ void App::RegisterRecordingRoutes() {
                   for (const LocalDay& day : found)
                     days->push_back(FormatLocalDay(day));
                 },
-                [days, &resp, next] {
-                  SendJson(resp, 200, json{{"days", *days}});
+                [days, failure, denied, &resp, next] {
+                  if (!failure->empty()) {
+                    SendError(resp, 500, "acl_error", *failure);
+                  } else if (*denied) {
+                    SendError(resp, 403, "forbidden",
+                              "this channel is not granted to the account");
+                  } else {
+                    SendJson(resp, 200, json{{"days", *days}});
+                  }
                   next();
                 });
           },
@@ -9196,22 +9900,34 @@ void App::RegisterRecordingRoutes() {
               return;
             }
             const std::string range_header = req.header("Range");
+            const UserContext user = UserFromRequest(req);
             auto path = std::make_shared<std::string>();
             auto file_size = std::make_shared<uint64_t>(0);
             auto status = std::make_shared<int>(200);
             auto message = std::make_shared<std::string>();
+            auto denied = std::make_shared<bool>(false);
             RunWork(
-                [this, recording_id, path, file_size, status, message] {
+                [this, user, recording_id, path, file_size, status, message, denied] {
                   uvcpp::uvcpp_db_table table;
                   uvcpp::uvcpp_db_params params;
                   params.add(recording_id);
                   std::string error;
-                  if (!Query("SELECT path FROM recordings WHERE id = ?", params, &table, &error) ||
+                  if (!Query("SELECT path, channel_id FROM recordings WHERE id = ?", params,
+                             &table, &error) ||
                       table.empty()) {
                     *status = 404;
                     *message = "recording not found";
                     return;
                   }
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                  std::string acl_error;
+                  if (!ChannelIdAllowed(user, TableInt(table, 0, "channel_id"), &acl_error)) {
+                    *status = 403;
+                    *message = "this recording is not granted to the account";
+                    *denied = true;
+                    return;
+                  }
+#endif
                   *path = TableText(table, 0, "path");
                   std::error_code size_error;
                   const uintmax_t size = std::filesystem::file_size(*path, size_error);
@@ -9222,9 +9938,11 @@ void App::RegisterRecordingRoutes() {
                   }
                   *file_size = static_cast<uint64_t>(size);
                 },
-                [path, file_size, status, message, range_header, recording_id, &resp, next] {
+                [path, file_size, status, message, denied, range_header, recording_id, &resp,
+                 next] {
                   if (*status != 200) {
-                    SendError(resp, *status, "download_failed", *message);
+                    SendError(resp, *status, *denied ? "forbidden" : "download_failed",
+                              *message);
                     next();
                     return;
                   }
@@ -9297,9 +10015,24 @@ void App::RegisterRecordingRoutes() {
             }
             const std::string ffmpeg = media_->FfmpegPath();
             const UserContext user = UserFromRequest(req);
+            const std::string ip = req.peer_ip();
+            const std::string ua = req.header("User-Agent", "");
             auto result = std::make_shared<ExportResult>();
             RunWork(
-                [this, user, channel_id, stream, start_ms, end_ms, ffmpeg, result] {
+                [this, user, channel_id, stream, start_ms, end_ms, ffmpeg, ip, ua, result] {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                  std::string acl_error;
+                  if (!ChannelIdAllowed(user, channel_id, &acl_error)) {
+                    AuditAclDenied(user, ip, ua, channel_id, "export");
+                    result->status = 403;
+                    result->code = "forbidden";
+                    result->message = "this channel is not granted to the account";
+                    return;
+                  }
+#else
+                  (void)ip;
+                  (void)ua;
+#endif
                   uvcpp::uvcpp_db_table table;
                   uvcpp::uvcpp_db_params params;
                   params.add(channel_id);
@@ -9773,9 +10506,11 @@ void App::RegisterAlertRoutes() {
             const std::string level = req.query("level") ? *req.query("level") : "";
             const std::string acknowledged =
                 req.query("acknowledged") ? *req.query("acknowledged") : "";
+            const UserContext user = UserFromRequest(req);
             auto items = std::make_shared<json>(json::array());
+            auto failure = std::make_shared<std::string>();
             RunWork(
-                [this, level, acknowledged, items] {
+                [this, user, level, acknowledged, items, failure] {
                   std::string where = " WHERE 1=1";
                   uvcpp::uvcpp_db_params params;
                   if (!level.empty()) {
@@ -9786,6 +10521,24 @@ void App::RegisterAlertRoutes() {
                     where += " AND a.acknowledged = ?";
                     params.add(acknowledged == "1" ? 1 : 0);
                   }
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                  if (!acl::IsAdministrator(user.role_name, user.permissions)) {
+                    bool ok = false;
+                    std::string acl_error;
+                    const auto visible = LoadAccessibleChannels(user, &ok, &acl_error);
+                    if (!ok) {
+                      *failure = acl_error;
+                      return;
+                    }
+                    // Alerts with channelId 0 are system-wide and stay visible.
+                    where += " AND (a.channel_id = 0";
+                    for (const auto& channel : visible) {
+                      where += " OR a.channel_id = ?";
+                      params.add(channel.id);
+                    }
+                    where += ")";
+                  }
+#endif
                   uvcpp::uvcpp_db_table table;
                   std::string error;
                   if (!Query(
@@ -9810,8 +10563,12 @@ void App::RegisterAlertRoutes() {
                     });
                   }
                 },
-                [items, &resp, next] {
-                  SendJson(resp, 200, *items);
+                [items, failure, &resp, next] {
+                  if (!failure->empty()) {
+                    SendError(resp, 500, "acl_error", *failure);
+                  } else {
+                    SendJson(resp, 200, *items);
+                  }
                   next();
                 });
           },
@@ -9829,13 +10586,49 @@ void App::RegisterAlertRoutes() {
                     return;
                   }
                   const UserContext actor = UserFromRequest(req);
+                  const std::string ip = req.peer_ip();
+                  const std::string ua = req.header("User-Agent", "");
                   auto op = std::make_shared<OpResult>();
                   RunWork(
-                      [this, alert_id, actor, op] {
+                      [this, alert_id, actor, ip, ua, op] {
                         uvcpp::uvcpp_db_params params;
                         params.add(NowSeconds());
                         params.add(alert_id);
                         std::string error;
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                        uvcpp::uvcpp_db_table alert;
+                        uvcpp::uvcpp_db_params lookup;
+                        lookup.add(alert_id);
+                        if (!Query("SELECT channel_id FROM alerts WHERE id = ?", lookup, &alert,
+                                   &error)) {
+                          op->ok = false;
+                          op->status = 500;
+                          op->code = "database_error";
+                          op->message = error;
+                          return;
+                        }
+                        if (alert.empty()) {
+                          op->ok = false;
+                          op->status = 404;
+                          op->code = "not_found";
+                          op->message = "alert not found";
+                          return;
+                        }
+                        const int64_t alert_channel = TableInt(alert, 0, "channel_id");
+                        std::string acl_error;
+                        if (alert_channel > 0 &&
+                            !ChannelIdAllowed(actor, alert_channel, &acl_error)) {
+                          AuditAclDenied(actor, ip, ua, alert_channel, "alert_ack");
+                          op->ok = false;
+                          op->status = 403;
+                          op->code = "forbidden";
+                          op->message = "this alert is not granted to the account";
+                          return;
+                        }
+#else
+                        (void)ip;
+                        (void)ua;
+#endif
                         if (!Exec("UPDATE alerts SET acknowledged = 1 WHERE id = ?", params,
                                   nullptr, &error)) {
                           op->ok = false;
@@ -9866,22 +10659,41 @@ void App::RegisterAlertRoutes() {
                    next();
                    return;
                  }
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto payload = std::make_shared<std::string>();
                  auto status = std::make_shared<int>(200);
                  auto message = std::make_shared<std::string>();
+                 auto denied = std::make_shared<bool>(false);
                  RunWork(
-                     [this, alert_id, payload, status, message] {
+                     [this, user, alert_id, ip, ua, payload, status, message, denied] {
                        uvcpp::uvcpp_db_table table;
                        uvcpp::uvcpp_db_params params;
                        params.add(alert_id);
                        std::string error;
-                       if (!Query("SELECT snapshot_path FROM alerts WHERE id = ?", params, &table,
-                                  &error) ||
+                       if (!Query("SELECT snapshot_path, channel_id FROM alerts WHERE id = ?",
+                                  params, &table, &error) ||
                            table.empty()) {
                          *status = 404;
                          *message = "alert not found";
                          return;
                        }
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                       const int64_t alert_channel = TableInt(table, 0, "channel_id");
+                       std::string acl_error;
+                       if (alert_channel > 0 &&
+                           !ChannelIdAllowed(user, alert_channel, &acl_error)) {
+                         AuditAclDenied(user, ip, ua, alert_channel, "alert_snapshot");
+                         *status = 403;
+                         *message = "this alert is not granted to the account";
+                         *denied = true;
+                         return;
+                       }
+#else
+                       (void)ip;
+                       (void)ua;
+#endif
                        const std::string path = TableText(table, 0, "snapshot_path");
                        if (path.empty()) {
                          *status = 404;
@@ -9904,9 +10716,10 @@ void App::RegisterAlertRoutes() {
                                        std::istreambuf_iterator<char>());
 #endif
                      },
-                     [payload, status, message, &resp, next] {
+                     [payload, status, message, denied, &resp, next] {
                        if (*status != 200) {
-                         SendError(resp, *status, "not_found", *message);
+                         SendError(resp, *status, *denied ? "forbidden" : "not_found",
+                                   *message);
                        } else {
                          resp.status(200).body(*payload, "image/jpeg");
                          resp.end();
@@ -9985,13 +10798,35 @@ void App::RegisterAiRoutes() {
                    next();
                    return;
                  }
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto result = std::make_shared<json>();
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, channel_id, result, error, ok] {
+                 auto denied = std::make_shared<bool>(false);
+                 RunWork([this, user, channel_id, ip, ua, result, error, ok, denied] {
+                   const ChannelAccess access =
+                       CheckChannelAccess(user, channel_id, nullptr);
+                   if (access == ChannelAccess::denied) {
+                     AuditAclDenied(user, ip, ua, channel_id, "ai_settings");
+                     *denied = true;
+                     return;
+                   }
+                   if (access == ChannelAccess::error) {
+                     *error = "the channel authorization check failed";
+                     return;
+                   }
+                   if (access == ChannelAccess::missing) {
+                     *error = "channel not found";
+                     return;
+                   }
                    *ok = ai_->GetChannelSettings(channel_id, result.get(), error.get());
-                 }, [ok, result, error, &resp, next] {
-                   if (!*ok) {
+                 }, [ok, result, error, denied, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "this channel is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 404, "channel_not_found", *error);
                    } else {
                      SendJson(resp, 200, *result);
@@ -10022,15 +10857,37 @@ void App::RegisterAiRoutes() {
                    next();
                    return;
                  }
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
+                 auto denied = std::make_shared<bool>(false);
                  auto result = std::make_shared<json>();
-                 RunWork([this, channel_id, body, error, ok, result] {
+                 RunWork([this, user, channel_id, body, ip, ua, error, ok, denied, result] {
+                   const ChannelAccess access =
+                       CheckChannelAccess(user, channel_id, nullptr);
+                   if (access == ChannelAccess::denied) {
+                     AuditAclDenied(user, ip, ua, channel_id, "ai_settings");
+                     *denied = true;
+                     return;
+                   }
+                   if (access == ChannelAccess::error) {
+                     *error = "the channel authorization check failed";
+                     return;
+                   }
+                   if (access == ChannelAccess::missing) {
+                     *error = "channel not found";
+                     return;
+                   }
                    *ok = ai_->UpdateChannelSettings(channel_id, body, error.get());
                    if (*ok)
                      *ok = ai_->GetChannelSettings(channel_id, result.get(), error.get());
-                 }, [ok, error, result, &resp, next] {
-                   if (!*ok) {
+                 }, [ok, error, denied, result, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "this channel is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 400, "invalid_channel_ai", *error);
                    } else {
                      SendJson(resp, 200, *result);
@@ -10075,12 +10932,32 @@ void App::RegisterAiRoutes() {
                  }
                  const bool plate = body["plateEnabled"].get<bool>();
                  const bool face = body["faceEnabled"].get<bool>();
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, channel_ids, plate, face, error, ok] {
+                 auto denied = std::make_shared<bool>(false);
+                 RunWork([this, user, channel_ids, plate, face, ip, ua, error, ok, denied] {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                   for (const int64_t channel_id : *channel_ids) {
+                     std::string acl_error;
+                     if (!ChannelIdAllowed(user, channel_id, &acl_error)) {
+                       AuditAclDenied(user, ip, ua, channel_id, "ai_settings");
+                       *denied = true;
+                       return;
+                     }
+                   }
+#else
+                   (void)ip;
+                   (void)ua;
+#endif
                    *ok = ai_->UpdateChannels(*channel_ids, plate, face, error.get());
-                 }, [ok, error, channel_ids, plate, face, &resp, next] {
-                   if (!*ok) {
+                 }, [ok, error, denied, channel_ids, plate, face, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "one of the channels is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 400, "invalid_channel_ai", *error);
                    } else {
                      SendJson(resp, 200, json{{"ok", true},
@@ -10145,17 +11022,37 @@ void App::RegisterAiRoutes() {
                    }
                  }
                  const std::string plate = req.query("plate") ? *req.query("plate") : "";
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto result = std::make_shared<json>();
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, type, channel_id, from, to, plate, limit, offset, result, error,
-                          ok] {
+                 auto denied = std::make_shared<bool>(false);
+                 RunWork([this, user, type, channel_id, from, to, plate, limit, offset, ip, ua,
+                          result, error, ok, denied] {
+                   if (channel_id > 0) {
+                     const ChannelAccess access =
+                         CheckChannelAccess(user, channel_id, nullptr);
+                     if (access == ChannelAccess::denied) {
+                       AuditAclDenied(user, ip, ua, channel_id, "ai_events");
+                       *denied = true;
+                       return;
+                     }
+                     if (access == ChannelAccess::error) {
+                       *error = "the channel authorization check failed";
+                       return;
+                     }
+                   }
                    *result = ai_->QueryEvents(type, channel_id, from, to, plate,
                                               static_cast<int>(limit),
                                               static_cast<int>(offset), error.get());
                    *ok = !result->is_null();
-                 }, [ok, result, error, &resp, next] {
-                   if (!*ok) {
+                 }, [ok, result, error, denied, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "this channel is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 400, "invalid_query", *error);
                    } else {
                      SendJson(resp, 200, *result);
@@ -10181,14 +11078,35 @@ void App::RegisterAiRoutes() {
                    return;
                  }
                  const std::string type = req.query("type") ? *req.query("type") : "plate";
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto result = std::make_shared<json>();
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, type, event_id, result, error, ok] {
+                 auto denied = std::make_shared<bool>(false);
+                 RunWork([this, user, type, event_id, ip, ua, result, error, ok, denied] {
                    *result = ai_->GetEvent(type, event_id, error.get());
                    *ok = !result->is_null();
-                 }, [ok, error, result, &resp, next] {
-                   if (!*ok) {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                   if (*ok) {
+                     const int64_t channel_id = result->value("channelId", int64_t{0});
+                     std::string acl_error;
+                     if (channel_id > 0 &&
+                         !ChannelIdAllowed(user, channel_id, &acl_error)) {
+                       AuditAclDenied(user, ip, ua, channel_id, "ai_event");
+                       *denied = true;
+                     }
+                   }
+#else
+                   (void)ip;
+                   (void)ua;
+#endif
+                 }, [ok, error, result, denied, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "this event is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 404, "event_not_found", *error);
                    } else {
                      SendJson(resp, 200, *result);
@@ -10215,13 +11133,35 @@ void App::RegisterAiRoutes() {
                  }
                  const std::string type = req.query("type") ? *req.query("type") : "plate";
                  const std::string kind = req.query("kind") ? *req.query("kind") : "full";
+                 const UserContext user = UserFromRequest(req);
+                 const std::string ip = req.peer_ip();
+                 const std::string ua = req.header("User-Agent", "");
                  auto bytes = std::make_shared<std::string>();
                  auto error = std::make_shared<std::string>();
                  auto ok = std::make_shared<bool>(false);
-                 RunWork([this, type, event_id, kind, bytes, error, ok] {
+                 auto denied = std::make_shared<bool>(false);
+                 RunWork([this, user, type, event_id, kind, ip, ua, bytes, error, ok, denied] {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+                   const json event = ai_->GetEvent(type, event_id, error.get());
+                   if (event.is_null()) {
+                     *ok = false;
+                     return;
+                   }
+                   const int64_t channel_id = event.value("channelId", int64_t{0});
+                   std::string acl_error;
+                   if (channel_id > 0 &&
+                       !ChannelIdAllowed(user, channel_id, &acl_error)) {
+                     AuditAclDenied(user, ip, ua, channel_id, "ai_snapshot");
+                     *denied = true;
+                     return;
+                   }
+#endif
                    *ok = ai_->ReadSnapshot(type, event_id, kind, bytes.get(), error.get());
-                 }, [ok, bytes, error, &resp, next] {
-                   if (!*ok) {
+                 }, [ok, bytes, error, denied, &resp, next] {
+                   if (*denied) {
+                     SendError(resp, 403, "forbidden",
+                               "this event is not granted to the account");
+                   } else if (!*ok) {
                      SendError(resp, 404, "snapshot_not_found", *error);
                    } else {
                      resp.set_header("Content-Type", "image/jpeg");
@@ -11210,10 +12150,16 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
       return;
     }
     auto items = std::make_shared<json>(json::array());
+    auto failure = std::make_shared<std::string>();
     RunWork(
-        [this, items] {
+        [this, user, items, failure] {
           std::string error;
-          const auto channels = LoadChannels(&error);
+          bool ok = false;
+          const auto channels = LoadAccessibleChannels(user, &ok, &error);
+          if (!ok) {
+            *failure = error;
+            return;
+          }
           for (const auto& channel : channels) {
             json item = ChannelJson(channel);
             StreamStatus main_status;
@@ -11231,7 +12177,11 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
             items->push_back(std::move(item));
           }
         },
-        [items, complete] {
+        [items, failure, complete] {
+          if (!failure->empty()) {
+            complete(ProtoFailure(500, "acl_error", *failure));
+            return;
+          }
           proto::ProtoReply reply;
           reply.status = 200;
           reply.data = *items;
@@ -11261,8 +12211,20 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
       return;
     }
     auto days = std::make_shared<json>(json::array());
+    auto failure = std::make_shared<std::string>();
+    auto denied = std::make_shared<bool>(false);
     RunWork(
-        [this, channel_id, from_day, to_day, days] {
+        [this, user, channel_id, from_day, to_day, days, failure, denied] {
+          const ChannelAccess access =
+              CheckChannelAccess(user, channel_id, nullptr);
+          if (access == ChannelAccess::denied) {
+            *denied = true;
+            return;
+          }
+          if (access == ChannelAccess::error) {
+            *failure = "the channel authorization check failed";
+            return;
+          }
           const std::string zone_name = GetSetting("system.timezone", "UTC");
           const DayZone zone = ResolveConfiguredZone(zone_name);
           const int64_t from_ms = LocalDayStartMs(from_day, zone);
@@ -11301,7 +12263,16 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
           for (const LocalDay& day : found)
             days->push_back(FormatLocalDay(day));
         },
-        [days, complete] {
+        [days, failure, denied, complete] {
+          if (!failure->empty()) {
+            complete(ProtoFailure(500, "acl_error", *failure));
+            return;
+          }
+          if (*denied) {
+            complete(ProtoFailure(403, "forbidden",
+                                  "this channel is not granted to the account"));
+            return;
+          }
           proto::ProtoReply reply;
           reply.status = 200;
           reply.data = json{{"days", *days}};
@@ -11320,13 +12291,48 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     const int64_t from_ms = JsonInt(fields, "fromMs", 0);
     const int64_t to_ms = JsonInt(fields, "toMs", 0);
     auto items = std::make_shared<json>(json::array());
+    auto failure = std::make_shared<std::string>();
+    auto denied = std::make_shared<bool>(false);
     RunWork(
-        [this, channel_id, stream, from_ms, to_ms, items] {
+        [this, user, channel_id, stream, from_ms, to_ms, items, failure, denied] {
           std::string where = " WHERE 1=1";
           uvcpp::uvcpp_db_params params;
+          bool acl_restricted = false;
+          std::set<int64_t> allowed_channels;
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+          if (!acl::IsAdministrator(user.role_name, user.permissions)) {
+            acl_restricted = true;
+            bool ok = false;
+            std::string acl_error;
+            const auto visible = LoadAccessibleChannels(user, &ok, &acl_error);
+            if (!ok) {
+              *failure = acl_error;
+              return;
+            }
+            for (const auto& channel : visible)
+              allowed_channels.insert(channel.id);
+            if (channel_id > 0 && allowed_channels.find(channel_id) == allowed_channels.end()) {
+              *denied = true;
+              return;
+            }
+          }
+#endif
           if (channel_id > 0) {
             where += " AND channel_id = ?";
             params.add(channel_id);
+          } else if (acl_restricted) {
+            if (allowed_channels.empty()) {
+              where += " AND 1=0";
+            } else {
+              std::string placeholders;
+              for (const int64_t id : allowed_channels) {
+                if (!placeholders.empty())
+                  placeholders += ",";
+                placeholders += "?";
+                params.add(id);
+              }
+              where += " AND channel_id IN (" + placeholders + ")";
+            }
           }
           if (!stream.empty()) {
             where += " AND stream = ?";
@@ -11368,6 +12374,9 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
             for (const auto& segment : recording_->ActiveSegments()) {
               if (channel_id > 0 && segment.channel_id != channel_id)
                 continue;
+              if (acl_restricted &&
+                  allowed_channels.find(segment.channel_id) == allowed_channels.end())
+                continue;
               if (!stream.empty() && segment.stream != stream)
                 continue;
               if (to_ms > 0 && segment.start_ms >= to_ms)
@@ -11392,7 +12401,16 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
             }
           }
         },
-        [items, complete] {
+        [items, failure, denied, complete] {
+          if (!failure->empty()) {
+            complete(ProtoFailure(500, "acl_error", *failure));
+            return;
+          }
+          if (*denied) {
+            complete(ProtoFailure(403, "forbidden",
+                                  "this channel is not granted to the account"));
+            return;
+          }
           proto::ProtoReply reply;
           reply.status = 200;
           reply.data = json{{"recordings", *items}};
@@ -11421,7 +12439,20 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     }
     ChannelRow channel;
     std::string error;
-    if (!LoadChannel(channel_id, &channel, &error) || !channel.enabled) {
+    const ChannelAccess access = CheckChannelAccess(user, channel_id, &channel);
+    if (access == ChannelAccess::denied) {
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+      AuditAclDenied(user, "", "", channel_id, "proto_live");
+#endif
+      complete(ProtoFailure(403, "forbidden",
+                            "this channel is not granted to the account"));
+      return;
+    }
+    if (access == ChannelAccess::error) {
+      complete(ProtoFailure(500, "acl_error", "the channel authorization check failed"));
+      return;
+    }
+    if (access == ChannelAccess::missing || !channel.enabled) {
       complete(ProtoFailure(404, "not_found", "channel not found or disabled"));
       return;
     }
@@ -11573,18 +12604,30 @@ void App::HandleProtoRequest(std::shared_ptr<proto::ProtoRequest> request,
     const proto::Header header = request->header;
     auto info = std::make_shared<ProtoDownloadInfo>();
     RunWork(
-        [this, recording_id, info] {
+        [this, user, recording_id, info] {
           uvcpp::uvcpp_db_table table;
           uvcpp::uvcpp_db_params params;
           params.add(recording_id);
           std::string error;
-          if (!Query("SELECT path, codec, size_bytes FROM recordings WHERE id = ?", params,
-                     &table, &error) ||
+          if (!Query("SELECT path, codec, size_bytes, channel_id FROM recordings WHERE id = ?",
+                     params, &table, &error) ||
               table.empty()) {
             info->status = 404;
             info->message = "recording not found";
             return;
           }
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+          {
+            const int64_t recording_channel = TableInt(table, 0, "channel_id");
+            std::string acl_error;
+            if (!ChannelIdAllowed(user, recording_channel, &acl_error)) {
+              info->status = 403;
+              info->code = "forbidden";
+              info->message = "this recording is not granted to the account";
+              return;
+            }
+          }
+#endif
           info->path = TableText(table, 0, "path");
           info->codec = TableText(table, 0, "codec");
           std::error_code size_error;

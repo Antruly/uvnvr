@@ -160,6 +160,12 @@ const Endpoint kEndpoints[] = {
     {"post", "/api/v1/users", "Create a user", "Users", "user.manage", "application/json"},
     {"put", "/api/v1/users/{id}", "Update a user", "Users", "user.manage", "application/json"},
     {"delete", "/api/v1/users/{id}", "Delete a user", "Users", "user.manage", "application/json"},
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+    {"get", "/api/v1/users/{id}/channel-grants", "Read a user's channel/group grants", "Users",
+     "user.manage", "application/json"},
+    {"put", "/api/v1/users/{id}/channel-grants", "Replace a user's channel/group grants", "Users",
+     "user.manage", "application/json"},
+#endif
     {"get", "/api/v1/roles", "List roles", "Users", "user.view", "application/json"},
     {"post", "/api/v1/roles", "Create a role", "Users", "user.manage", "application/json"},
     {"put", "/api/v1/roles/{id}", "Update a role", "Users", "user.manage", "application/json"},

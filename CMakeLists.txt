@@ -39,6 +39,12 @@ option(UVNVR_ENABLE_GB35114 "Build the GB 35114 video security modules" OFF)
 option(UVNVR_ENABLE_GM_TLS "Build the GM/T 0024 signalling adapter (requires Tongsuo)" OFF)
 set(UVNVR_GM_TLS_ROOT "" CACHE PATH
     "Tongsuo installation root containing include/openssl/ntls.h and lib[/64]/libssl")
+# Object-level channel ACL (GA/T 2155.2 ACC-02). Off by default: without it the
+# service keeps the existing role-only authorization and every account sees the
+# same catalog.
+option(UVNVR_ENABLE_CHANNEL_ACL
+       "Build the object-level channel/group authorization (deny-by-default for non-admin users)"
+       OFF)
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -537,6 +543,25 @@ if(UVNVR_ENABLE_GM_TLS)
   endif()
 else()
   message(STATUS "gm_tls: disabled by UVNVR_ENABLE_GM_TLS=OFF")
+# Object-level channel ACL. The static library holds the pure decision logic so
+# it can be unit tested without libuvcpp; the tables and enforcement hooks live
+# in the server under the same compile definition. When the option is off no
+# ACL code, table or route is compiled, so existing deployments are unchanged.
+set(UVNVR_CHANNEL_ACL_ENABLED 0)
+if(UVNVR_ENABLE_CHANNEL_ACL)
+  set(UVNVR_CHANNEL_ACL_ENABLED 1)
+  add_library(uvnvr_channel_acl STATIC src/secure/channel_acl.cpp)
+  target_include_directories(uvnvr_channel_acl PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_compile_definitions(uvnvr_channel_acl PUBLIC UVNVR_ENABLE_CHANNEL_ACL=1)
+  if(MSVC)
+    target_compile_options(uvnvr_channel_acl PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(uvnvr_channel_acl PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  target_link_libraries(uvnvr PRIVATE uvnvr_channel_acl)
+  message(STATUS "channel_acl: enabled")
+else()
+  message(STATUS "channel_acl: disabled by UVNVR_ENABLE_CHANNEL_ACL=OFF")
 endif()
 
 if(WIN32)

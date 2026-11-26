@@ -13,6 +13,7 @@
 | [`gb35114-b-level.md`](gb35114-b-level.md) | GB 35114 B level: VKEK distribution and SM4 encryption of the video ES |
 | [`gb35114-interop.md`](gb35114-interop.md) | GB 35114 A→B interop run against the reference platform, with capture evidence |
 | [`gm-tls.md`](gm-tls.md) | GM/T 0024 (TLCP) and GM TLS 1.3 adapter: Tongsuo/GmSSL evaluation, build, handshake evidence, MinGW cross-build |
+| [`channel-acl.md`](channel-acl.md) | Object-level channel/group authorization (GA/T 2155.2 ACC-02) |
 | [`api.md`](api.md) | REST/WebSocket/RTSP API reference (M4) |
 | [`deployment.md`](deployment.md) | Installation and operations guide (M5) |
 | [`configuration.md`](configuration.md) | Startup JSON file, ports, precedence and validation (0.2.0) |

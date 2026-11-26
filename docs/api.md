@@ -82,6 +82,7 @@ header for cookie-authenticated mutating requests.
 | GET | `/api/v1/alerts/{id}/snapshot` | alert.view |
 | GET | `/api/v1/users` | user.view |
 | POST/PUT/DELETE | `/api/v1/users[/{id}]` | user.manage |
+| GET/PUT | `/api/v1/users/{id}/channel-grants` | user.manage (ACL build only) |
 | GET | `/api/v1/roles` | user.view |
 | POST/PUT/DELETE | `/api/v1/roles[/{id}]` | user.manage |
 | GET | `/api/v1/permissions` | user.view |
@@ -452,6 +453,34 @@ updates the name, parent or order. Cycles and self-parenting are rejected with
 400. Deleting a group moves its channels to ungrouped and reparents its child
 groups to its own parent. Channels accept `groupId` on create/update and return
 it in the channel JSON.
+
+## Channel grants (object authorization)
+
+Available only when the server is built with `-DUVNVR_ENABLE_CHANNEL_ACL=ON`;
+see `docs/channel-acl.md` for the model and enforcement points.
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| GET | `/api/v1/users/{id}/channel-grants` | user.manage |
+| PUT | `/api/v1/users/{id}/channel-grants` | user.manage |
+
+`GET` returns the direct grants before hierarchy expansion:
+
+```json
+{"userId":2,"username":"op2","role":"operator","unrestricted":false,
+ "channelIds":[1],"groupIds":[3]}
+```
+
+`PUT` replaces them:
+
+```json
+{"channelIds":[1],"groupIds":[3]}
+```
+
+Both arrays are optional. Every id must exist; unknown ids return `400`. A
+group grant also covers all descendant groups. Administrators (`*` or the
+`admin` role) are unrestricted and do not need grants. Non-administrators are
+denied by default until a grant is added.
 
 ## Preview layouts
 

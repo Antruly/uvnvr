@@ -31,6 +31,9 @@
 #ifdef UVNVR_ENABLE_SECURE
 #include "crypto/sm.h"
 #endif
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+#include "secure/channel_acl.h"
+#endif
 
 namespace uvnvr {
 
@@ -137,6 +140,16 @@ private:
   std::string DecryptSecret(const std::string& encoded, std::string* error);
   bool LoadChannel(int64_t id, ChannelRow* out, std::string* error);
   std::vector<ChannelRow> LoadChannels(std::string* error);
+  // Result of an object-level authorization check. `missing` keeps the
+  // historical 404 path for administrators; a restricted account gets
+  // `denied` (403) instead so channel existence is not disclosed.
+  enum class ChannelAccess { allowed, denied, missing, error };
+  ChannelAccess CheckChannelAccess(const UserContext& user, int64_t channel_id,
+                                   ChannelRow* channel);
+  // Loads the catalog filtered by the account's channel ACL. With the feature
+  // compiled out it is exactly LoadChannels().
+  std::vector<ChannelRow> LoadAccessibleChannels(const UserContext& user, bool* ok,
+                                                 std::string* error);
   json ChannelJson(const ChannelRow& channel) const;
   std::string BuildChannelUrl(const ChannelRow& channel, bool sub, std::string* error);
   void SyncMediaChannel(int64_t id);
@@ -150,6 +163,9 @@ private:
   void RegisterSystemRoutes();
   void RegisterChannelRoutes();
   void RegisterGroupRoutes();
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  void RegisterChannelAclRoutes();
+#endif
   void RegisterLayoutRoutes();
   void RegisterOnvifRoutes();
   void RegisterStreamRoutes();
@@ -240,6 +256,24 @@ private:
              const std::string& error_code, const std::string& detail);
   void CleanupAudit();
   void CleanupAuditLocked();
+
+  // Writes the "permission" audit entry used for every denied object access.
+  // A no-op when the ACL is compiled out.
+  void AuditAclDenied(const UserContext& user, const std::string& ip,
+                      const std::string& ua, int64_t channel_id,
+                      const std::string& action);
+
+#ifdef UVNVR_ENABLE_CHANNEL_ACL
+  // Loads the direct channel/group grants for an account and expands group
+  // grants across the hierarchy. Administrators come back unrestricted.
+  bool LoadChannelGrants(const UserContext& user, acl::Grants* grants, std::string* error);
+  // RTSP authenticates with username/password, so it resolves the account
+  // again before applying the object ACL to /live/{channel}/{stream}.
+  bool RtspChannelAllowed(const std::string& username, int64_t channel_id);
+  // Applies the ACL to a bare channel id (recording/alert rows may refer to a
+  // channel that was deleted, so a direct grant still matches).
+  bool ChannelIdAllowed(const UserContext& user, int64_t channel_id, std::string* error);
+#endif
 
 #ifdef UVNVR_ENABLE_SECURE
   // Loads the device certificate and derives the SM4 storage key. Missing or

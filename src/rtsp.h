@@ -14,6 +14,10 @@ class RtspServer {
 public:
   using AuthFn = std::function<bool(const std::string&, const std::string&)>;
   using Ha1Fn = std::function<std::string(const std::string&)>;
+  // Optional object-level authorization hook: (username, channel id). It is
+  // unset by default, so builds without the channel ACL behave exactly as
+  // before.
+  using ChannelAuthFn = std::function<bool(const std::string&, int64_t)>;
   using AttachFn = std::function<uint64_t(
       int64_t, const std::string&, std::function<void(const uint8_t*, size_t)>, std::string*)>;
   using DetachFn = std::function<void(int64_t, const std::string&, uint64_t)>;
@@ -27,6 +31,8 @@ public:
   bool Start(std::string* error);
   void Stop();
   int Port() const;
+  // Must be called before Start(). An empty function disables the check.
+  void SetChannelAuthorizer(ChannelAuthFn authorize);
 
 private:
   struct Impl;

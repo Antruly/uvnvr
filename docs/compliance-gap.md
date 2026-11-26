@@ -32,17 +32,17 @@
 | 类别 | 条目数 | 满足 | 部分 | 缺失 | 不适用 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 身份鉴别 | 8 | 4 | 3 | 1 | 0 |
-| 访问控制 | 4 | 2 | 1 | 1 | 0 |
+| 访问控制 | 4 | 3 | 0 | 1 | 0 |
 | 安全审计 | 7 | 2 | 3 | 2 | 0 |
 | 数据完整性 | 5 | 0 | 2 | 3 | 0 |
 | 数据保密性 | 5 | 1 | 3 | 1 | 0 |
 | 通信安全 | 6 | 0 | 5 | 1 | 0 |
 | 软件容错 | 6 | 2 | 4 | 0 | 0 |
 | 升级安全 | 5 | 0 | 1 | 4 | 0 |
-| **合计** | **46** | **11** | **22** | **13** | **0** |
+| **合计** | **46** | **12** | **21** | **13** | **0** |
 
-结论：现有产品在“账户与口令基础能力、RBAC、审计留痕、资源上限”上已有可用实现；
-主要差距集中在**双因子/再认证、对象级授权、审计防篡改、数据静态加密、国密通信、升级签名与回滚**。
+结论：现有产品在“账户与口令基础能力、RBAC、对象级通道/分组授权、审计留痕、资源上限”上已有可用实现；
+主要差距集中在**双因子/再认证、管理面来源限制、审计防篡改、数据静态加密、国密通信、升级签名与回滚**。
 其中 22 个“部分”与 13 个“缺失”条目全部在
 [`compliance-testcases.md`](compliance-testcases.md) 中有对应用例（35 条）。
 
@@ -64,7 +64,7 @@
 | 条目 | 要求 | 现状 | 证据位置 | 整改任务 |
 | --- | --- | --- | --- | --- |
 | ACC-01 | 采用角色/权限模型；默认拒绝；权限点覆盖主要功能；角色可分离。 | 满足 | 权限全集 `AllPermissions`（`src/app.cpp:738-748`）；权限蕴含关系 `PermissionImplies`（`src/app.cpp:760-783`）；内置角色 admin/operator/viewer（`src/app.cpp:1188-1213`、`833-836`）；路由统一经 `App::Protected`，无权限返回 403（`src/app.cpp:2173-2210`）；未认证返回 401（`src/app.cpp:1844-1941`）。 | 保持；P6.1 增加权限矩阵导出（角色 × 权限 × 路由）作为送检材料。 |
-| ACC-02 | 防止水平越权：用户只能访问被授权的通道、录像、抓图、回放与下载对象。 | 部分 | 仅做功能级权限，没有通道/分组级 ACL：`GET /api/v1/channels` 对任何 `channel.view` 返回全部通道（`src/app.cpp:5484-5544`）；预览/回放/导出只检查 `preview.view`/`playback.download`（`src/app.cpp:5585-5606`、`8867-9004`）；抓图只检查 `api.snapshot`（`src/app.cpp:6321-6404`）；`channels` 表无 `owner`/`group_acl` 字段（`src/app.cpp:1002-1022`）。 | 以通道分组为授权范围，增加 `user_channel_grants`/`role_channel_grants`；在列表过滤与所有按 `channelId` 的读写接口（快照、直播票据、回放、导出、私有协议）统一校验；补“越权访问返回 404/403 且写审计”的用例。 |
+| ACC-02 | 防止水平越权：用户只能访问被授权的通道、录像、抓图、回放与下载对象。 | 满足 | 编译开关 `UVNVR_ENABLE_CHANNEL_ACL`（默认关闭）；表 `acl_user_channels`/`acl_user_groups`（`src/app.cpp` Migrate）；决策 `acl::Grants::Allows`、`ExpandGroupGrants`（`src/secure/channel_acl.cpp`）；列表过滤 `LoadAccessibleChannels`，单对象校验 `CheckChannelAccess`；覆盖通道/预览列表、直播票据、RTSP、回放票据、录像列表/日历/下载/导出/删除、通道与告警抓图、告警列表、通道改删/编码器/重连、AI 通道设置、私有协议 `CHANNEL_LIST`/`RECORDING_*`/`LIVE_OPEN`/`DOWNLOAD_OPEN`；拒绝写 `permission` 审计并返回 403；管理接口 `GET/PUT /api/v1/users/{id}/channel-grants`（`user.manage`）。用例：`tests/channel_acl_test.cpp`、`tests/integration/channel_acl.sh`；说明见 `docs/channel-acl.md`。 | 保持；可选后续：角色级授权、`/ws/status` 与 AI 全局事件列表按用户过滤。 |
 | ACC-03 | API Token 的权限不得超过所属用户角色；有有效期、可撤销、静态不可还原。 | 满足 | Token 范围与角色权限取交集 `EffectiveTokenPermissions`（`src/app.cpp:808-831`）；仅存 `SHA256(token)`（`src/app.cpp:4647`）；有效期 0–3650 天（`src/app.cpp:4601-4609`）；删除接口 `DELETE /api/v1/tokens/:id`（`src/app.cpp:4682-4725`）；每次使用更新 `last_used_at`（`src/app.cpp:1888-1893`）。 | 保持；P6.1 增加 Token 绑定来源网段/首次使用 IP 的可选项，并在审计中记录 Token ID。 |
 | ACC-04 | 管理面应限制来源（管理网段/跳板机/VPN），非管理来源不得访问管理接口。 | 缺失 | 默认监听 `0.0.0.0:8080`（`src/config.h:13-14`、`src/app.cpp:2230-2232`），仅能通过 `http.host` 改绑定地址；无 CIDR 白名单、无管理面/业务面分离、无登录来源限制；`Protected` 只检查会话与权限（`src/app.cpp:2173-2210`）。 | 增加 `security.admin_allow_cidrs`，对 `/api/v1/users`、`/roles`、`/settings`、`/audit/purge`、`/storage/format`、`/system/*` 强制校验来源；支持独立管理端口；拒绝时写审计并告警。 |
 
