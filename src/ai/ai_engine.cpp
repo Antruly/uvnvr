@@ -12,6 +12,9 @@
 #if defined(UVNVR_ENABLE_INSPIREFACE) && UVNVR_ENABLE_INSPIREFACE
 #include "engine_inspireface.h"
 #endif
+#if defined(UVNVR_ENABLE_HYPERLPR) && UVNVR_ENABLE_HYPERLPR
+#include "engine_hyperlpr.h"
+#endif
 
 namespace uvnvr {
 namespace {
@@ -159,6 +162,20 @@ std::unique_ptr<AiEngine> CreateStub(const AiConfig& config, bool plate, std::st
 } // namespace
 
 std::unique_ptr<AiEngine> CreatePlateEngine(const AiConfig& config, std::string* error) {
+  if (StubRequested(config))
+    return CreateStub(config, true, error);
+
+#if defined(UVNVR_ENABLE_HYPERLPR) && UVNVR_ENABLE_HYPERLPR
+  {
+    std::string hyper_error;
+    std::unique_ptr<AiEngine> engine = CreateHyperLprPlateEngine(config, &hyper_error);
+    if (engine)
+      return engine;
+    std::fprintf(stderr,
+                 "ai: HyperLPR3 unavailable (%s); falling back to the stub plate engine\n",
+                 hyper_error.c_str());
+  }
+#endif
   return CreateStub(config, true, error);
 }
 
