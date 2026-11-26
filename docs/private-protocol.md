@@ -135,6 +135,7 @@ connection; this keeps the door open for a future multiplexing revision.
 | 0x0031 | `LIVE_ACK` | S → C | `liveAck` |
 | 0x0032 | `LIVE_FRAME` | S → C | binary, `STREAM` (§7.1) |
 | 0x0033 | `LIVE_CLOSE` | C → S | `liveClose` |
+| 0x0034 | `PTZ_CONTROL` | C → S | `ptzControl` |
 | 0x0040 | `DOWNLOAD_OPEN` | C → S | `downloadOpen` |
 | 0x0041 | `DOWNLOAD_BEGIN` | S → C | `downloadBegin` |
 | 0x0042 | `DOWNLOAD_CHUNK` | S → C | binary, `STREAM` (§7.2) |
@@ -376,6 +377,30 @@ chunk the server sends `DOWNLOAD_DONE` with `flags = RESPONSE | FIN`:
 Only finalized segments (`id > 0`, `active=false`) can be downloaded, matching
 the REST endpoint. `404 not_found` is returned for a missing row or file.
 
+### 7.3 PTZ_CONTROL
+
+`PTZ_CONTROL` (JSON, `opcode=0x0034`) drives the same ONVIF PTZ backend as the
+GB/T 28181 `DeviceControl` path. It requires `channel.manage`:
+
+```json
+{
+  "channelId": 1,
+  "action": "right",
+  "speed": 255,
+  "preset": 0
+}
+```
+
+`action` is one of `stop`, `right`, `left`, `up`, `down`, `up-right`,
+`up-left`, `down-right`, `down-left`, `zoom-in`, `zoom-out`, `set-preset`,
+`goto-preset`, `remove-preset`. `speed` is the 0..255 wire scale used by
+GB/T 28181; preset actions require a positive `preset`.
+
+The server queues the network call on a worker and replies after the camera
+answers: `200 {"channelId":1,"action":"right","ok":true}`, or `502
+ptz_failed` with the ONVIF error. Channels without an ONVIF endpoint fail
+with that error; no session or stream state is touched.
+
 ## 8. Relationship to REST API v1
 
 The private protocol is a second entry point to the same services, not a
@@ -390,6 +415,7 @@ reimplementation. The dispatcher in `src/app.cpp` calls the same
 | `RECORDING_LIST` | `GET /api/v1/recordings` | `playback.view` |
 | `LIVE_OPEN` | `POST /api/v1/streams/ticket` + `/ws/live` | `preview.view` |
 | `DOWNLOAD_OPEN` | `GET /api/v1/recordings/{id}/download` | `playback.download` |
+| `PTZ_CONTROL` | no REST equivalent (shared ONVIF PTZ backend) | `channel.manage` |
 
 Permissions are evaluated with the same `PermissionImplies` table as REST, so
 `preview`-scoped accounts behave identically on both entry points.

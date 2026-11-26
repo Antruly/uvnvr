@@ -554,6 +554,35 @@ bool DescribeCertificate(std::string_view certificate_pem, CertificateDetails* d
   return true;
 }
 
+bool CertificateFingerprintSm3(std::string_view certificate_pem, Bytes* digest,
+                               std::string* error) {
+  if (!digest) {
+    SetError(error, "certificate fingerprint output is null");
+    return false;
+  }
+  internal::X509Ptr certificate = internal::LoadCertificatePem(certificate_pem, error);
+  if (!certificate)
+    return false;
+  const int length = i2d_X509(certificate.get(), nullptr);
+  if (length <= 0) {
+    SetError(error, "cannot encode the certificate as DER: " + internal::OpenSslErrors());
+    return false;
+  }
+  Bytes der(static_cast<std::size_t>(length));
+  unsigned char* cursor = der.data();
+  if (i2d_X509(certificate.get(), &cursor) != length) {
+    SetError(error, "cannot encode the certificate as DER: " + internal::OpenSslErrors());
+    return false;
+  }
+  Bytes result = Sm3(der.data(), der.size());
+  if (result.size() != kSm3DigestSize) {
+    SetError(error, "cannot compute the certificate fingerprint");
+    return false;
+  }
+  *digest = std::move(result);
+  return true;
+}
+
 bool ValidateCertificateChain(std::string_view leaf_pem, std::string_view chain_pem,
                               std::string_view trusted_roots_pem, ChainValidationResult* result) {
   if (result)

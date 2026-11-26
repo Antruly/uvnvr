@@ -174,6 +174,8 @@ const char* OpcodeName(uint16_t opcode) {
     return "LIVE_FRAME";
   case kOpLiveClose:
     return "LIVE_CLOSE";
+  case kOpPtzControl:
+    return "PTZ_CONTROL";
   case kOpDownloadOpen:
     return "DOWNLOAD_OPEN";
   case kOpDownloadBegin:

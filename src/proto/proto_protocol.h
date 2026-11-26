@@ -41,6 +41,7 @@ enum Opcode : uint16_t {
   kOpLiveAck = 0x0031,
   kOpLiveFrame = 0x0032,
   kOpLiveClose = 0x0033,
+  kOpPtzControl = 0x0034,
   kOpDownloadOpen = 0x0040,
   kOpDownloadBegin = 0x0041,
   kOpDownloadChunk = 0x0042,

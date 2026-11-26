@@ -20,9 +20,25 @@ set(UVNVR_INSPIREFACE_ROOT "" CACHE PATH
     "InspireFace SDK root containing include/inspireface.h and lib/libInspireFace")
 option(UVNVR_ENABLE_GM_CRYPTO "Build the SM2/SM3/SM4 and certificate library (requires OpenSSL)"
        ON)
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 B-level video encryption module" OFF)
 # Audit hash chain, signed firmware packages and SM4 data-at-rest encryption.
 # Off by default: normal deployments keep their current storage format.
 option(UVNVR_ENABLE_SECURE "Build the audit-chain/firmware/storage-encryption module" OFF)
+# Self-hosted GB/T 28181 stack: SIP registration/MESSAGE dispatch, MANSCDP
+# codec, PS/RTP media and INVITE/BYE dialogs. Off by default: normal
+# deployments do not join a GB/T 28181 platform and no existing
+# preview/recording/ONVIF path changes when it is enabled.
+option(UVNVR_ENABLE_GB28181 "Build the GB/T 28181 SIP, MANSCDP and PS/RTP modules" OFF)
+# GB 35114 A-level/B-level video protection: SM3/SM2 frame signatures, VKEK
+# negotiation, SM4 stream encryption and the optional GM/T 0024 TLS adapter.
+# Off by default; requires the GM crypto library.
+option(UVNVR_ENABLE_GB35114 "Build the GB 35114 video security modules" OFF)
+# GM/T 0024 (TLCP) and RFC 8998 GM TLS 1.3 signalling adapter. OpenSSL 3 has
+# the SM algorithms but not the GB/T 38636 cipher suites; this backend needs
+# Tongsuo (Apache-2.0). Off by default so normal deployments are unchanged.
+option(UVNVR_ENABLE_GM_TLS "Build the GM/T 0024 signalling adapter (requires Tongsuo)" OFF)
+set(UVNVR_GM_TLS_ROOT "" CACHE PATH
+    "Tongsuo installation root containing include/openssl/ntls.h and lib[/64]/libssl")
 set(UVNVR_LIBUVCPP_ROOT "" CACHE PATH
     "Path to an unpacked libuvcpp 1.8.1 release archive (the archive route uses pkg-config)")
 
@@ -316,6 +332,210 @@ if(UVNVR_ENABLE_SECURE)
   endif()
 else()
   message(STATUS "secure: disabled by UVNVR_ENABLE_SECURE=OFF")
+endif()
+
+# GB/T 28181 stack: SIP registration/Digest/MESSAGE dispatch, MANSCDP codec,
+# MPEG-2 PS encapsulation (Appendix C), RTP/RTCP and the INVITE/BYE media
+# dialog. The SIP stack is self-hosted (no GPL/LGPL eXosip2). The library is
+# not linked into the server yet, so enabling it cannot change the existing
+# preview/recording/ONVIF paths.
+set(UVNVR_GB28181_ENABLED 0)
+if(UVNVR_ENABLE_GB28181)
+  set(UVNVR_GB28181_ENABLED 1)
+  add_library(uvnvr_gb28181 STATIC
+    src/gb28181/sip.cpp
+    src/gb28181/manscdp.cpp
+    src/gb28181/time.cpp
+    src/gb28181/ps.cpp
+    src/gb28181/rtp.cpp
+    src/gb28181/rtcp.cpp
+    src/gb28181/media_session.cpp
+    src/gb28181/ts_ps.cpp
+    src/gb28181/playback.cpp
+    src/gb28181/service.cpp
+  )
+  target_include_directories(uvnvr_gb28181 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(uvnvr_gb28181 PUBLIC OpenSSL::Crypto ${UVP_UVCPP_TARGET})
+  target_compile_definitions(uvnvr_gb28181 PUBLIC UVNVR_ENABLE_GB28181=1)
+  if(MSVC)
+    target_compile_options(uvnvr_gb28181 PRIVATE /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(uvnvr_gb28181 PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(WIN32)
+    # sip.cpp/rtp.cpp use Winsock directly; consumers of the static library
+    # need this as well, so it is PUBLIC.
+    target_link_libraries(uvnvr_gb28181 PUBLIC ws2_32)
+  endif()
+  # App wires the service only when UVNVR_ENABLE_GB28181 is on; with the
+  # default (OFF) the executable and its behaviour are unchanged.
+  target_link_libraries(uvnvr PRIVATE uvnvr_gb28181)
+
+  add_executable(sip_reg_cli tools/sip_reg_cli/main.cpp)
+  target_link_libraries(sip_reg_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(sip_reg_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET sip_reg_cli APPEND PROPERTY BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+
+  add_executable(gb28181_ps_cli tools/gb28181_ps_cli/main.cpp)
+  target_link_libraries(gb28181_ps_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(gb28181_ps_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+  add_executable(gb28181_session_cli tools/gb28181_session_cli/main.cpp)
+  target_link_libraries(gb28181_session_cli PRIVATE uvnvr_gb28181)
+  set_target_properties(gb28181_session_cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(UVNVR_LIBUVCPP_ROOT)
+    set_property(TARGET gb28181_session_cli APPEND PROPERTY BUILD_RPATH
+                 "${UVNVR_LIBUVCPP_ROOT}/lib")
+  endif()
+  message(STATUS "gb28181: enabled (SIP, MANSCDP, PS/RTP and media dialogs)")
+else()
+  message(STATUS "gb28181: disabled by UVNVR_ENABLE_GB28181=OFF")
+endif()
+
+# GB 35114 module: SM3 access-unit digests and SM2 device signatures (A level),
+# SM2/SM3 signature negotiation and SM2-encrypted VKEK distribution with
+# rotation/replay protection, plus SM4-CTR encryption of the H.264 elementary
+# stream (B level). It is a standalone library and is not linked into the
+# server, so enabling it does not change the existing
+# preview/recording/RTSP/ONVIF/private-protocol paths.
+set(UVNVR_GB35114_ENABLED 0)
+if(UVNVR_ENABLE_GB35114)
+  if(NOT UVNVR_GM_CRYPTO_ENABLED)
+    message(STATUS
+      "gb35114: requested but gm_crypto is unavailable; UVNVR_ENABLE_GB35114 is forced OFF")
+  else()
+    set(UVNVR_GB35114_ENABLED 1)
+    add_library(uvnvr_gb35114 STATIC
+      src/gb35114/sign.cpp
+      src/gb35114/vkek.cpp
+      src/gb35114/stream_keys.cpp
+      src/gb35114/es_crypto.cpp
+    )
+    target_include_directories(uvnvr_gb35114 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(uvnvr_gb35114 PUBLIC uvnvr_gm_crypto OpenSSL::Crypto)
+    target_compile_definitions(uvnvr_gb35114 PUBLIC UVNVR_ENABLE_GB35114=1)
+    if(MSVC)
+      target_compile_options(uvnvr_gb35114 PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(uvnvr_gb35114 PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(gb35114_verify tools/gb35114_verify/main.cpp)
+    target_link_libraries(gb35114_verify PRIVATE uvnvr_gb35114)
+    set_target_properties(gb35114_verify PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    install(TARGETS gb35114_verify RUNTIME DESTINATION bin)
+
+    add_executable(gb35114_cli tools/gb35114_cli/main.cpp)
+    target_link_libraries(gb35114_cli PRIVATE uvnvr_gb35114)
+    set_target_properties(gb35114_cli PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    install(TARGETS gb35114_cli RUNTIME DESTINATION bin)
+
+    # A-level -> B-level interop harness. It needs the GB/T 28181 RTP framing
+    # for the media path and uses POSIX UDP sockets, so it is built on
+    # non-Windows hosts when both compliance modules are enabled.
+    if(UVNVR_GB28181_ENABLED AND NOT WIN32)
+      add_executable(gb35114_interop tools/gb35114_interop/main.cpp)
+      target_link_libraries(gb35114_interop PRIVATE uvnvr_gb35114 uvnvr_gb28181)
+      set_target_properties(gb35114_interop PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+      if(UVNVR_LIBUVCPP_ROOT)
+        set_property(TARGET gb35114_interop APPEND PROPERTY BUILD_RPATH
+                     "${UVNVR_LIBUVCPP_ROOT}/lib")
+      endif()
+    endif()
+
+    message(STATUS
+      "gb35114: enabled (A-level signing + VKEK negotiation + B-level SM4, gb35114_verify/gb35114_cli)")
+  endif()
+else()
+  message(STATUS "gb35114: disabled by UVNVR_ENABLE_GB35114=OFF")
+endif()
+
+# GM/T 0024 signalling adapter. This is intentionally a standalone library and
+# CLI probe; it is not linked into the uvnvr server, so the existing RTSP,
+# ONVIF, private-protocol and HTTPS paths keep using the system OpenSSL. A
+# Tongsuo build is found explicitly by UVNVR_GM_TLS_ROOT (or TONGSUO_ROOT) to
+# avoid silently linking the system OpenSSL, which has no NTLS cipher suites.
+set(UVNVR_GM_TLS_ENABLED 0)
+if(UVNVR_ENABLE_GM_TLS)
+  set(_uvnvr_gm_tls_roots)
+  if(UVNVR_GM_TLS_ROOT)
+    list(APPEND _uvnvr_gm_tls_roots "${UVNVR_GM_TLS_ROOT}")
+  endif()
+  foreach(_uvnvr_gm_tls_env TONGSUO_ROOT TONGSUO_INSTALL_ROOT)
+    if(DEFINED ENV{${_uvnvr_gm_tls_env}} AND NOT "$ENV{${_uvnvr_gm_tls_env}}" STREQUAL "")
+      list(APPEND _uvnvr_gm_tls_roots "$ENV{${_uvnvr_gm_tls_env}}")
+    endif()
+  endforeach()
+
+  find_path(UVNVR_GM_TLS_INCLUDE_DIR NAMES openssl/ntls.h
+            PATHS ${_uvnvr_gm_tls_roots} PATH_SUFFIXES include NO_DEFAULT_PATH)
+  if(UVNVR_GM_TLS_INCLUDE_DIR)
+    get_filename_component(_uvnvr_gm_tls_prefix "${UVNVR_GM_TLS_INCLUDE_DIR}" DIRECTORY)
+    find_library(UVNVR_GM_TLS_SSL_LIBRARY NAMES ssl libssl
+                 PATHS "${_uvnvr_gm_tls_prefix}" PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
+    find_library(UVNVR_GM_TLS_CRYPTO_LIBRARY NAMES crypto libcrypto
+                 PATHS "${_uvnvr_gm_tls_prefix}" PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
+  endif()
+
+  if(UVNVR_GM_TLS_INCLUDE_DIR AND UVNVR_GM_TLS_SSL_LIBRARY AND UVNVR_GM_TLS_CRYPTO_LIBRARY)
+    # Confirm the headers really are Tongsuo (not stock OpenSSL, which lacks
+    # the GM/T 0024 cipher suites and the NTLS methods).
+    file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/opensslv.h" _uvnvr_gm_tls_version_header)
+    file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/opensslconf.h" _uvnvr_gm_tls_conf_header)
+    set(_uvnvr_gm_tls_config_header "")
+    if(EXISTS "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/configuration.h")
+      file(READ "${UVNVR_GM_TLS_INCLUDE_DIR}/openssl/configuration.h"
+           _uvnvr_gm_tls_config_header)
+    endif()
+    if(NOT _uvnvr_gm_tls_version_header MATCHES "TONGSUO_VERSION_MAJOR")
+      message(STATUS
+        "gm_tls: ${UVNVR_GM_TLS_INCLUDE_DIR} is not a Tongsuo installation; UVNVR_ENABLE_GM_TLS is forced OFF")
+    elseif(_uvnvr_gm_tls_conf_header MATCHES "OPENSSL_NO_NTLS" OR
+           _uvnvr_gm_tls_config_header MATCHES "define OPENSSL_NO_NTLS")
+      message(STATUS
+        "gm_tls: Tongsuo was built without NTLS; UVNVR_ENABLE_GM_TLS is forced OFF")
+    else()
+      find_package(Threads REQUIRED)
+      set(UVNVR_GM_TLS_ENABLED 1)
+      add_library(uvnvr_gm_tls STATIC src/gb35114/tls_gm.cpp)
+      target_include_directories(uvnvr_gm_tls
+        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src" "${UVNVR_GM_TLS_INCLUDE_DIR}")
+      target_link_libraries(uvnvr_gm_tls
+        PUBLIC "${UVNVR_GM_TLS_SSL_LIBRARY}"
+               "${UVNVR_GM_TLS_CRYPTO_LIBRARY}"
+               Threads::Threads
+               ${CMAKE_DL_LIBS})
+      if(WIN32)
+        target_link_libraries(uvnvr_gm_tls PUBLIC ws2_32 crypt32 bcrypt)
+      endif()
+      target_compile_definitions(uvnvr_gm_tls PUBLIC UVNVR_ENABLE_GM_TLS=1)
+      if(MSVC)
+        target_compile_options(uvnvr_gm_tls PRIVATE /W4 /permissive- /utf-8)
+      else()
+        target_compile_options(uvnvr_gm_tls PRIVATE -Wall -Wextra -Wpedantic)
+      endif()
+
+      add_executable(gm_tls_cli tools/gm_tls_cli/main.cpp)
+      target_link_libraries(gm_tls_cli PRIVATE uvnvr_gm_tls)
+      set_target_properties(gm_tls_cli PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+      message(STATUS
+        "gm_tls: enabled (Tongsuo ${UVNVR_GM_TLS_SSL_LIBRARY}, headers ${UVNVR_GM_TLS_INCLUDE_DIR})")
+    endif()
+  else()
+    message(STATUS
+      "gm_tls: Tongsuo not found; set UVNVR_GM_TLS_ROOT to its install prefix. UVNVR_ENABLE_GM_TLS is forced OFF")
+  endif()
+else()
+  message(STATUS "gm_tls: disabled by UVNVR_ENABLE_GM_TLS=OFF")
 endif()
 
 if(WIN32)

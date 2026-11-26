@@ -79,6 +79,12 @@ bool GenerateCsr(std::string_view private_key_pem, const CsrOptions& options, st
 bool DescribeCertificate(std::string_view certificate_pem, CertificateDetails* details,
                          std::string* error = nullptr);
 
+// SM3 digest of the certificate's DER encoding. This is the identity
+// fingerprint exchanged during GB 35114 negotiation so the platform can pick
+// the enrolled device certificate without sending the whole certificate.
+bool CertificateFingerprintSm3(std::string_view certificate_pem, Bytes* digest,
+                               std::string* error = nullptr);
+
 // Validates `leaf` against `trusted_roots`, using `chain_pem` as untrusted
 // intermediates. The result reports the verified chain length and, on failure,
 // the OpenSSL verification error. Returns true only when the chain is valid.
