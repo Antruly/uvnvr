@@ -219,3 +219,77 @@ jobs:
           ./build-gm/tests/gm_tls_test | tee "$RUNNER_TEMP/gm_tls.log"
           grep -q "cipher=ECDHE-SM2-SM4-CBC-SM3" "$RUNNER_TEMP/gm_tls.log"
           grep -q "cipher=TLS_SM4_GCM_SM3" "$RUNNER_TEMP/gm_tls.log"
+
+  windows-gm-tls:
+    name: Windows x64 (GM/T 0024 via Tongsuo)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-libuv
+            mingw-w64-x86_64-openssl
+            unzip
+
+      - name: Build Tongsuo
+        run: |
+          ok=0
+          for url in https://codeload.github.com/Tongsuo-Project/Tongsuo/zip/refs/heads/master \
+                     https://gitee.com/mirrors/Tongsuo/repository/archive/master.zip; do
+            for i in 1 2 3; do
+              rm -rf /tmp/tongsuo.zip /tmp/tongsuo-src
+              curl -fsSL --max-time 600 -o /tmp/tongsuo.zip "$url" || continue
+              if unzip -qt /tmp/tongsuo.zip >/dev/null 2>&1; then ok=1; break 2; fi
+            done
+          done
+          [ "$ok" = 1 ] || { echo "cannot download Tongsuo"; exit 1; }
+          mkdir -p /tmp/tongsuo-src && unzip -q /tmp/tongsuo.zip -d /tmp/tongsuo-src
+          SRC=$(find /tmp/tongsuo-src -maxdepth 1 -mindepth 1 -type d | head -1)
+          cd "$SRC"
+          ./config --prefix=/tmp/tongsuo-install enable-ntls no-tests no-docs
+          make -j"$(nproc)"
+          make install_sw
+          echo "TONGS=$(cygpath -w /tmp/tongsuo-install)" >> "$GITHUB_ENV"
+
+      - name: Fetch libuvcpp
+        run: |
+          curl -fL --retry 3 --max-time 300 -o /tmp/uvcpp.zip \
+            https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip
+          unzip -q /tmp/uvcpp.zip -d /tmp/uvcpp
+          echo "UVCPP=$(cygpath -w "$(find /tmp/uvcpp -maxdepth 1 -mindepth 1 -type d | head -1)")" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-gm -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUVNVR_LIBUVCPP_ROOT="$UVCPP" \
+            -DUVNVR_ENABLE_GM_TLS=ON -DUVNVR_GM_TLS_ROOT="$TONGS" \
+            -DOPENSSL_ROOT_DIR="$TONGS" \
+            -DUVNVR_ENABLE_GB28181=ON \
+            -DUVNVR_BUILD_TESTS=ON -DUVNVR_BUILD_SDK=OFF
+
+      - name: Build
+        run: cmake --build build-gm --parallel --target gm_tls_test sip_gm_tls_test
+
+      - name: GM TLS handshake test
+        run: |
+          ./build-gm/tests/gm_tls_test.exe | tee /tmp/gm.log
+          grep -q "cipher=ECDHE-SM2-SM4-CBC-SM3" /tmp/gm.log
+          ./build-gm/tests/sip_gm_tls_test.exe | tee /tmp/sip-gm.log
+          grep -q "registered=yes" /tmp/sip-gm.log
+          grep -q "all checks passed" /tmp/sip-gm.log
