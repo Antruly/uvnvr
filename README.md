@@ -286,6 +286,33 @@ Linux packages install under `/opt/uvnvr`; the systemd unit runs as `uvnvr` and 
 The web UI listens on port 8080 by default; complete first-run setup in the browser.
 See [`docs/deployment.md`](docs/deployment.md) for ports, data directories and service details.
 
+### Feature-complete builds
+
+The release packages keep the optional modules compiled out so a plain install
+stays small. A second, feature-complete variant is produced by the
+[`Full build`](.github/workflows/full-build.yml) workflow and attached to some
+releases as `uvnvr-*-full-*`:
+
+| Module | Default package | Full package |
+|---|---|---|
+| AI plate (HyperLPR3 + MNN) | stub | real engine |
+| AI face (InspireFace) | stub | real engine |
+| GB/T 28181 device stack | off | compiled in, idle until `gb28181.*` is set |
+| GB 35114 video security | off | compiled in |
+| Audit chain / signed firmware / SM4 at-rest | off | compiled in |
+
+The full package bundles OpenCV, MNN, InspireFace and the model packs
+(`models/hyperlpr3`, `models/face/Pikachu`). Point the settings at them:
+
+```text
+ai.plate.modelDir = <install>/models/hyperlpr3
+ai.face.modelPath = <install>/models/face/Pikachu
+```
+
+Verify the engines without enabling the pipeline: `POST /api/v1/ai/test`
+with `{"channelId":1,"type":"both"}` returns the engine name that actually ran
+and, when a real backend could not start, the reason in `engineError`.
+
 ## Repository layout
 
 ```
