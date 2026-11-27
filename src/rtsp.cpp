@@ -1280,6 +1280,16 @@ struct RtspServer::Impl {
       int64_t channel = 0;
       std::string stream;
       if (!ParsePath(request.url, &channel, &stream)) {
+        // A server-wide OPTIONS carries no media request, so answer it even
+        // when the path does not name a channel (clients and scanners probe
+        // the bare origin before they know the layout).
+        if (request.method == "OPTIONS") {
+          session->WriteTcp(
+              Response(200, "OK", cseq,
+                       "Public: OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN, GET_PARAMETER, "
+                       "SET_PARAMETER\r\n"));
+          continue;
+        }
         session->WriteTcp(Response(404, "Not Found", cseq, ""));
         break;
       }
