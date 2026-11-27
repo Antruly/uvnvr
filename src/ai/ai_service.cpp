@@ -2445,6 +2445,9 @@ json AiService::TestDetect(int64_t channel_id, const std::string& type, std::str
     std::unique_ptr<AiEngine> engine = CreateFaceEngine(engine_config, error);
     if (!engine)
       return json();
+    result["engine"] = engine->Name();
+    if (engine->Name() == std::string("stub") && error != nullptr && !error->empty())
+      result["engineError"] = *error;
     std::vector<AiFaceResult> results;
     if (!engine->DetectFaces(image, &results, error))
       return json();

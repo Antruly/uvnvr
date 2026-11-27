@@ -154,8 +154,9 @@ private:
 
 std::unique_ptr<AiEngine> CreateStub(const AiConfig& config, bool plate, std::string* error) {
   // Phase 2/3 replace this branch with HyperLPR3 / InspireFace selection.
-  if (error != nullptr)
-    error->clear();
+  // `error` is left untouched so a caller that fell back from a real engine
+  // still sees why.
+  (void)error;
   return std::make_unique<StubEngine>(StubRequested(config), plate);
 }
 
@@ -174,6 +175,8 @@ std::unique_ptr<AiEngine> CreatePlateEngine(const AiConfig& config, std::string*
     std::fprintf(stderr,
                  "ai: HyperLPR3 unavailable (%s); falling back to the stub plate engine\n",
                  hyper_error.c_str());
+    if (error != nullptr)
+      *error = hyper_error;
   }
 #endif
   return CreateStub(config, true, error);
@@ -192,6 +195,8 @@ std::unique_ptr<AiEngine> CreateFaceEngine(const AiConfig& config, std::string* 
     std::fprintf(stderr,
                  "ai: InspireFace unavailable (%s); falling back to the stub face engine\n",
                  inspire_error.c_str());
+    if (error != nullptr)
+      *error = inspire_error;
   }
 #endif
   return CreateStub(config, false, error);
