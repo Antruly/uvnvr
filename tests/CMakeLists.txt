@@ -146,6 +146,11 @@ if(UVNVR_GM_TLS_ENABLED)
     target_include_directories(sip_gm_tls_test PRIVATE
       "${UVNVR_GM_TLS_INCLUDE_DIR}" "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(sip_gm_tls_test PRIVATE uvnvr_gb28181 uvnvr_gm_tls)
+    if(WIN32)
+      # The loopback server uses Winsock directly; name it explicitly as the
+      # gm_tls_test target does.
+      target_link_libraries(sip_gm_tls_test PRIVATE ws2_32)
+    endif()
     if(UVNVR_LIBUVCPP_ROOT)
       set_property(TARGET sip_gm_tls_test APPEND PROPERTY
                    BUILD_RPATH "${UVNVR_LIBUVCPP_ROOT}/lib")
