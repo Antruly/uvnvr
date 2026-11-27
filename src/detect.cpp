@@ -483,6 +483,17 @@ bool DetectCamera(const std::string& host, int port, const std::string& username
     return true;
   };
 
+  // Hikvision keeps RTSP on 554 by default but plenty of units are configured
+  // for 8000 or 10554; probe the common ports instead of assuming.
+  const auto detect_rtsp_port = [&](const std::vector<int>& candidates) {
+    for (const int candidate : candidates) {
+      std::string probe_error;
+      if (ProbeRtspOptions(host_value, candidate, username, password, &probe_error))
+        return candidate;
+    }
+    return 554;
+  };
+
   const auto try_hikvision = [&](int http_port) {
     BrandDeviceInfo info;
     std::string brand_error;
@@ -499,8 +510,11 @@ bool DetectCamera(const std::string& host, int port, const std::string& username
     result->serial = info.serial;
     result->device_name = info.name;
     result->name_source = info.name.empty() ? "" : "isapi";
-    result->rtsp_port = 554;
+    result->rtsp_port = detect_rtsp_port({554, 8000, 10554, 8554});
     result->stream_uris.clear();
+    result->stream_uris.push_back("rtsp://" + host_value + ":" +
+                                  std::to_string(result->rtsp_port) +
+                                  "/Streaming/Channels/101");
     return true;
   };
 
