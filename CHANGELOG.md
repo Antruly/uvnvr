@@ -4,6 +4,16 @@ All notable changes to UvNVR are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `POST /api/v1/ai/test` reports the engine that actually ran: the face branch
+  never wrote its name into the response, so a working InspireFace session still
+  looked like the stub.
+- When a real backend cannot be created the response now carries the reason in
+  `engineError` instead of only printing it to stderr.
+
 ## [0.20.1] - 2026-11-27
 
 ### Added
