@@ -13,9 +13,9 @@
 // makes the client's SSL_read hit WantRead between records and its SSL_write
 // return WantWrite until the peer drains the socket.
 //
-// The loopback server uses POSIX sockets; on Windows the test reports a skip
-// so the GM TLS module is still built and the existing gm_tls_test covers the
-// handshake there.
+// The loopback server uses plain sockets: POSIX on Unix and Winsock on
+// Windows, with a small adapter below hiding the differences so the same
+// assertions run on both platforms.
 
 #include "gb28181/sip.h"
 #include "gb35114/tls_gm.h"
@@ -43,13 +43,19 @@
 #include <string>
 #include <thread>
 
-#ifndef _WIN32
-
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// wincrypt.h (pulled in by the Winsock headers) defines X509_NAME as a macro
+// for a certificate-name string type, which collides with OpenSSL's typedef.
+#undef X509_NAME
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -76,6 +82,95 @@ void CheckContains(const std::string& value, const std::string& needle, const st
 
 void SleepMs(int milliseconds) {
   std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+}
+
+// ---------------------------------------------------------------------------
+// Socket adapter (POSIX / Winsock)
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+using SockLen = int;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+#else
+using SocketHandle = int;
+using SockLen = socklen_t;
+constexpr SocketHandle kInvalidSocket = -1;
+#endif
+
+// Winsock has to be initialised process-wide on Windows; POSIX sockets need no
+// equivalent. Keeping it in an RAII object pairs every WSAStartup with a
+// WSACleanup even when a test bails out early.
+struct WinsockGuard {
+  WinsockGuard(const WinsockGuard&) = delete;
+  WinsockGuard& operator=(const WinsockGuard&) = delete;
+#ifdef _WIN32
+  WinsockGuard() : ready(WSAStartup(MAKEWORD(2, 2), &data) == 0) {}
+  ~WinsockGuard() {
+    if (ready)
+      WSACleanup();
+  }
+  bool ready = false;
+  WSADATA data{};
+#else
+  WinsockGuard() = default;
+  ~WinsockGuard() = default;
+  bool ready = true;
+#endif
+};
+
+void CloseSocket(SocketHandle socket) {
+#ifdef _WIN32
+  ::closesocket(socket);
+#else
+  ::close(socket);
+#endif
+}
+
+int SessionDescriptor(SocketHandle socket) {
+  // The adapter's public API stores the descriptor in an int, matching OpenSSL's
+  // SSL_set_fd()/BIO_new_socket() signatures on both platforms.
+  return static_cast<int>(socket);
+}
+
+// The last socket call was interrupted by a signal and should be retried.
+bool SocketInterrupted() {
+#ifdef _WIN32
+  return WSAGetLastError() == WSAEINTR;
+#else
+  return errno == EINTR;
+#endif
+}
+
+// setsockopt() takes const char* on Windows and const void* elsewhere.
+int SetSocketOption(SocketHandle socket, int level, int name, const void* value, int length) {
+#ifdef _WIN32
+  return ::setsockopt(socket, level, name, reinterpret_cast<const char*>(value), length);
+#else
+  return ::setsockopt(socket, level, name, value, static_cast<socklen_t>(length));
+#endif
+}
+
+// Winsock takes an int length and returns an int; POSIX takes/returns a
+// size_t/ssize_t. Every buffer in this test is far below INT_MAX.
+int ReceiveSome(SocketHandle socket, char* buffer, std::size_t size) {
+  return static_cast<int>(::recv(socket, buffer, static_cast<int>(size), 0));
+}
+
+int SendSome(SocketHandle socket, const char* buffer, std::size_t size) {
+  return static_cast<int>(::send(socket, buffer, static_cast<int>(size), 0));
+}
+
+void SetReceiveTimeout(SocketHandle socket, int milliseconds) {
+#ifdef _WIN32
+  const DWORD timeout = static_cast<DWORD>(milliseconds);
+  SetSocketOption(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#else
+  timeval timeout{};
+  timeout.tv_sec = milliseconds / 1000;
+  timeout.tv_usec = (milliseconds % 1000) * 1000;
+  SetSocketOption(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -275,26 +370,27 @@ GmTlsCredentials MakeCredentials(const Identity& ca, const Leaf& signing, const 
 // Loopback registrar
 // ---------------------------------------------------------------------------
 
-int CreateListener(std::uint16_t* port) {
-  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (listener < 0)
-    return -1;
+SocketHandle CreateListener(std::uint16_t* port) {
+  const SocketHandle listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (listener == kInvalidSocket)
+    return kInvalidSocket;
   int reuse = 1;
-  ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  SetSocketOption(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
   sockaddr_in address{};
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = 0;
-  if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+  if (::bind(listener, reinterpret_cast<sockaddr*>(&address),
+             static_cast<SockLen>(sizeof(address))) != 0 ||
       ::listen(listener, 1) != 0) {
-    ::close(listener);
-    return -1;
+    CloseSocket(listener);
+    return kInvalidSocket;
   }
-  socklen_t length = sizeof(address);
+  SockLen length = static_cast<SockLen>(sizeof(address));
   if (::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
-    ::close(listener);
-    return -1;
+    CloseSocket(listener);
+    return kInvalidSocket;
   }
   *port = ntohs(address.sin_port);
   return listener;
@@ -318,21 +414,21 @@ std::string MakeOkResponse(const SipMessage& request) {
 
 // A blocking transport wrapper used only by the test server thread.
 struct PeerIo {
-  int fd = -1;
+  SocketHandle fd = kInvalidSocket;
   bool tls = false;
   std::unique_ptr<GmTlsSession> session;
 
   bool Read(char* buffer, std::size_t size, std::size_t* received) {
     if (!tls) {
       for (;;) {
-        const ssize_t got = ::recv(fd, buffer, size, 0);
+        const int got = ReceiveSome(fd, buffer, size);
         if (got > 0) {
           *received = static_cast<std::size_t>(got);
           return true;
         }
         if (got == 0)
           return false;
-        if (errno == EINTR)
+        if (SocketInterrupted())
           continue;
         return false;
       }
@@ -356,12 +452,12 @@ struct PeerIo {
     std::size_t offset = 0;
     while (offset < size) {
       if (!tls) {
-        const ssize_t sent = ::send(fd, bytes + offset, size - offset, 0);
+        const int sent = SendSome(fd, bytes + offset, size - offset);
         if (sent > 0) {
           offset += static_cast<std::size_t>(sent);
           continue;
         }
-        if (sent < 0 && errno == EINTR)
+        if (sent < 0 && SocketInterrupted())
           continue;
         return false;
       }
@@ -411,18 +507,16 @@ struct ServerOptions {
   std::shared_ptr<GmTlsContext> context;
 };
 
-void RunServer(int listener, const ServerOptions& options, ServerResult* output) {
+void RunServer(SocketHandle listener, const ServerOptions& options, ServerResult* output) {
   ServerResult& result = *output;
-  const int fd = ::accept(listener, nullptr, nullptr);
-  if (fd < 0) {
+  const SocketHandle fd = ::accept(listener, nullptr, nullptr);
+  if (fd == kInvalidSocket) {
     result.error = "accept failed";
     return;
   }
   int nodelay = 1;
-  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-  timeval timeout{};
-  timeout.tv_sec = 15;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  SetSocketOption(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+  SetReceiveTimeout(fd, 15000);
 
   PeerIo peer;
   peer.fd = fd;
@@ -430,15 +524,15 @@ void RunServer(int listener, const ServerOptions& options, ServerResult* output)
   if (options.tls) {
     std::string error;
     peer.session = std::make_unique<GmTlsSession>(
-        GmTlsSession::Accept(options.context, fd, &error));
+        GmTlsSession::Accept(options.context, SessionDescriptor(fd), &error));
     if (!error.empty()) {
       result.error = error;
-      ::close(fd);
+      CloseSocket(fd);
       return;
     }
     if (HandshakeBlocking(*peer.session, &error) != GmTlsStatus::Ok) {
       result.error = "handshake: " + error;
-      ::close(fd);
+      CloseSocket(fd);
       return;
     }
     result.protocol = peer.session->NegotiatedProtocol();
@@ -551,7 +645,7 @@ void RunServer(int listener, const ServerOptions& options, ServerResult* output)
     result.error.clear();
   if (peer.tls && peer.session)
     peer.session->Shutdown(nullptr);
-  ::close(fd);
+  CloseSocket(fd);
 }
 
 // ---------------------------------------------------------------------------
@@ -611,9 +705,9 @@ void DrainLoop(uvcpp::uvcpp_loop* loop) {
 void TestTlsRegistration(const Authority& authority, const Leaf& signing,
                          const Leaf& encryption) {
   std::uint16_t port = 0;
-  const int listener = CreateListener(&port);
-  Check(listener >= 0, "tls: loopback listener");
-  if (listener < 0)
+  const SocketHandle listener = CreateListener(&port);
+  Check(listener != kInvalidSocket, "tls: loopback listener");
+  if (listener == kInvalidSocket)
     return;
 
   GmTlsOptions options;
@@ -625,7 +719,7 @@ void TestTlsRegistration(const Authority& authority, const Leaf& signing,
       MakeCredentials(authority.identity, signing, encryption, true), options, &error);
   Check(context != nullptr, "tls: server context (" + error + ")");
   if (!context) {
-    ::close(listener);
+    CloseSocket(listener);
     return;
   }
 
@@ -694,7 +788,7 @@ void TestTlsRegistration(const Authority& authority, const Leaf& signing,
   ua.Stop();
   DrainLoop(&loop);
   server.join();
-  ::close(listener);
+  CloseSocket(listener);
 
   Check(registered.load(), "tls: registered callback fired");
   Check(observed.cipher.find("ECDHE-SM2-SM4-CBC-SM3") != std::string::npos,
@@ -722,9 +816,9 @@ void TestTlsRegistration(const Authority& authority, const Leaf& signing,
 void TestPlainTcpRegistration(const Authority& authority, const Leaf& signing,
                               const Leaf& encryption) {
   std::uint16_t port = 0;
-  const int listener = CreateListener(&port);
-  Check(listener >= 0, "tcp: loopback listener");
-  if (listener < 0)
+  const SocketHandle listener = CreateListener(&port);
+  Check(listener != kInvalidSocket, "tcp: loopback listener");
+  if (listener == kInvalidSocket)
     return;
 
   ServerOptions server_options;
@@ -758,7 +852,7 @@ void TestPlainTcpRegistration(const Authority& authority, const Leaf& signing,
   ua.Stop();
   DrainLoop(&loop);
   server.join();
-  ::close(listener);
+  CloseSocket(listener);
 
   Check(registered.load(), "tcp: registered callback fired (regression)");
   Check(cipher.empty(), "tcp: no TLS parameters on a plaintext transport");
@@ -786,7 +880,21 @@ void TestMissingCredentials() {
 }  // namespace
 
 int main() {
+  const WinsockGuard winsock;
+  Check(winsock.ready, "winsock: initialise");
+#ifdef _WIN32
+  // The libuvcpp release archive statically embeds libuv in libuvcpp.dll,
+  // while the GB/T 28181 transport links libuv.dll directly.  Each copy runs
+  // its one-time initialisation (Winsock and the ntdll function table) from
+  // uv_loop_init(), so the shared loop must not be used until libuv.dll has
+  // seen at least one loop.  Discard the probe loop immediately afterwards.
+  uv_loop_t probe;
+  if (uv_loop_init(&probe) == 0)
+    uv_loop_close(&probe);
+#endif
+#ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
 
   Authority authority;
   Leaf signing;
@@ -809,12 +917,3 @@ int main() {
   std::fprintf(stderr, "sip_gm_tls: %d check(s) failed\n", failures);
   return 1;
 }
-
-#else  // _WIN32
-
-int main() {
-  std::printf("sip_gm_tls: skipped on Windows (POSIX loopback server)\n");
-  return 0;
-}
-
-#endif  // _WIN32
